@@ -1,0 +1,41 @@
+# Training configuration for distilroberta-nlp-en
+# Multi-task: NER (CoNLL-03) + POS (UD EWT) + Dep (UD EWT, dep2label encoding)
+
+model:
+  encoder: "distilroberta-base"
+  max_length: 128
+  dropout: 0.1
+
+data:
+  ud_train: "data/ud-english-ewt/en_ewt-ud-train.conllu"
+  ud_dev: "data/ud-english-ewt/en_ewt-ud-dev.conllu"
+  ud_test: "data/ud-english-ewt/en_ewt-ud-test.conllu"
+  conll_dataset: "conll2003"  # loaded via HuggingFace Datasets
+
+training:
+  epochs: 10
+  batch_size: 16
+  learning_rate: 5.0e-5
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  # Multi-task loss weights
+  ner_loss_weight: 1.0
+  pos_loss_weight: 1.0
+  dep_loss_weight: 1.0
+  # Task alternation: how many batches of each task per cycle
+  batches_per_task: 1
+
+dep2label:
+  # Encoding scheme for dependency parsing as token classification
+  # Format: {signed_offset}@{relation}@{head_UPOS}
+  # Example: +1@nsubj@VERB means "my head is the 1st VERB to the right, relation nsubj"
+  encoding: "rel-pos"
+
+output:
+  dir: "outputs/distilroberta-nlp-en"
+  save_every_epoch: true
+
+publish:
+  hf_org: "dragonscale-ai"
+  hf_name: "uniko-distilroberta-nlp-en"

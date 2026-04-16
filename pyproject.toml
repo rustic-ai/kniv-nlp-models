@@ -1,0 +1,30 @@
+[project]
+name = "uniko-nlp-models"
+version = "0.1.0"
+description = "Multi-task NLP model training for uniko cognitive memory system"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.2",
+    "transformers>=4.40",
+    "datasets>=2.18",
+    "optimum[onnxruntime]>=1.18",
+    "onnxruntime>=1.17",
+    "conllu>=4.5",
+    "seqeval>=1.2",
+    "pyyaml>=6.0",
+    "huggingface-hub>=0.22",
+    "accelerate>=0.28",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
