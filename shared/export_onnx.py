@@ -24,13 +24,14 @@ def export_to_onnx(model, tokenizer, output_path: Path, max_length: int = 128):
         (dummy_input_ids, dummy_attention_mask),
         str(output_path / "model.onnx"),
         input_names=["input_ids", "attention_mask"],
-        output_names=["ner_logits", "pos_logits", "dep_logits"],
+        output_names=["ner_logits", "pos_logits", "dep_logits", "cls_logits"],
         dynamic_axes={
             "input_ids": {0: "batch_size", 1: "sequence_length"},
             "attention_mask": {0: "batch_size", 1: "sequence_length"},
             "ner_logits": {0: "batch_size", 1: "sequence_length"},
             "pos_logits": {0: "batch_size", 1: "sequence_length"},
             "dep_logits": {0: "batch_size", 1: "sequence_length"},
+            "cls_logits": {0: "batch_size"},
         },
         opset_version=14,
     )
@@ -71,7 +72,7 @@ def validate_onnx(onnx_path: Path, model, tokenizer, test_text: str = "Caroline 
     )
 
     # Compare outputs
-    for i, name in enumerate(["ner_logits", "pos_logits", "dep_logits"]):
+    for i, name in enumerate(["ner_logits", "pos_logits", "dep_logits", "cls_logits"]):
         pt_out = pt_outputs[name].numpy()
         ort_out = ort_outputs[i]
         max_diff = np.max(np.abs(pt_out - ort_out))
