@@ -1,5 +1,7 @@
 """Train the multi-task NLP model on UD EWT + CoNLL-2003.
 
+Four tasks: NER, POS, dependency parsing (dep2label), sentence classification.
+
 Usage:
     python models/distilroberta-nlp-en/train.py
 """
@@ -29,7 +31,7 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
-# ── Dataset ───────────────────────────────────────────────────────
+# ── Token-level dataset ──────────────────────────────────────────
 
 class TokenClassificationDataset(Dataset):
     """Dataset for token classification with subword alignment."""
@@ -56,7 +58,6 @@ class TokenClassificationDataset(Dataset):
         words = example["words"]
         labels = example[self.label_key]
 
-        # Tokenize with word-level alignment
         encoding = self.tokenizer(
             words,
             is_split_into_words=True,
@@ -72,13 +73,11 @@ class TokenClassificationDataset(Dataset):
         prev_word_id = None
         for word_id in word_ids:
             if word_id is None:
-                aligned_labels.append(-100)  # Ignore special tokens
+                aligned_labels.append(-100)
             elif word_id != prev_word_id:
-                # First subword of a word: use the label
                 label_str = labels[word_id] if word_id < len(labels) else "O"
                 aligned_labels.append(self.label_map.get(label_str, 0))
             else:
-                # Subsequent subwords: ignore in loss
                 aligned_labels.append(-100)
             prev_word_id = word_id
 
@@ -89,12 +88,55 @@ class TokenClassificationDataset(Dataset):
         }
 
 
+# ── Sequence-level dataset ────────────────────────────────────────
+
+class SequenceClassificationDataset(Dataset):
+    """Dataset for sentence-level classification (CLS head)."""
+
+    def __init__(
+        self,
+        examples: list[dict],
+        tokenizer,
+        label_map: dict[str, int],
+        max_length: int = 128,
+    ):
+        self.examples = examples
+        self.tokenizer = tokenizer
+        self.label_map = label_map
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.examples)
+
+    def __getitem__(self, idx):
+        example = self.examples[idx]
+        text = example.get("text", " ".join(example["words"]))
+        cls_label = example["cls_label"]
+
+        encoding = self.tokenizer(
+            text,
+            max_length=self.max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+
+        return {
+            "input_ids": encoding["input_ids"].squeeze(0),
+            "attention_mask": encoding["attention_mask"].squeeze(0),
+            "labels": torch.tensor(self.label_map[cls_label], dtype=torch.long),
+        }
+
+
 # ── Training loop ─────────────────────────────────────────────────
 
 def train():
     config = load_config()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+    if device.type == "cuda":
+        print(f"  GPU: {torch.cuda.get_device_name()}")
+        print(f"  VRAM: {torch.cuda.get_device_properties(0).total_mem / 1024**3:.1f} GB")
 
     # Load label vocabularies
     with open(DATA_DIR / "label_vocabs.json") as f:
@@ -103,10 +145,12 @@ def train():
     ner_labels = vocabs["ner_labels"]
     pos_labels = vocabs["pos_labels"]
     dep_labels = vocabs["dep_labels"]
+    cls_labels = vocabs["cls_labels"]
 
     ner_map = {l: i for i, l in enumerate(ner_labels)}
     pos_map = {l: i for i, l in enumerate(pos_labels)}
     dep_map = {l: i for i, l in enumerate(dep_labels)}
+    cls_map = {l: i for i, l in enumerate(cls_labels)}
 
     # Load data
     with open(DATA_DIR / "conll_train.json") as f:
@@ -118,15 +162,20 @@ def train():
     max_length = config["model"]["max_length"]
     tokenizer = AutoTokenizer.from_pretrained(encoder_name)
 
-    # Create datasets
+    # Create datasets — 4 tasks
     ner_dataset = TokenClassificationDataset(conll_train, tokenizer, ner_map, "ner_tags", max_length)
     pos_dataset = TokenClassificationDataset(ud_train, tokenizer, pos_map, "pos_tags", max_length)
     dep_dataset = TokenClassificationDataset(ud_train, tokenizer, dep_map, "dep_labels", max_length)
+
+    # CLS dataset: combine UD + CoNLL examples (both have cls_label)
+    cls_examples = ud_train + conll_train
+    cls_dataset = SequenceClassificationDataset(cls_examples, tokenizer, cls_map, max_length)
 
     batch_size = config["training"]["batch_size"]
     ner_loader = DataLoader(ner_dataset, batch_size=batch_size, shuffle=True)
     pos_loader = DataLoader(pos_dataset, batch_size=batch_size, shuffle=True)
     dep_loader = DataLoader(dep_dataset, batch_size=batch_size, shuffle=True)
+    cls_loader = DataLoader(cls_dataset, batch_size=batch_size, shuffle=True)
 
     # Create model
     model = MultiTaskNLPModel(
@@ -134,8 +183,12 @@ def train():
         ner_labels=ner_labels,
         pos_labels=pos_labels,
         dep_labels=dep_labels,
+        cls_labels=cls_labels,
         dropout=config["model"]["dropout"],
     ).to(device)
+
+    param_count = sum(p.numel() for p in model.parameters())
+    print(f"Model parameters: {param_count:,}")
 
     # Optimizer and scheduler
     optimizer = torch.optim.AdamW(
@@ -144,30 +197,46 @@ def train():
         weight_decay=config["training"]["weight_decay"],
     )
 
-    total_steps = config["training"]["epochs"] * (len(ner_loader) + len(pos_loader) + len(dep_loader))
+    total_steps = config["training"]["epochs"] * (
+        len(ner_loader) + len(pos_loader) + len(dep_loader) + len(cls_loader)
+    )
     warmup_steps = int(total_steps * config["training"]["warmup_ratio"])
     scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
 
-    loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    token_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    seq_loss_fn = nn.CrossEntropyLoss()
 
-    # Training
-    ner_weight = config["training"]["ner_loss_weight"]
-    pos_weight = config["training"]["pos_loss_weight"]
-    dep_weight = config["training"]["dep_loss_weight"]
+    # Task weights
+    task_weights = {
+        "ner": config["training"]["ner_loss_weight"],
+        "pos": config["training"]["pos_loss_weight"],
+        "dep": config["training"]["dep_loss_weight"],
+        "cls": config["training"]["cls_loss_weight"],
+    }
 
     output_dir = Path(config["output"]["dir"])
+
+    print(f"\nTraining for {config['training']['epochs']} epochs")
+    print(f"  NER batches/epoch: {len(ner_loader)}")
+    print(f"  POS batches/epoch: {len(pos_loader)}")
+    print(f"  Dep batches/epoch: {len(dep_loader)}")
+    print(f"  CLS batches/epoch: {len(cls_loader)}")
+    print(f"  Total steps: {total_steps}")
+    print()
 
     for epoch in range(config["training"]["epochs"]):
         model.train()
         total_loss = 0.0
+        task_losses = {"ner": 0.0, "pos": 0.0, "dep": 0.0, "cls": 0.0}
         step_count = 0
 
         # Interleave task batches
-        ner_iter = iter(ner_loader)
-        pos_iter = iter(pos_loader)
-        dep_iter = iter(dep_loader)
-
-        active_tasks = {"ner": ner_iter, "pos": pos_iter, "dep": dep_iter}
+        active_tasks = {
+            "ner": iter(ner_loader),
+            "pos": iter(pos_loader),
+            "dep": iter(dep_loader),
+            "cls": iter(cls_loader),
+        }
 
         while active_tasks:
             for task_name in list(active_tasks.keys()):
@@ -183,13 +252,16 @@ def train():
 
                 outputs = model(input_ids, attention_mask)
 
-                logits_key = f"{task_name}_logits"
-                logits = outputs[logits_key]
-                loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
+                # Compute loss based on task type
+                if task_name == "cls":
+                    # Sequence classification: labels are [batch], logits are [batch, num_cls]
+                    loss = seq_loss_fn(outputs["cls_logits"], labels)
+                else:
+                    # Token classification: labels are [batch, seq], logits are [batch, seq, num_labels]
+                    logits = outputs[f"{task_name}_logits"]
+                    loss = token_loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
 
-                # Apply task weight
-                weight = {"ner": ner_weight, "pos": pos_weight, "dep": dep_weight}[task_name]
-                weighted_loss = loss * weight
+                weighted_loss = loss * task_weights[task_name]
 
                 optimizer.zero_grad()
                 weighted_loss.backward()
@@ -198,10 +270,17 @@ def train():
                 scheduler.step()
 
                 total_loss += weighted_loss.item()
+                task_losses[task_name] += loss.item()
                 step_count += 1
 
         avg_loss = total_loss / max(step_count, 1)
-        print(f"Epoch {epoch + 1}/{config['training']['epochs']} - Loss: {avg_loss:.4f}")
+        task_avg = {k: v / max(step_count // 4, 1) for k, v in task_losses.items()}
+        print(
+            f"Epoch {epoch + 1}/{config['training']['epochs']} — "
+            f"Loss: {avg_loss:.4f} "
+            f"[NER: {task_avg['ner']:.4f}, POS: {task_avg['pos']:.4f}, "
+            f"Dep: {task_avg['dep']:.4f}, CLS: {task_avg['cls']:.4f}]"
+        )
 
         if config["output"]["save_every_epoch"]:
             epoch_dir = output_dir / f"epoch-{epoch + 1}"

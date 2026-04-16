@@ -1,5 +1,5 @@
 # Training configuration for distilroberta-nlp-en
-# Multi-task: NER (CoNLL-03) + POS (UD EWT) + Dep (UD EWT, dep2label encoding)
+# Multi-task: NER (CoNLL-03) + POS (UD EWT) + Dep (UD EWT) + CLS (intent)
 
 model:
   encoder: "distilroberta-base"
@@ -23,6 +23,7 @@ training:
   ner_loss_weight: 1.0
   pos_loss_weight: 1.0
   dep_loss_weight: 1.0
+  cls_loss_weight: 0.5  # lower weight — less training data than NER/POS/dep
   # Task alternation: how many batches of each task per cycle
   batches_per_task: 1
 
@@ -31,6 +32,21 @@ dep2label:
   # Format: {signed_offset}@{relation}@{head_UPOS}
   # Example: +1@nsubj@VERB means "my head is the 1st VERB to the right, relation nsubj"
   encoding: "rel-pos"
+
+classification:
+  # Sentence-level intent/type classification
+  # Labels: what kind of utterance this is
+  labels:
+    - statement        # declarative factual content ("Caroline works at the hospital")
+    - question         # genuine question ("Where is the store?")
+    - question_fact    # question embedding factual content ("Did you know she went to Paris?")
+    - command          # imperative / request ("Show me the report")
+    - greeting         # social opener ("Hey!", "Hi there")
+    - filler           # reaction / backchannel ("lol", "Wow!", "Sure thing", "Sounds good")
+    - acknowledgment   # agreement / confirmation ("OK", "Got it", "Right")
+  # Bootstrap: use rule-based labeling on UD EWT sentences, then manually
+  # review a sample.  The UD EWT text field often has genre metadata
+  # (reviews, emails, answers, newsgroups) that helps with labeling.
 
 output:
   dir: "outputs/distilroberta-nlp-en"
