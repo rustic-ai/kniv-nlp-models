@@ -24,6 +24,10 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.4",
 ]
+eval = [
+    "spacy>=3.7",
+    "scikit-learn>=1.4",
+]
 
 [build-system]
 requires = ["hatchling"]
