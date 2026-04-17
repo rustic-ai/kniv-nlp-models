@@ -284,7 +284,7 @@ def train():
     print(f"Device: {device}")
     if device.type == "cuda":
         print(f"  GPU: {torch.cuda.get_device_name()}")
-        print(f"  VRAM: {torch.cuda.get_device_properties(0).total_mem / 1024**3:.1f} GB")
+        print(f"  VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
 
     # Load label vocabularies
     with open(DATA_DIR / "label_vocabs.json") as f:
@@ -314,7 +314,7 @@ def train():
 
     encoder_name = config["model"]["encoder"]
     max_length = config["model"]["max_length"]
-    tokenizer = AutoTokenizer.from_pretrained(encoder_name)
+    tokenizer = AutoTokenizer.from_pretrained(encoder_name, add_prefix_space=True)
 
     # Train datasets
     batch_size = config["training"]["batch_size"]

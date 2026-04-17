@@ -92,7 +92,7 @@ def main():
     # Load model
     model = MultiTaskNLPModel.load(str(args.model_dir), args.encoder).to(device)
     model.eval()
-    tokenizer = AutoTokenizer.from_pretrained(str(args.model_dir))
+    tokenizer = AutoTokenizer.from_pretrained(str(args.model_dir), add_prefix_space=True)
 
     with open(DATA_DIR / "label_vocabs.json") as f:
         vocabs = json.load(f)
@@ -106,11 +106,14 @@ def main():
 
     gold_ner, pred_ner = [], []
     for ex in conll_test:
-        gold_ner.append(ex["ner_tags"])
         pred = predict_token_labels(
             model, tokenizer, ex["words"], vocabs["ner_labels"], "ner_logits", device,
         )
-        pred_ner.append(pred)
+        gold = ex["ner_tags"]
+        # Align lengths: truncation may shorten pred
+        min_len = min(len(gold), len(pred))
+        gold_ner.append(gold[:min_len])
+        pred_ner.append(pred[:min_len])
 
     results["ner"] = evaluate_ner(gold_ner, pred_ner)
 
@@ -121,11 +124,13 @@ def main():
 
     gold_pos, pred_pos = [], []
     for ex in ud_test:
-        gold_pos.append(ex["pos_tags"])
         pred = predict_token_labels(
             model, tokenizer, ex["words"], vocabs["pos_labels"], "pos_logits", device,
         )
-        pred_pos.append(pred)
+        gold = ex["pos_tags"]
+        min_len = min(len(gold), len(pred))
+        gold_pos.append(gold[:min_len])
+        pred_pos.append(pred[:min_len])
 
     results["pos"] = evaluate_pos(gold_pos, pred_pos)
 
@@ -135,21 +140,26 @@ def main():
     gold_rels_all, pred_rels_all = [], []
 
     for ex in ud_test:
-        # Predict dep2label tags
         dep_preds = predict_token_labels(
             model, tokenizer, ex["words"], vocabs["dep_labels"], "dep_logits", device,
         )
-        # Also need POS tags for decoding — use gold POS for now
-        # (in production, would use predicted POS)
+        # Truncate dep preds to match word count (truncation may shorten)
+        n = min(len(dep_preds), len(ex["words"]))
+        dep_preds = dep_preds[:n]
+        pos_tags = ex["pos_tags"][:n]
         try:
-            pred_heads, pred_rels = decode_sentence(dep_preds, ex["pos_tags"])
+            pred_heads, pred_rels = decode_sentence(dep_preds, pos_tags)
         except Exception:
-            pred_heads = [-1] * len(ex["words"])
-            pred_rels = ["_"] * len(ex["words"])
+            pred_heads = [-1] * n
+            pred_rels = ["_"] * n
 
-        gold_heads_all.append(ex["heads"])
+        gold_h = ex["heads"][:n]
+        gold_r = ex["deprels"][:n]
+        pred_heads = pred_heads[:n]
+        pred_rels = pred_rels[:n]
+        gold_heads_all.append(gold_h)
         pred_heads_all.append(pred_heads)
-        gold_rels_all.append(ex["deprels"])
+        gold_rels_all.append(gold_r)
         pred_rels_all.append(pred_rels)
 
     results["dep"] = evaluate_dep(gold_heads_all, pred_heads_all, gold_rels_all, pred_rels_all)

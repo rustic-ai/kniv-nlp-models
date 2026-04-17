@@ -28,7 +28,15 @@ eval = [
     "spacy>=3.7",
     "scikit-learn>=1.4",
 ]
+corpus = [
+    "spacy>=3.7",
+    "openai>=1.0",
+    "requests>=2.31",
+]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["shared"]
