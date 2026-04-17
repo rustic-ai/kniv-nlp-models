@@ -1,0 +1,33 @@
+# Registry of all corpus domains and their status.
+# Add new domains here after creating their directory.
+
+domains:
+  conversation:
+    status: pending        # pending | collected | annotated | validated | published
+    target_sentences: 30000
+    priority: high
+    description: "Conversational dialogue — matches uniko's primary use case"
+
+  narrative:
+    status: pending
+    target_sentences: 20000
+    priority: high
+    description: "Fiction and personal stories — LoCoMo-style narratives"
+
+  technical:
+    status: pending
+    target_sentences: 15000
+    priority: medium
+    description: "Technical/code discussions — Stack Overflow, Hacker News"
+
+  news:
+    status: pending
+    target_sentences: 15000
+    priority: medium
+    description: "News articles — formal prose, complex sentences"
+
+  encyclopedic:
+    status: pending
+    target_sentences: 10000
+    priority: low
+    description: "Wikipedia — factual, definitional content"

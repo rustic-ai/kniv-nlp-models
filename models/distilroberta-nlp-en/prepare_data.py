@@ -180,7 +180,9 @@ def load_ud_data(conllu_path: Path) -> list[dict]:
 
 def load_conll_ner() -> dict[str, list[dict]]:
     """Load CoNLL-2003 NER data via HuggingFace Datasets."""
-    dataset = load_dataset("conll2003", trust_remote_code=True)
+    # Use the Parquet conversion branch — the original loading script
+    # is no longer supported by the datasets library.
+    dataset = load_dataset("conll2003", revision="refs/convert/parquet")
 
     tag_names = dataset["train"].features["ner_tags"].feature.names
 

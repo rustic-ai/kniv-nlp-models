@@ -39,3 +39,6 @@ Thumbs.db
 
 # HuggingFace cache
 .cache/
+
+# Corpus output (generated, large)
+corpus/output/

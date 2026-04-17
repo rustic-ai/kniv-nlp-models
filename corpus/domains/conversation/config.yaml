@@ -1,0 +1,15 @@
+# Conversation domain configuration
+
+target_sentences: 30000
+
+sources:
+  dailydialog:
+    url: "http://yanran.li/files/ijcnlp_dailydialog.zip"
+    license: "CC BY-NC-SA 4.0"
+    format: "text"
+
+filtering:
+  min_words: 5
+  max_words: 100
+  min_chars: 15
+  deduplicate: true

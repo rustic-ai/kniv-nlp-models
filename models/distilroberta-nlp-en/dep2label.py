@@ -164,10 +164,14 @@ def collect_label_vocabulary(conllu_path: str) -> set[str]:
     labels = set()
     with open(conllu_path) as f:
         for sentence in conllu.parse(f.read()):
-            words = [token["form"] for token in sentence]
-            heads = [token["head"] - 1 if token["head"] > 0 else -1 for token in sentence]
-            deprels = [token["deprel"] for token in sentence]
-            upos = [token["upos"] for token in sentence]
+            # Filter to real tokens only (skip multi-word tokens and empty nodes)
+            tokens = [t for t in sentence if isinstance(t["id"], int)]
+            if not tokens:
+                continue
+            words = [t["form"] for t in tokens]
+            heads = [t["head"] - 1 if t["head"] and t["head"] > 0 else -1 for t in tokens]
+            deprels = [t["deprel"] or "_" for t in tokens]
+            upos = [t["upos"] or "X" for t in tokens]
             encoded = encode_sentence(words, heads, deprels, upos)
             labels.update(encoded)
 

@@ -1,0 +1,33 @@
+# Narrative domain configuration
+
+target_sentences: 20000
+
+sources:
+  gutenberg:
+    # Selected works with conversational narrative style
+    book_ids:
+      - 1342    # Pride and Prejudice (Austen)
+      - 11      # Alice's Adventures in Wonderland (Carroll)
+      - 1661    # Sherlock Holmes (Doyle)
+      - 84      # Frankenstein (Shelley)
+      - 1400    # Great Expectations (Dickens)
+      - 174     # The Picture of Dorian Gray (Wilde)
+      - 2701    # Moby Dick (Melville)
+      - 98      # A Tale of Two Cities (Dickens)
+      - 46       # A Christmas Carol (Dickens)
+      - 345     # Dracula (Stoker)
+    license: "Public domain"
+
+filtering:
+  min_words: 5
+  max_words: 80
+  min_chars: 15
+  deduplicate: true
+  # Skip chapter headers, table of contents, metadata
+  skip_patterns:
+    - "^CHAPTER"
+    - "^Chapter"
+    - "^CONTENTS"
+    - "^\\*\\*\\*"
+    - "^Produced by"
+    - "^End of.*Project Gutenberg"
