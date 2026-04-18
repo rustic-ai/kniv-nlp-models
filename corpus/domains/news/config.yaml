@@ -1,3 +1,37 @@
 # News domain configuration
+
 target_sentences: 15000
-status: stub
+
+sources:
+  wikinews:
+    license: "CC BY 2.5"
+    api: "https://en.wikinews.org/w/api.php"
+    max_articles: 1000
+
+  wikipedia:
+    license: "CC BY-SA 3.0"
+    categories:
+      - "Journalism"
+      - "News_agencies"
+      - "International_relations"
+      - "Elections"
+      - "Natural_disasters"
+      - "Geopolitics"
+      - "Economic_history"
+      - "Political_scandals"
+      - "Armed_conflicts"
+      - "Diplomacy"
+    max_articles_per_category: 80
+
+filtering:
+  min_words: 5
+  max_words: 100
+  min_chars: 15
+  deduplicate: true
+  skip_patterns:
+    - "^See also"
+    - "^References"
+    - "^External links"
+    - "^Sources"
+    - "^Related news"
+    - "^Category:"

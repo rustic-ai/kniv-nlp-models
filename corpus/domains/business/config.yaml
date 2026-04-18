@@ -1,0 +1,152 @@
+# Business domain configuration
+# ERP, finance, supply chain, management, marketing, enterprise text
+
+target_sentences: 200000
+
+sources:
+  sec_edgar:
+    # SEC EDGAR 10-K filings via company submissions API
+    # Public domain (US government work)
+    license: "Public domain"
+    # Major companies across sectors for vocabulary diversity
+    ciks:
+      # Technology
+      - 320193     # Apple
+      - 789019     # Microsoft
+      - 1652044    # Alphabet (Google)
+      - 1018724    # Amazon
+      - 1326801    # Meta (Facebook)
+      # Finance
+      - 19617      # JPMorgan Chase
+      - 886982     # Goldman Sachs
+      - 70858      # Bank of America
+      # Healthcare
+      - 200406     # Johnson & Johnson
+      - 78003      # Pfizer
+      # Consumer
+      - 104169     # Walmart
+      - 80424      # Procter & Gamble
+      - 21344      # Coca-Cola
+      # Industrial
+      - 40554      # General Electric
+      - 18230      # Caterpillar
+      - 66740      # 3M
+      # Energy
+      - 34088      # ExxonMobil
+      # Enterprise Software / SaaS
+      - 1108524    # Salesforce
+      - 1341439    # Oracle
+      - 1327811    # Workday
+      # Retail
+      - 354950     # Home Depot
+      - 27419      # Target
+      - 909832     # Costco
+      # Supply Chain / Logistics
+      - 1048911    # FedEx
+      - 1090727    # UPS
+      # Manufacturing
+      - 37996      # Ford
+      - 315189     # Deere & Co
+      # Other
+      - 829224     # Starbucks
+      - 896878     # Intuit
+      - 1594805    # Shopify
+    user_agent: "uniko-nlp-models research@dragonscale.ai"
+    max_filings_per_company: 2   # most recent 10-K filings
+
+  enron:
+    url: "https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz"
+    license: "Public domain (FERC)"
+
+  openstax:
+    # CC BY-4.0 college textbooks from openstax.org
+    # Content fetched from GitHub repos (CNXML format)
+    license: "CC BY-4.0"
+    books:
+      - repo: "openstax/osbooks-principles-of-management-bundle"
+        title: "Principles of Management"
+      - repo: "openstax/osbooks-introduction-business"
+        title: "Introduction to Business"
+      - repo: "openstax/osbooks-entrepreneurship"
+        title: "Entrepreneurship"
+      - repo: "openstax/osbooks-principles-accounting-bundle"
+        title: "Principles of Accounting"
+      - repo: "openstax/osbooks-introductory-statistics-bundle"
+        title: "Introductory Business Statistics"
+
+  odoo:
+    repo: "https://github.com/odoo/documentation.git"
+    branch: "17.0"
+    license: "CC BY-SA 3.0"
+
+  wikipedia:
+    license: "CC BY-SA 3.0"
+    categories:
+      - "Enterprise_resource_planning"
+      - "Supply_chain_management"
+      - "Corporate_finance"
+      - "Financial_accounting"
+      - "Management_accounting"
+      - "Marketing"
+      - "Sales"
+      - "Operations_management"
+      - "Operations_research"
+      - "Human_resource_management"
+      - "Project_management"
+      - "Business_process"
+      - "Inventory"
+      - "Procurement"
+      - "Manufacturing"
+      - "Logistics"
+      - "E-commerce"
+      - "Startup_companies"
+      - "Venture_capital"
+      - "Mergers_and_acquisitions"
+    max_articles_per_category: 100
+
+  cuad:
+    dataset: "cuad"
+    license: "CC BY-4.0"
+
+  s2orc:
+    # Semantic Scholar API (free, optional API key for higher rate limits)
+    license: "ODC-BY"
+    fields:
+      - "Business"
+      - "Economics"
+      - "Finance"
+    max_papers: 2000
+    # Set S2_API_KEY env var for faster collection (optional)
+
+# Sampling weights for annotation (subsample from raw pool)
+# Higher weight = more sentences selected from this source
+sampling:
+  sec_edgar: 55000
+  openstax: 50000
+  wikipedia: 30000
+  odoo: 25000
+  enron: 15000
+  s2orc: 15000
+  cuad: 10000
+
+filtering:
+  min_words: 5
+  max_words: 120      # business filings can be verbose
+  min_chars: 15
+  deduplicate: true
+  skip_patterns:
+    - "^Page \\d+"
+    - "^Table of Contents"
+    - "^PART [IVX]+"
+    - "^ITEM \\d+"
+    - "^Exhibit \\d+"
+    - "^-----"
+    - "^={3,}"
+    - "^\\*{3,}"
+    - "^From:"
+    - "^To:"
+    - "^Subject:"
+    - "^Date:"
+    - "^Cc:"
+    - "^Forwarded by"
+    - "^----- Original Message"

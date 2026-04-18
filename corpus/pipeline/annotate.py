@@ -113,33 +113,33 @@ def annotate_domain(domain: str, batch_size: int = 100):
     texts = [s["text"] for s in sentences]
     metadata = sentences  # preserve source info
 
+    json_file = output_dir / "annotated.jsonl"
     annotated_count = 0
-    with open(output_file, "w") as f:
-        # Process in batches using spaCy's pipe for efficiency
+
+    # Single pass: write both CoNLL-U and JSONL from one spaCy run
+    with open(output_file, "w") as conllu_f, open(json_file, "w") as json_f:
         for i, doc in enumerate(nlp.pipe(texts, batch_size=batch_size)):
             sent_id = f"{domain}-{i:06d}"
             annotated = annotate_sentence(doc)
+
+            # Write CoNLL-U
             conllu = to_conllu(annotated, sent_id)
-            f.write(conllu + "\n")
-            annotated_count += 1
+            conllu_f.write(conllu + "\n")
 
-            if annotated_count % 1000 == 0:
-                print(f"  Annotated {annotated_count}/{len(sentences)}...")
-
-    print(f"Annotated {annotated_count} sentences → {output_file}")
-
-    # Save annotations as JSON too (easier for validation pipeline)
-    json_file = output_dir / "annotated.jsonl"
-    with open(json_file, "w") as f:
-        for i, doc in enumerate(nlp.pipe(texts, batch_size=batch_size)):
-            annotated = annotate_sentence(doc)
-            annotated["sent_id"] = f"{domain}-{i:06d}"
+            # Write JSONL
+            annotated["sent_id"] = sent_id
             annotated["domain"] = domain
             if i < len(metadata):
                 annotated["source"] = metadata[i].get("source", "")
-            f.write(json.dumps(annotated) + "\n")
+            json_f.write(json.dumps(annotated) + "\n")
 
-    print(f"JSON annotations → {json_file}")
+            annotated_count += 1
+            if annotated_count % 1000 == 0:
+                print(f"  Annotated {annotated_count}/{len(sentences)}...")
+
+    print(f"Annotated {annotated_count} sentences")
+    print(f"  CoNLL-U → {output_file}")
+    print(f"  JSONL   → {json_file}")
 
 
 def main():

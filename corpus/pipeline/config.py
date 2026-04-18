@@ -14,7 +14,7 @@ FINAL_DIR = OUTPUT_DIR / "final"
 SPACY_MODEL = "en_core_web_trf"
 
 # OpenAI validation model
-OPENAI_MODEL = "gpt-5.4-mini"
+OPENAI_MODEL = "gpt-5.4-nano"
 VALIDATION_BATCH_SIZE = 50  # sentences per API call
 VALIDATION_PERCENT = 100    # validate 100% of corpus
 

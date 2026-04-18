@@ -1,3 +1,35 @@
 # Encyclopedic domain configuration
-target_sentences: 15000
-status: stub
+
+target_sentences: 10000
+
+sources:
+  wikipedia:
+    license: "CC BY-SA 3.0"
+    categories:
+      - "Physics"
+      - "Chemistry"
+      - "Biology"
+      - "Mathematics"
+      - "Medicine"
+      - "Ancient_history"
+      - "Modern_history"
+      - "Geography"
+      - "Countries"
+      - "Music"
+      - "Visual_arts"
+      - "Philosophy"
+      - "Sociology"
+      - "Astronomy"
+      - "Ecology"
+    max_articles_per_category: 60
+
+filtering:
+  min_words: 5
+  max_words: 100
+  min_chars: 15
+  deduplicate: true
+  skip_patterns:
+    - "^See also"
+    - "^References"
+    - "^External links"
+    - "^Further reading"
