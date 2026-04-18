@@ -2,58 +2,47 @@
 
 DailyDialog: 13,118 daily conversations covering 10 topics.
 License: CC BY-NC-SA 4.0
-Source: http://yanran.li/dailydialog.html
+Loaded via HuggingFace Datasets (no manual download needed).
 """
 
 from __future__ import annotations
 
-import os
-import zipfile
+import json
 from pathlib import Path
 
-import requests
+from datasets import load_dataset
 
-DOMAIN_DIR = Path(__file__).parent
 OUTPUT_DIR = Path(__file__).parent.parent.parent / "output" / "raw" / "conversation"
-DAILYDIALOG_URL = "http://yanran.li/files/ijcnlp_dailydialog.zip"
 
 
-def download_dailydialog():
-    """Download and extract DailyDialog dataset."""
+def collect_dailydialog():
+    """Load DailyDialog via HuggingFace and save raw dialogues."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    zip_path = OUTPUT_DIR / "dailydialog.zip"
 
-    if (OUTPUT_DIR / "dialogues_text.txt").exists():
-        print("DailyDialog already downloaded.")
+    output_file = OUTPUT_DIR / "raw_dialogues.jsonl"
+    if output_file.exists():
+        print("DailyDialog already collected.")
         return
 
-    print(f"Downloading DailyDialog from {DAILYDIALOG_URL}...")
-    response = requests.get(DAILYDIALOG_URL, stream=True)
-    response.raise_for_status()
+    print("Loading DailyDialog from HuggingFace...")
+    dataset = load_dataset("daily_dialog", revision="refs/convert/parquet")
 
-    with open(zip_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            f.write(chunk)
+    count = 0
+    with open(output_file, "w") as f:
+        for split in ["train", "validation", "test"]:
+            for item in dataset[split]:
+                dialogue = item["dialog"]
+                f.write(json.dumps({
+                    "utterances": dialogue,
+                    "split": split,
+                }) + "\n")
+                count += 1
 
-    print("Extracting...")
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(OUTPUT_DIR)
-
-    # Find the text file (may be nested)
-    for root, dirs, files in os.walk(OUTPUT_DIR):
-        for fname in files:
-            if fname == "dialogues_text.txt":
-                src = Path(root) / fname
-                if src.parent != OUTPUT_DIR:
-                    src.rename(OUTPUT_DIR / fname)
-                    print(f"Moved {fname} to {OUTPUT_DIR}")
-
-    zip_path.unlink()
-    print("DailyDialog downloaded and extracted.")
+    print(f"Collected {count} dialogues → {output_file}")
 
 
 def main():
-    download_dailydialog()
+    collect_dailydialog()
 
 
 if __name__ == "__main__":

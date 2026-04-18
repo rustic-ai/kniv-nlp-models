@@ -1,3 +1,47 @@
 # Technical domain configuration
+
 target_sentences: 15000
-status: stub
+
+sources:
+  wikipedia:
+    license: "CC BY-SA 3.0"
+    categories:
+      - "Computer_science"
+      - "Software_engineering"
+      - "Programming_languages"
+      - "Databases"
+      - "Computer_networking"
+      - "Cloud_computing"
+      - "Machine_learning"
+      - "Artificial_intelligence"
+      - "Cryptography"
+      - "Operating_systems"
+      - "Web_development"
+      - "Data_structures"
+      - "Computer_security"
+      - "Distributed_computing"
+      - "Computer_architecture"
+    max_articles_per_category: 80
+
+  python_docs:
+    repo: "https://github.com/python/cpython.git"
+    branch: "main"
+    docs_path: "Doc"
+    license: "PSF License"
+
+filtering:
+  min_words: 5
+  max_words: 100
+  min_chars: 15
+  deduplicate: true
+  skip_patterns:
+    - "^>>>"
+    - "^\\$"
+    - "^#!"
+    - "^import "
+    - "^from .* import"
+    - "^class "
+    - "^def "
+    - "^See also"
+    - "^References"
+    - "^External links"

@@ -17,6 +17,7 @@ dependencies = [
     "huggingface-hub>=0.22",
     "accelerate>=0.28",
     "numpy>=1.26",
+    "sentencepiece>=0.2.1",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +33,11 @@ corpus = [
     "spacy>=3.7",
     "openai>=1.0",
     "requests>=2.31",
+]
+llm = [
+    "peft>=0.11",
+    "trl>=0.9",
+    "bitsandbytes>=0.43",
 ]
 
 [build-system]

@@ -1,24 +1,30 @@
-"""Validate spaCy annotations using GPT-5.4 mini via OpenAI Batch API.
+"""Validate spaCy annotations using GPT-5.4 mini via direct API calls.
 
-Sends 100% of annotated sentences for validation. Uses Batch API
-for 50% cost reduction (~$8.66 for 90K sentences).
+Processes all annotated sentences with concurrent async requests.
+Estimated cost: ~$17 for 152K sentences at standard pricing.
+Estimated time: ~30-60 minutes with concurrency.
 
 Usage:
     python -m corpus.pipeline.validate --domain conversation
+    python -m corpus.pipeline.validate --domain conversation --resume
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
-import os
 import time
 from pathlib import Path
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from .config import OPENAI_MODEL, ANNOTATED_DIR, VALIDATED_DIR
 
+
+# Concurrency: how many requests in flight at once.
+# GPT-5.4 mini tier-1 rate limit is typically 500-10000 RPM.
+MAX_CONCURRENT = 50
 
 SYSTEM_PROMPT = """You are a linguistics expert validating NLP annotations.
 For each sentence, check if the POS tags, NER spans, and dependency parse
@@ -33,14 +39,16 @@ Rules:
 - For each correction, specify: token index, field (pos/ner/dep), old value, new value"""
 
 
-def format_sentence_for_validation(annotated: dict) -> str:
+def format_sentence(annotated: dict) -> str:
     """Format an annotated sentence as a validation prompt."""
     tokens = annotated["tokens"]
     text = annotated["text"]
 
-    token_table = []
+    token_lines = []
     for t in tokens:
-        token_table.append(f"  {t['id']:3d}  {t['form']:20s}  POS={t['upos']:6s}  HEAD={t['head']:3d}  DEP={t['deprel']}")
+        token_lines.append(
+            f"  {t['id']:3d}  {t['form']:20s}  POS={t['upos']:6s}  HEAD={t['head']:3d}  DEP={t['deprel']}"
+        )
 
     ner_info = ""
     if annotated.get("ner_spans"):
@@ -50,172 +58,147 @@ def format_sentence_for_validation(annotated: dict) -> str:
     return f"""Sentence: {text}
 
 Tokens:
-{chr(10).join(token_table)}
+{chr(10).join(token_lines)}
 {ner_info}
 
 Check all annotations. Return JSON with corrections or empty if correct."""
 
 
-def create_batch_requests(domain: str) -> list[dict]:
-    """Create batch API requests for all sentences in a domain."""
+async def validate_one(
+    client: AsyncOpenAI,
+    sent_id: str,
+    prompt: str,
+    semaphore: asyncio.Semaphore,
+) -> dict:
+    """Validate a single sentence."""
+    async with semaphore:
+        try:
+            response = await client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                max_completion_tokens=500,
+            )
+            content = response.choices[0].message.content
+            parsed = json.loads(content)
+            return {"sent_id": sent_id, "status": "ok", "result": parsed}
+        except json.JSONDecodeError:
+            return {"sent_id": sent_id, "status": "ok", "result": {"corrections": []}}
+        except Exception as e:
+            return {"sent_id": sent_id, "status": "error", "error": str(e)}
+
+
+async def validate_domain(domain: str, resume: bool = False):
+    """Validate all sentences for a domain using direct API calls."""
     jsonl_file = ANNOTATED_DIR / domain / "annotated.jsonl"
     if not jsonl_file.exists():
         raise FileNotFoundError(f"No annotated JSONL at {jsonl_file}. Run annotate first.")
 
-    requests = []
+    output_dir = VALIDATED_DIR / domain
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results_file = output_dir / "validation_results.jsonl"
+
+    # Load already-processed IDs if resuming
+    done_ids = set()
+    if resume and results_file.exists():
+        with open(results_file) as f:
+            for line in f:
+                r = json.loads(line.strip())
+                if r["status"] == "ok":
+                    done_ids.add(r["sent_id"])
+        print(f"Resuming: {len(done_ids)} already validated (skipping errored)", flush=True)
+
+    # Load sentences to validate
+    sentences = []
     with open(jsonl_file) as f:
         for line in f:
             annotated = json.loads(line.strip())
-            prompt = format_sentence_for_validation(annotated)
+            if annotated["sent_id"] not in done_ids:
+                sentences.append(annotated)
 
-            requests.append({
-                "custom_id": annotated["sent_id"],
-                "method": "POST",
-                "url": "/v1/chat/completions",
-                "body": {
-                    "model": OPENAI_MODEL,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "max_tokens": 500,
-                },
-            })
+    total = len(sentences) + len(done_ids)
+    print(f"Domain '{domain}': {len(sentences)} to validate ({len(done_ids)} already done, {total} total)", flush=True)
 
-    return requests
-
-
-def submit_batch(domain: str):
-    """Submit validation batch to OpenAI Batch API."""
-    client = OpenAI()
-
-    requests = create_batch_requests(domain)
-    print(f"Created {len(requests)} validation requests for domain '{domain}'")
-
-    # Write batch input file
-    output_dir = VALIDATED_DIR / domain
-    output_dir.mkdir(parents=True, exist_ok=True)
-    batch_input_file = output_dir / "batch_input.jsonl"
-
-    with open(batch_input_file, "w") as f:
-        for req in requests:
-            f.write(json.dumps(req) + "\n")
-
-    # Upload file
-    with open(batch_input_file, "rb") as f:
-        uploaded = client.files.create(file=f, purpose="batch")
-    print(f"Uploaded batch input: {uploaded.id}")
-
-    # Create batch
-    batch = client.batches.create(
-        input_file_id=uploaded.id,
-        endpoint="/v1/chat/completions",
-        completion_window="24h",
-    )
-    print(f"Batch created: {batch.id}")
-    print(f"Status: {batch.status}")
-
-    # Save batch ID for later retrieval
-    with open(output_dir / "batch_id.txt", "w") as f:
-        f.write(batch.id)
-
-    print(f"\nBatch submitted. Check status with:")
-    print(f"  python -m corpus.pipeline.validate --domain {domain} --check")
-    print(f"  python -m corpus.pipeline.validate --domain {domain} --retrieve")
-
-    return batch.id
-
-
-def check_batch(domain: str):
-    """Check the status of a submitted batch."""
-    client = OpenAI()
-    batch_id_file = VALIDATED_DIR / domain / "batch_id.txt"
-    if not batch_id_file.exists():
-        print("No batch submitted yet.")
+    if not sentences:
+        print("Nothing to validate.", flush=True)
         return
 
-    batch_id = batch_id_file.read_text().strip()
-    batch = client.batches.retrieve(batch_id)
+    client = AsyncOpenAI()
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
-    print(f"Batch: {batch_id}")
-    print(f"Status: {batch.status}")
-    if batch.request_counts:
-        print(f"Completed: {batch.request_counts.completed}/{batch.request_counts.total}")
-        print(f"Failed: {batch.request_counts.failed}")
+    # Process in chunks to show progress and save incrementally
+    chunk_size = 500
+    agreement = 0
+    corrections = 0
+    errors = 0
+    start_time = time.time()
 
+    mode = "a" if resume else "w"
+    with open(results_file, mode) as out_f:
+        for chunk_start in range(0, len(sentences), chunk_size):
+            chunk = sentences[chunk_start:chunk_start + chunk_size]
 
-def retrieve_batch(domain: str):
-    """Download and process batch results."""
-    client = OpenAI()
-    output_dir = VALIDATED_DIR / domain
-    batch_id = (output_dir / "batch_id.txt").read_text().strip()
+            tasks = [
+                validate_one(client, s["sent_id"], format_sentence(s), semaphore)
+                for s in chunk
+            ]
+            results = await asyncio.gather(*tasks)
 
-    batch = client.batches.retrieve(batch_id)
-    if batch.status != "completed":
-        print(f"Batch not complete yet. Status: {batch.status}")
-        return
+            for r in results:
+                out_f.write(json.dumps(r) + "\n")
+                if r["status"] == "error":
+                    errors += 1
+                elif r["result"].get("corrections") and len(r["result"]["corrections"]) > 0:
+                    corrections += 1
+                else:
+                    agreement += 1
 
-    # Download output
-    output_file_id = batch.output_file_id
-    content = client.files.content(output_file_id)
+            out_f.flush()
+            processed = chunk_start + len(chunk) + len(done_ids)
+            elapsed = time.time() - start_time
+            rate = (chunk_start + len(chunk)) / elapsed if elapsed > 0 else 0
+            eta = (len(sentences) - chunk_start - len(chunk)) / rate if rate > 0 else 0
 
-    results_file = output_dir / "batch_results.jsonl"
-    with open(results_file, "wb") as f:
-        f.write(content.read())
+            print(
+                f"  {processed}/{total}  "
+                f"agree={agreement} correct={corrections} err={errors}  "
+                f"({rate:.0f}/s, ETA {eta/60:.0f}m)",
+                flush=True,
+            )
 
-    # Parse corrections
-    corrections = {}
-    agreement_count = 0
-    correction_count = 0
+    # Summary
+    total_processed = agreement + corrections + errors
+    elapsed = time.time() - start_time
+    print(f"\nValidation complete for '{domain}':", flush=True)
+    print(f"  Processed: {total_processed} sentences in {elapsed/60:.1f} minutes", flush=True)
+    print(f"  Agreement: {agreement} ({100*agreement/max(total_processed,1):.1f}%)", flush=True)
+    print(f"  Corrections: {corrections} ({100*corrections/max(total_processed,1):.1f}%)", flush=True)
+    print(f"  Errors: {errors}", flush=True)
 
+    # Extract corrections into separate file
+    corrections_file = output_dir / "corrections.json"
+    all_corrections = {}
     with open(results_file) as f:
         for line in f:
-            result = json.loads(line.strip())
-            sent_id = result["custom_id"]
-            response = result["response"]
+            r = json.loads(line.strip())
+            if r["status"] == "ok" and r["result"].get("corrections") and len(r["result"]["corrections"]) > 0:
+                all_corrections[r["sent_id"]] = r["result"]["corrections"]
 
-            if response["status_code"] == 200:
-                body = response["body"]
-                content = body["choices"][0]["message"]["content"]
-                try:
-                    parsed = json.loads(content)
-                    if parsed.get("corrections") and len(parsed["corrections"]) > 0:
-                        corrections[sent_id] = parsed["corrections"]
-                        correction_count += 1
-                    else:
-                        agreement_count += 1
-                except json.JSONDecodeError:
-                    agreement_count += 1  # treat parse failure as agreement
-
-    total = agreement_count + correction_count
-    agreement_pct = 100 * agreement_count / total if total > 0 else 0
-
-    print(f"\nValidation results for '{domain}':")
-    print(f"  Total sentences: {total}")
-    print(f"  Agreement (no corrections): {agreement_count} ({agreement_pct:.1f}%)")
-    print(f"  Corrections flagged: {correction_count} ({100 - agreement_pct:.1f}%)")
-
-    # Save corrections
-    corrections_file = output_dir / "corrections.json"
     with open(corrections_file, "w") as f:
-        json.dump(corrections, f, indent=2)
-    print(f"  Corrections saved to {corrections_file}")
+        json.dump(all_corrections, f, indent=2)
+    print(f"  Corrections saved to {corrections_file}", flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Validate annotations with GPT-5.4 mini")
     parser.add_argument("--domain", required=True)
-    parser.add_argument("--check", action="store_true", help="Check batch status")
-    parser.add_argument("--retrieve", action="store_true", help="Download batch results")
+    parser.add_argument("--resume", action="store_true", help="Resume from previous run")
     args = parser.parse_args()
 
-    if args.check:
-        check_batch(args.domain)
-    elif args.retrieve:
-        retrieve_batch(args.domain)
-    else:
-        submit_batch(args.domain)
+    asyncio.run(validate_domain(args.domain, args.resume))
 
 
 if __name__ == "__main__":

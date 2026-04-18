@@ -31,3 +31,9 @@ domains:
     target_sentences: 10000
     priority: low
     description: "Wikipedia — factual, definitional content"
+
+  business:
+    status: pending
+    target_sentences: 200000
+    priority: high
+    description: "ERP, finance, supply chain, management, marketing — enterprise text"
