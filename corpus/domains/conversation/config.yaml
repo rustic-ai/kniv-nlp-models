@@ -1,15 +1,53 @@
 # Conversation domain configuration
+# Agentic, task-oriented conversations — all commercially licensed
 
-target_sentences: 30000
+target_sentences: 135000
 
 sources:
-  dailydialog:
-    url: "http://yanran.li/files/ijcnlp_dailydialog.zip"
-    license: "CC BY-NC-SA 4.0"
-    format: "text"
+  taskmaster:
+    datasets:
+      - "taskmaster1"
+      - "taskmaster2"
+      - "taskmaster3"
+    license: "CC BY-4.0"
+    max_utterances: 30000
+
+  oasst:
+    dataset: "OpenAssistant/oasst1"
+    license: "Apache 2.0"
+    max_utterances: 30000
+
+  multiwoz:
+    dataset: "multi_woz_v22"
+    license: "Apache 2.0"
+    max_utterances: 20000
+
+  abcd:
+    dataset: "abcd"
+    license: "MIT"
+    max_utterances: 15000
+
+  airdialogue:
+    dataset: "air_dialogue"
+    license: "Apache 2.0"
+    max_utterances: 15000
+
+  glaive:
+    dataset: "glaiveai/glaive-function-calling-v2"
+    license: "Apache 2.0"
+    max_utterances: 15000
+
+  agent_flan:
+    dataset: "THUDM/Agent-FLAN"
+    license: "Apache 2.0"
+    max_utterances: 10000
 
 filtering:
   min_words: 5
   max_words: 100
   min_chars: 15
   deduplicate: true
+  skip_patterns:
+    - "^\\[.*\\]$"
+    - "^<.*>$"
+    - "^\\{.*\\}$"
