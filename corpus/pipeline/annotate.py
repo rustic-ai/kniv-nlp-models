@@ -71,6 +71,9 @@ def to_conllu(annotated: dict, sent_id: str) -> str:
         f"# text = {annotated['text']}",
     ]
 
+    if annotated.get("prev_text"):
+        lines.append(f"# prev_text = {annotated['prev_text']}")
+
     # Encode NER as MISC field (BIO tags)
     bio_tags = ["O"] * len(annotated["tokens"])
     for span in annotated["ner_spans"]:
@@ -131,6 +134,8 @@ def annotate_domain(domain: str, batch_size: int = 100):
             annotated["domain"] = domain
             if i < len(metadata):
                 annotated["source"] = metadata[i].get("source", "")
+                if metadata[i].get("prev_text"):
+                    annotated["prev_text"] = metadata[i]["prev_text"]
             json_f.write(json.dumps(annotated) + "\n")
 
             annotated_count += 1

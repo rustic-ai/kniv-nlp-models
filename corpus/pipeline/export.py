@@ -183,10 +183,21 @@ def load_domain_annotations(domain: str) -> list[str]:
         print(f"  ⚠ No annotations for domain '{domain}', skipping", flush=True)
         return []
 
-    # Load corrections and CLS labels
+    # Load corrections, CLS labels, and prev_text
     corrections = load_corrections(domain)
     cls_labels = load_cls_labels(domain)
-    print(f"  {domain}: {len(corrections)} corrections, {len(cls_labels)} CLS labels", flush=True)
+
+    # Load prev_text from annotated JSONL
+    prev_texts: dict[str, str] = {}
+    jsonl_file = ANNOTATED_DIR / domain / "annotated.jsonl"
+    if jsonl_file.exists():
+        with open(jsonl_file) as f:
+            for line in f:
+                data = json.loads(line)
+                if data.get("prev_text"):
+                    prev_texts[data["sent_id"]] = data["prev_text"]
+
+    print(f"  {domain}: {len(corrections)} corrections, {len(cls_labels)} CLS labels, {len(prev_texts)} prev_texts", flush=True)
 
     with open(conllu_file) as f:
         content = f.read()
@@ -225,6 +236,19 @@ def load_domain_annotations(domain: str) -> list[str]:
         if sent_id and sent_id in cls_labels:
             sent = add_cls_to_conllu(sent, cls_labels[sent_id])
             cls_count += 1
+
+        # Add prev_text as metadata comment
+        if sent_id and sent_id in prev_texts:
+            # Insert # prev_text after other comments
+            lines = sent.split("\n")
+            insert_at = 0
+            for j, line in enumerate(lines):
+                if line.startswith("#"):
+                    insert_at = j + 1
+                else:
+                    break
+            lines.insert(insert_at, f"# prev_text = {prev_texts[sent_id]}")
+            sent = "\n".join(lines)
 
         result.append(sent)
 
@@ -276,6 +300,60 @@ def write_conllu(sentences: list[str], output_path: Path):
     print(f"  Written: {output_path} ({len(sentences)} sentences)", flush=True)
 
 
+def parse_conllu_to_record(sentence_block: str) -> dict:
+    """Parse a CoNLL-U sentence block into a flat dict for Parquet."""
+    metadata = {}
+    tokens, pos, heads, deprels, ner = [], [], [], [], []
+
+    for line in sentence_block.split("\n"):
+        if line.startswith("# sent_id"):
+            metadata["sent_id"] = line.split("=", 1)[1].strip()
+        elif line.startswith("# text"):
+            metadata["text"] = line.split("=", 1)[1].strip()
+        elif line.startswith("# cls"):
+            metadata["cls"] = line.split("=", 1)[1].strip()
+        elif line.startswith("# prev_text"):
+            metadata["prev_text"] = line.split("=", 1)[1].strip()
+        elif line.startswith("#") or not line.strip():
+            continue
+        else:
+            cols = line.split("\t")
+            if len(cols) >= 10:
+                tokens.append(cols[1])
+                pos.append(cols[3])
+                try:
+                    heads.append(int(cols[6]))
+                except ValueError:
+                    heads.append(0)
+                deprels.append(cols[7])
+                misc = cols[9]
+                ner.append(misc[4:] if misc.startswith("NER=") else "O")
+
+    return {
+        "sent_id": metadata.get("sent_id", ""),
+        "text": metadata.get("text", ""),
+        "prev_text": metadata.get("prev_text"),
+        "cls": metadata.get("cls", ""),
+        "tokens": tokens,
+        "pos_tags": pos,
+        "heads": heads,
+        "deprels": deprels,
+        "ner_tags": ner,
+    }
+
+
+def write_parquet(sentences: list[str], output_path: Path):
+    """Convert CoNLL-U sentences to Parquet format."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    records = [parse_conllu_to_record(s) for s in sentences]
+    table = pa.table({k: [r[k] for r in records] for k in records[0].keys()})
+    pq.write_table(table, output_path)
+    size_mb = output_path.stat().st_size / 1024 / 1024
+    print(f"  Written: {output_path} ({len(records)} rows, {size_mb:.1f}MB)", flush=True)
+
+
 def export_corpus(domains: list[str]):
     """Export the full corpus with corrections applied."""
     FINAL_DIR.mkdir(parents=True, exist_ok=True)
@@ -285,6 +363,7 @@ def export_corpus(domains: list[str]):
 
     for name, sentences in splits.items():
         write_conllu(sentences, FINAL_DIR / f"{name}.conllu")
+        write_parquet(sentences, FINAL_DIR / f"{name}.parquet")
 
     # Write metadata
     metadata = {
