@@ -48,103 +48,120 @@ NER_TAGS = ["O"]
 for etype in SPACY_ENTITY_TYPES:
     NER_TAGS.extend([f"B-{etype}", f"I-{etype}"])
 
-# Sentence-level classification labels
+# Sentence-level classification labels (uniko dialog act types)
+# Each label maps to a specific action in uniko's cognitive memory pipeline.
 CLS_LABELS = [
-    "statement",       # declarative factual content
-    "question",        # genuine question
-    "question_fact",   # question embedding factual content
-    "command",         # imperative / request
-    "greeting",        # social opener
-    "filler",          # reaction / backchannel
-    "acknowledgment",  # agreement / confirmation
+    "inform",       # extract observation (primary knowledge source)
+    "correction",   # flag existing knowledge for update
+    "agreement",    # reinforce existing observation
+    "question",     # record knowledge gap
+    "plan_commit",  # link to Goal/Task (promise, offer, suggest)
+    "request",      # create action node (command, instruction)
+    "feedback",     # skip extraction (acknowledgment, backchannel)
+    "social",       # skip extraction (greeting, goodbye, thanks, apology)
+    "filler",       # skip entirely (turn/time management, stalling)
 ]
 
 # ── Bootstrap CLS labeling rules ──────────────────────────────────
+# These are fallback heuristics used when GPT-classified labels
+# (from corpus/pipeline/classify.py) are not yet available.
 
-GREETINGS = {
+SOCIAL_PHRASES = {
     "hey", "hi", "hello", "howdy", "hi there", "hey there",
     "good morning", "good afternoon", "good evening",
-}
-
-FILLERS = {
-    "wow", "oh wow", "whoa", "omg", "lol", "haha", "hehe", "lmao",
     "thanks", "thank you", "thx", "ty",
-    "no worries", "no problem", "np",
-    "you're welcome", "yw",
-    "sounds good", "sounds great", "cool", "nice", "awesome",
+    "you're welcome", "yw", "no worries",
     "bye", "goodbye", "see you", "later", "ttyl",
+    "sorry", "my apologies", "pardon",
 }
 
-ACKNOWLEDGMENTS = {
+FEEDBACK_PHRASES = {
     "ok", "okay", "k", "sure", "sure thing",
-    "yes", "yeah", "yep", "yup", "nope", "no",
-    "right", "exactly", "agreed", "absolutely",
-    "got it", "understood", "roger", "copy that",
+    "right", "got it", "understood", "roger", "copy that",
+    "i see", "hmm", "hm", "mhm", "uh huh",
 }
 
-INTERROGATIVE_WORDS = {
-    "who", "what", "where", "when", "why", "how",
-    "which", "whom", "whose",
+AGREEMENT_PHRASES = {
+    "yes", "yeah", "yep", "yup", "absolutely",
+    "exactly", "agreed", "correct", "that's right",
+    "i agree", "definitely", "for sure",
 }
 
-AUX_QUESTION_STARTERS = {
-    "is", "are", "was", "were", "do", "does", "did",
-    "can", "could", "will", "would", "shall", "should",
-    "may", "might", "has", "have", "had",
+FILLER_PHRASES = {
+    "um", "uh", "well", "so", "anyway", "like",
+    "you know", "i mean", "let me think",
+    "wow", "oh wow", "whoa", "omg", "lol", "haha",
 }
 
-EMBEDDED_FACT_PATTERNS = [
-    "did you know", "have you heard", "is it true that",
-    "do you remember", "did you see", "did you notice",
-]
-
-COMMAND_STARTERS = {
+REQUEST_STARTERS = {
     "show", "find", "create", "delete", "remove", "add", "update",
     "run", "start", "stop", "open", "close", "check", "verify",
     "list", "get", "set", "put", "move", "copy", "send", "tell",
-    "give", "make", "let", "help", "explain", "describe",
-    "please",  # "Please do X" is a command
+    "give", "make", "help", "explain", "describe",
+    "please",
 }
+
+PLAN_STARTERS = {
+    "i'll", "i will", "let's", "let us", "we could",
+    "we should", "how about", "what if", "i can",
+    "i could", "we'll", "i suggest", "i propose",
+    "i offer", "i promise",
+}
+
+CORRECTION_STARTERS = [
+    "no,", "no ", "actually,", "actually ", "that's wrong",
+    "that's not", "it's not", "it wasn't", "they're not",
+    "correction:", "to correct",
+]
 
 
 def classify_sentence(text: str) -> str:
     """Bootstrap CLS label using rule-based heuristics.
 
-    This produces noisy labels — the model will learn to generalize
-    beyond these rules.  Manual review of a sample is recommended
-    before final training.
+    These are fallback labels — the real labels come from
+    corpus/pipeline/classify.py (GPT-nano classification).
     """
     stripped = text.strip()
     lower = stripped.lower()
     normalized = re.sub(r"[.!?,;]+$", "", lower).strip()
 
-    # Greetings
-    if normalized in GREETINGS:
-        return "greeting"
+    # Social (greetings, thanks, apologies, goodbyes)
+    if normalized in SOCIAL_PHRASES:
+        return "social"
 
-    # Fillers / reactions
-    if normalized in FILLERS:
+    # Filler (turn management, stalling)
+    if normalized in FILLER_PHRASES:
         return "filler"
 
-    # Acknowledgments
-    if normalized in ACKNOWLEDGMENTS:
-        return "acknowledgment"
+    # Feedback (acknowledgment without content)
+    if normalized in FEEDBACK_PHRASES:
+        return "feedback"
 
-    # Questions
+    # Agreement (explicit agreement)
+    if normalized in AGREEMENT_PHRASES:
+        return "agreement"
+
+    # Correction (flagging wrong info)
+    for pattern in CORRECTION_STARTERS:
+        if lower.startswith(pattern):
+            return "correction"
+
+    # Question
     if stripped.endswith("?"):
-        # Check for embedded facts
-        for pattern in EMBEDDED_FACT_PATTERNS:
-            if lower.startswith(pattern):
-                return "question_fact"
         return "question"
 
-    # Commands (imperative mood)
+    # Request (imperative commands)
     first_word = lower.split()[0] if lower.split() else ""
-    if first_word in COMMAND_STARTERS:
-        return "command"
+    if first_word in REQUEST_STARTERS:
+        return "request"
 
-    # Default: statement
-    return "statement"
+    # Plan/Commit (offers, suggestions, commitments)
+    for starter in PLAN_STARTERS:
+        if lower.startswith(starter):
+            return "plan_commit"
+
+    # Default: inform
+    return "inform"
 
 
 # ── Data loading ──────────────────────────────────────────────────
@@ -197,6 +214,8 @@ def load_corpus_ner(
         # Use all available annotated domains
         domains = [d.name for d in CORPUS_DIR.iterdir() if d.is_dir() and (d / "annotated.jsonl").exists()]
 
+    VALIDATED_DIR = CORPUS_DIR.parent / "validated"
+
     all_examples = []
     for domain in sorted(domains):
         jsonl_file = CORPUS_DIR / domain / "annotated.jsonl"
@@ -204,7 +223,19 @@ def load_corpus_ner(
             print(f"  ⚠ No annotations for domain '{domain}', skipping")
             continue
 
+        # Load GPT CLS labels if available
+        cls_labels_file = VALIDATED_DIR / domain / "cls_labels.jsonl"
+        gpt_cls: dict[str, str] = {}
+        if cls_labels_file.exists():
+            with open(cls_labels_file) as f:
+                for line in f:
+                    r = json.loads(line)
+                    if r["status"] == "ok":
+                        gpt_cls[r["sent_id"]] = r["cls_label"]
+            print(f"  {domain}: loaded {len(gpt_cls)} GPT CLS labels")
+
         count = 0
+        gpt_used = 0
         with open(jsonl_file) as f:
             for line in f:
                 data = json.loads(line)
@@ -224,7 +255,14 @@ def load_corpus_ner(
                         bio_tags[i] = f"{prefix}-{label}"
 
                 text = data.get("text", " ".join(words))
-                cls_label = classify_sentence(text)
+                sent_id = data.get("sent_id", "")
+
+                # Prefer GPT CLS label, fall back to bootstrap
+                if sent_id in gpt_cls:
+                    cls_label = gpt_cls[sent_id]
+                    gpt_used += 1
+                else:
+                    cls_label = classify_sentence(text)
 
                 all_examples.append({
                     "words": words,
@@ -234,7 +272,8 @@ def load_corpus_ner(
                 })
                 count += 1
 
-        print(f"  {domain}: {count} NER examples")
+        src = f"{gpt_used} GPT + {count - gpt_used} bootstrap" if gpt_used else "all bootstrap"
+        print(f"  {domain}: {count} NER examples ({src})")
 
     # Shuffle and split
     random.seed(seed)

@@ -34,13 +34,15 @@ dep2label:
 
 classification:
   labels:
-    - statement
+    - inform
+    - correction
+    - agreement
     - question
-    - question_fact
-    - command
-    - greeting
+    - plan_commit
+    - request
+    - feedback
+    - social
     - filler
-    - acknowledgment
 
 output:
   dir: "outputs/deberta-v3-large-nlp-en"
