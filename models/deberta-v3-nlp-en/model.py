@@ -55,6 +55,7 @@ class MultiTaskNLPModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
+        **kwargs,
     ) -> dict[str, torch.Tensor]:
         """Forward pass returning logits for all four tasks.
 
