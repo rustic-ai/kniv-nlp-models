@@ -348,6 +348,48 @@ def collect_agent_flan(config: dict):
     print(f"Agent-FLAN: {len(utterances)} utterances", flush=True)
 
 
+# ── Discord Dialogues ──────────────────────────────────────────────
+
+def collect_discord(config: dict):
+    """Load Discord casual conversations."""
+    cfg = config["sources"]["discord"]
+    out_dir = OUTPUT_DIR / "discord"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    output_file = out_dir / "utterances.jsonl"
+    if output_file.exists():
+        print("Discord: already collected.", flush=True)
+        return
+
+    from datasets import load_dataset
+    import re
+
+    print("  Loading Discord Dialogues...", flush=True)
+    dataset = load_dataset(cfg["dataset"], split="train", streaming=True)
+    max_utt = cfg.get("max_utterances", 30000)
+
+    utterances = []
+    for item in dataset:
+        text = item.get("text", "")
+        # Parse ChatML format — extract user/assistant turns
+        turns = re.split(r"<\|im_start\|>(?:user|assistant)\n?", text)
+        for turn in turns:
+            turn = re.sub(r"<\|im_end\|>", "", turn).strip()
+            if turn and len(turn) > 10 and len(turn) < 500:
+                utterances.append({
+                    "text": turn,
+                    "source": "discord",
+                    "domain": "conversation",
+                })
+            if len(utterances) >= max_utt:
+                break
+        if len(utterances) >= max_utt:
+            break
+
+    _save_utterances(utterances, output_file)
+    print(f"Discord: {len(utterances)} utterances", flush=True)
+
+
 # ── Main ──────────────────────────────────────────────────────────
 
 COLLECTORS = {
@@ -358,6 +400,7 @@ COLLECTORS = {
     "airdialogue": collect_airdialogue,
     "glaive": collect_glaive,
     "agent_flan": collect_agent_flan,
+    "discord": collect_discord,
 }
 
 

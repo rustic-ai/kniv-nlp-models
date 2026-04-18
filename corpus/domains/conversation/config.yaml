@@ -42,6 +42,11 @@ sources:
     license: "Apache 2.0"
     max_utterances: 10000
 
+  discord:
+    dataset: "mookiezi/Discord-Dialogues"
+    license: "Apache 2.0"
+    max_utterances: 30000
+
 filtering:
   min_words: 5
   max_words: 100
