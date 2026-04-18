@@ -1,15 +1,22 @@
 """Export a trained multi-task model to ONNX and quantize to INT8.
 
 Usage:
-    python -m shared.export_onnx --model-dir outputs/distilroberta-nlp-en --output-dir onnx-output/
+    python -m shared.export_onnx \
+        --model-dir outputs/deberta-v3-nlp-en/best \
+        --encoder microsoft/deberta-v3-small \
+        --output-dir onnx-output/deberta-v3-nlp-en
 """
 
 import argparse
+import json
+import sys
 from pathlib import Path
 
 import torch
+import numpy as np
 import onnxruntime as ort
 from onnxruntime.quantization import quantize_dynamic, QuantType
+from transformers import AutoTokenizer
 
 
 def export_to_onnx(model, tokenizer, output_path: Path, max_length: int = 128):
@@ -52,8 +59,6 @@ def quantize_int8(input_path: Path, output_path: Path):
 
 def validate_onnx(onnx_path: Path, model, tokenizer, test_text: str = "Caroline went to the hospital yesterday."):
     """Compare PyTorch and ONNX outputs to verify export correctness."""
-    import numpy as np
-
     model.eval()
     inputs = tokenizer(test_text, return_tensors="pt", padding="max_length", max_length=128, truncation=True)
 
@@ -72,26 +77,77 @@ def validate_onnx(onnx_path: Path, model, tokenizer, test_text: str = "Caroline 
     )
 
     # Compare outputs
+    all_ok = True
     for i, name in enumerate(["ner_logits", "pos_logits", "dep_logits", "cls_logits"]):
         pt_out = pt_outputs[name].numpy()
         ort_out = ort_outputs[i]
         max_diff = np.max(np.abs(pt_out - ort_out))
-        print(f"  {name}: max diff = {max_diff:.6f} {'✓' if max_diff < 0.01 else '✗ MISMATCH'}")
+        ok = max_diff < 0.01
+        if not ok:
+            all_ok = False
+        print(f"  {name}: max diff = {max_diff:.6f} {'✓' if ok else '✗ MISMATCH'}")
+
+    return all_ok
 
 
 def main():
     parser = argparse.ArgumentParser(description="Export multi-task model to ONNX")
-    parser.add_argument("--model-dir", type=Path, required=True, help="Trained model directory")
+    parser.add_argument("--model-dir", type=Path, required=True, help="Trained model directory (e.g., outputs/.../best)")
+    parser.add_argument("--encoder", type=str, required=True, help="Base encoder name (e.g., microsoft/deberta-v3-small)")
     parser.add_argument("--output-dir", type=Path, required=True, help="ONNX output directory")
     parser.add_argument("--max-length", type=int, default=128)
     args = parser.parse_args()
 
+    # Validate inputs
+    if not args.model_dir.exists():
+        print(f"Error: model directory not found: {args.model_dir}")
+        sys.exit(1)
+
+    label_maps = args.model_dir / "label_maps.json"
+    if not label_maps.exists():
+        print(f"Error: no label_maps.json in {args.model_dir}")
+        sys.exit(1)
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load model and tokenizer
-    # (Implemented by each model's train.py — this is the generic export logic)
-    print(f"Export from {args.model_dir} to {args.output_dir}")
-    print("NOTE: Load your trained model and call export_to_onnx() + quantize_int8()")
+    # Add model directory to path for imports
+    model_module = args.model_dir.parent.parent
+    sys.path.insert(0, str(model_module))
+
+    # Import and load model dynamically
+    # The model.py is in the same directory structure as the trained output
+    from model import MultiTaskNLPModel
+
+    print(f"Loading model from {args.model_dir}...")
+    model = MultiTaskNLPModel.load(str(args.model_dir), args.encoder)
+    tokenizer = AutoTokenizer.from_pretrained(str(args.model_dir))
+
+    param_count = sum(p.numel() for p in model.parameters())
+    print(f"  Parameters: {param_count:,}")
+
+    # Export
+    print(f"\nExporting to ONNX (opset 14)...")
+    export_to_onnx(model, tokenizer, args.output_dir, args.max_length)
+
+    # Quantize
+    print(f"\nQuantizing to INT8...")
+    quantize_int8(args.output_dir, args.output_dir)
+
+    # Validate
+    print(f"\nValidating ONNX parity...")
+    ok = validate_onnx(args.output_dir / "model-int8.onnx", model, tokenizer)
+
+    # Copy tokenizer and config to output
+    tokenizer.save_pretrained(str(args.output_dir))
+    with open(label_maps) as f:
+        labels = json.load(f)
+    with open(args.output_dir / "label_maps.json", "w") as f:
+        json.dump(labels, f, indent=2)
+
+    print(f"\n{'✓ Export complete' if ok else '✗ Export completed with parity issues'}")
+    print(f"  FP32: {args.output_dir / 'model.onnx'}")
+    print(f"  INT8: {args.output_dir / 'model-int8.onnx'}")
+    print(f"  Tokenizer + labels: {args.output_dir}")
 
 
 if __name__ == "__main__":
