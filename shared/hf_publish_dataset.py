@@ -81,7 +81,7 @@ Each token has:
 
 ## Source
 
-- **Training code:** [rustic-ai/uniko-nlp-models](https://github.com/rustic-ai/uniko-nlp-models)
+- **Training code:** [rustic-ai/kniv-nlp-models](https://github.com/rustic-ai/kniv-nlp-models)
 - **Trained models:** [dragonscale-ai on HuggingFace](https://huggingface.co/dragonscale-ai)
 
 ## License

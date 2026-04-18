@@ -11,7 +11,7 @@ import requests
 
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 WIKI_HEADERS = {
-    "User-Agent": "uniko-nlp-models/1.0 (https://github.com/rustic-ai/uniko-nlp-models; research@dragonscale.ai)",
+    "User-Agent": "kniv-nlp-models/1.0 (https://github.com/rustic-ai/kniv-nlp-models; research@dragonscale.ai)",
 }
 
 

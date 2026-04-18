@@ -414,7 +414,7 @@ def collect_odoo(config: dict):
 # ── 5. Wikipedia business articles ───────────────────────────────
 
 WIKI_HEADERS = {
-    "User-Agent": "uniko-nlp-models/1.0 (https://github.com/rustic-ai/uniko-nlp-models; research@dragonscale.ai)",
+    "User-Agent": "kniv-nlp-models/1.0 (https://github.com/rustic-ai/kniv-nlp-models; research@dragonscale.ai)",
 }
 
 
