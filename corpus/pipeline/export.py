@@ -100,7 +100,13 @@ def apply_corrections_to_conllu(sentence_block: str, corrections: list[dict]) ->
                     continue  # skip malformed corrections
 
             if field == "pos":
-                cols[3] = str(new_value)  # UPOS column
+                # Only accept valid UPOS tags — reject GPT garbage
+                valid_upos = {"ADJ","ADP","ADV","AUX","CCONJ","DET","INTJ",
+                              "NOUN","NUM","PART","PRON","PROPN","PUNCT",
+                              "SCONJ","SYM","VERB","X"}
+                val = str(new_value).strip()
+                if val in valid_upos:
+                    cols[3] = val
             elif field == "dep":
                 cols[7] = str(new_value)  # DEPREL column
             elif field == "ner":
@@ -109,6 +115,39 @@ def apply_corrections_to_conllu(sentence_block: str, corrections: list[dict]) ->
                     cols[9] = "_"
                 else:
                     cols[9] = f"NER={new_value}"
+
+        result.append("\t".join(cols))
+
+    return "\n".join(result)
+
+
+def fix_bio_tags(sentence_block: str) -> str:
+    """Fix orphan I- tags (I- without preceding B- of same type)."""
+    lines = sentence_block.split("\n")
+    result = []
+    prev_ner_type = None
+
+    for line in lines:
+        if line.startswith("#") or not line.strip():
+            result.append(line)
+            continue
+
+        cols = line.split("\t")
+        if len(cols) < 10:
+            result.append(line)
+            continue
+
+        misc = cols[9]
+        if misc.startswith("NER=I-"):
+            ner_type = misc[6:]
+            if prev_ner_type != ner_type:
+                # Orphan I- tag — convert to B-
+                cols[9] = f"NER=B-{ner_type}"
+            prev_ner_type = ner_type
+        elif misc.startswith("NER=B-"):
+            prev_ner_type = misc[6:]
+        else:
+            prev_ner_type = None
 
         result.append("\t".join(cols))
 
@@ -178,6 +217,9 @@ def load_domain_annotations(domain: str) -> list[str]:
         if sent_id and sent_id in corrections:
             sent = apply_corrections_to_conllu(sent, corrections[sent_id])
             corrected_count += 1
+
+        # Fix orphan I- NER tags (I- without preceding B-)
+        sent = fix_bio_tags(sent)
 
         # Add CLS label
         if sent_id and sent_id in cls_labels:
