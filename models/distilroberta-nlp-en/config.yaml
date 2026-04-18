@@ -54,4 +54,4 @@ output:
 
 publish:
   hf_org: "dragonscale-ai"
-  hf_name: "uniko-distilroberta-nlp-en"
+  hf_name: "kniv-distilroberta-nlp-en"

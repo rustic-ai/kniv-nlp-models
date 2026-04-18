@@ -210,12 +210,12 @@ def train(soft_labels_dir: str, temperature: float = 3.0, alpha: float = 0.5):
     cls_map = {l: i for i, l in enumerate(cls_labels)}
 
     # Load training data
-    with open(DATA_DIR / "conll_train.json") as f:
-        conll_train = json.load(f)
+    with open(DATA_DIR / "ner_train.json") as f:
+        ner_train = json.load(f)
     with open(DATA_DIR / "ud_train.json") as f:
         ud_train = json.load(f)
-    with open(DATA_DIR / "conll_dev.json") as f:
-        conll_dev = json.load(f)
+    with open(DATA_DIR / "ner_dev.json") as f:
+        ner_dev = json.load(f)
     with open(DATA_DIR / "ud_dev.json") as f:
         ud_dev = json.load(f)
 
@@ -237,7 +237,7 @@ def train(soft_labels_dir: str, temperature: float = 3.0, alpha: float = 0.5):
 
     # Distillation datasets (include teacher logits)
     ner_loader = DataLoader(
-        DistillTokenDataset(conll_train, tokenizer, ner_map, "ner_tags", ner_teacher, max_length),
+        DistillTokenDataset(ner_train, tokenizer, ner_map, "ner_tags", ner_teacher, max_length),
         batch_size=batch_size, shuffle=True,
     )
     pos_loader = DataLoader(
@@ -249,13 +249,13 @@ def train(soft_labels_dir: str, temperature: float = 3.0, alpha: float = 0.5):
         batch_size=batch_size, shuffle=True,
     )
 
-    cls_examples = [ex for ex in ud_train + conll_train if "cls_label" in ex]
+    cls_examples = [ex for ex in ud_train + ner_train if "cls_label" in ex]
     cls_loader = DataLoader(
         DistillSeqDataset(cls_examples, tokenizer, cls_map, cls_teacher, max_length),
         batch_size=batch_size, shuffle=True,
     )
 
-    cls_dev_examples = [ex for ex in ud_dev + conll_dev if "cls_label" in ex]
+    cls_dev_examples = [ex for ex in ud_dev + ner_dev if "cls_label" in ex]
 
     # Student model
     model = MultiTaskNLPModel(
@@ -356,7 +356,7 @@ def train(soft_labels_dir: str, temperature: float = 3.0, alpha: float = 0.5):
 
         dev_results = evaluate_on_dev(
             model, tokenizer, device, vocabs,
-            conll_dev, ud_dev, cls_dev_examples, max_length,
+            ner_dev, ud_dev, cls_dev_examples, max_length,
         )
 
         ner_f1 = dev_results.get("ner", {}).get("f1", 0)

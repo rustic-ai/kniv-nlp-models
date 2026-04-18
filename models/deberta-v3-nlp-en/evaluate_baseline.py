@@ -61,8 +61,8 @@ def evaluate_spacy(model_name: str):
     print(f"\nEvaluating spaCy '{model_name}'...")
 
     # Load test data
-    with open(DATA_DIR / "conll_test.json") as f:
-        conll_test = json.load(f)
+    with open(DATA_DIR / "ner_test.json") as f:
+        ner_test = json.load(f)
     with open(DATA_DIR / "ud_test.json") as f:
         ud_test = json.load(f)
 
@@ -70,7 +70,7 @@ def evaluate_spacy(model_name: str):
 
     # ── NER ────────────────────────────────────────────────
     gold_ner, pred_ner = [], []
-    for ex in conll_test:
+    for ex in ner_test:
         text = " ".join(ex["words"])
         doc = nlp(text)
 

@@ -1,4 +1,4 @@
-"""Train the multi-task NLP model on UD EWT + CoNLL-2003.
+"""Train the multi-task NLP model on UD EWT + kniv corpus.
 
 Four tasks: NER, POS, dependency parsing (dep2label), sentence classification.
 
@@ -145,7 +145,7 @@ def predict_token_labels(model, dataloader, label_list, device):
 
 def evaluate_on_dev(
     model, tokenizer, device, vocabs,
-    conll_dev, ud_dev, cls_dev_examples, max_length,
+    ner_dev, ud_dev, cls_dev_examples, max_length,
 ):
     """Run all four tasks on dev sets and return metrics dict."""
     model.eval()
@@ -158,7 +158,7 @@ def evaluate_on_dev(
 
     # ── NER ────────────────────────────────────────────────
     gold_ner, pred_ner = [], []
-    for ex in conll_dev:
+    for ex in ner_dev:
         words = ex["words"]
         encoding = tokenizer(
             words, is_split_into_words=True,
@@ -301,14 +301,14 @@ def train():
     cls_map = {l: i for i, l in enumerate(cls_labels)}
 
     # Load train data
-    with open(DATA_DIR / "conll_train.json") as f:
-        conll_train = json.load(f)
+    with open(DATA_DIR / "ner_train.json") as f:
+        ner_train = json.load(f)
     with open(DATA_DIR / "ud_train.json") as f:
         ud_train = json.load(f)
 
     # Load dev data
-    with open(DATA_DIR / "conll_dev.json") as f:
-        conll_dev = json.load(f)
+    with open(DATA_DIR / "ner_dev.json") as f:
+        ner_dev = json.load(f)
     with open(DATA_DIR / "ud_dev.json") as f:
         ud_dev = json.load(f)
 
@@ -319,7 +319,7 @@ def train():
     # Train datasets
     batch_size = config["training"]["batch_size"]
     ner_loader = DataLoader(
-        TokenClassificationDataset(conll_train, tokenizer, ner_map, "ner_tags", max_length),
+        TokenClassificationDataset(ner_train, tokenizer, ner_map, "ner_tags", max_length),
         batch_size=batch_size, shuffle=True,
     )
     pos_loader = DataLoader(
@@ -331,12 +331,12 @@ def train():
         batch_size=batch_size, shuffle=True,
     )
     cls_loader = DataLoader(
-        SequenceClassificationDataset(ud_train + conll_train, tokenizer, cls_map, max_length),
+        SequenceClassificationDataset(ud_train + ner_train, tokenizer, cls_map, max_length),
         batch_size=batch_size, shuffle=True,
     )
 
     # Dev CLS examples
-    cls_dev_examples = [ex for ex in ud_dev + conll_dev if "cls_label" in ex]
+    cls_dev_examples = [ex for ex in ud_dev + ner_dev if "cls_label" in ex]
 
     # Model
     model = MultiTaskNLPModel(
@@ -437,7 +437,7 @@ def train():
 
         dev_results = evaluate_on_dev(
             model, tokenizer, device, vocabs,
-            conll_dev, ud_dev, cls_dev_examples, max_length,
+            ner_dev, ud_dev, cls_dev_examples, max_length,
         )
 
         ner_f1 = dev_results.get("ner", {}).get("f1", 0)

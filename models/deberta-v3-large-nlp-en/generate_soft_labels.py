@@ -109,8 +109,8 @@ def generate(model_dir: str):
         vocabs = json.load(f)
 
     # Load training data (we generate soft labels on the TRAINING set)
-    with open(DATA_DIR / "conll_train.json") as f:
-        conll_train = json.load(f)
+    with open(DATA_DIR / "ner_train.json") as f:
+        ner_train = json.load(f)
     with open(DATA_DIR / "ud_train.json") as f:
         ud_train = json.load(f)
 
@@ -122,15 +122,15 @@ def generate(model_dir: str):
     # ── Token-level soft labels (NER from CoNLL, POS+Dep from UD) ──
 
     # NER logits from CoNLL training data
-    print(f"Generating NER soft labels ({len(conll_train)} examples)...", flush=True)
-    ner_loader = DataLoader(SimpleTokenDataset(conll_train, tokenizer, max_length), batch_size=batch_size)
+    print(f"Generating NER soft labels ({len(ner_train)} examples)...", flush=True)
+    ner_loader = DataLoader(SimpleTokenDataset(ner_train, tokenizer, max_length), batch_size=batch_size)
     ner_logits_all = []
     for i, batch in enumerate(ner_loader):
         with torch.no_grad():
             out = model(batch["input_ids"].to(device), batch["attention_mask"].to(device))
         ner_logits_all.append(out["ner_logits"].cpu())
         if (i + 1) % 100 == 0:
-            print(f"  NER: {(i+1)*batch_size}/{len(conll_train)}", flush=True)
+            print(f"  NER: {(i+1)*batch_size}/{len(ner_train)}", flush=True)
     torch.save(torch.cat(ner_logits_all), output_dir / "ner_logits.pt")
     print(f"  Saved ner_logits.pt: {torch.cat(ner_logits_all).shape}", flush=True)
 
@@ -152,7 +152,7 @@ def generate(model_dir: str):
     print(f"  Saved dep_logits.pt: {torch.cat(dep_logits_all).shape}", flush=True)
 
     # CLS logits from combined data
-    cls_examples = [ex for ex in ud_train + conll_train if "cls_label" in ex]
+    cls_examples = [ex for ex in ud_train + ner_train if "cls_label" in ex]
     print(f"Generating CLS soft labels ({len(cls_examples)} examples)...", flush=True)
     cls_loader = DataLoader(SimpleSeqDataset(cls_examples, tokenizer, max_length), batch_size=batch_size)
     cls_logits_all = []
@@ -170,7 +170,7 @@ def generate(model_dir: str):
         "max_length": max_length,
         "vocabs": vocabs,
         "counts": {
-            "ner_examples": len(conll_train),
+            "ner_examples": len(ner_train),
             "ud_examples": len(ud_train),
             "cls_examples": len(cls_examples),
         },

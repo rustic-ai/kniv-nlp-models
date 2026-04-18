@@ -59,4 +59,4 @@ output:
 
 publish:
   hf_org: "dragonscale-ai"
-  hf_name: "uniko-phi4-mini-llm-en"
+  hf_name: "kniv-phi4-mini-llm-en"

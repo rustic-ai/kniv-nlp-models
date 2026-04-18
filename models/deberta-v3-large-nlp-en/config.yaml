@@ -1,5 +1,5 @@
 # Training configuration for deberta-v3-large-nlp-en (TEACHER model)
-# Multi-task: NER (CoNLL-03) + POS (UD EWT) + Dep (UD EWT) + CLS (intent)
+# Multi-task: NER (kniv corpus) + POS (UD EWT) + Dep (UD EWT) + CLS (intent)
 #
 # This is the teacher model for knowledge distillation.
 # After training, run generate_soft_labels.py to produce soft targets,
@@ -14,7 +14,7 @@ data:
   ud_train: "data/ud-english-ewt/en_ewt-ud-train.conllu"
   ud_dev: "data/ud-english-ewt/en_ewt-ud-dev.conllu"
   ud_test: "data/ud-english-ewt/en_ewt-ud-test.conllu"
-  conll_dataset: "conll2003"
+  ner_source: "corpus"  # NER from kniv validated corpus
 
 training:
   epochs: 10
@@ -48,4 +48,4 @@ output:
 
 publish:
   hf_org: "dragonscale-ai"
-  hf_name: "uniko-deberta-v3-large-nlp-en"
+  hf_name: "kniv-deberta-v3-large-nlp-en"
