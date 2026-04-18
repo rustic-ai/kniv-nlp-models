@@ -122,11 +122,11 @@ def main():
 
     # ── NER ───────────────────────────────────────────────
     print("\nEvaluating NER...")
-    with open(DATA_DIR / "conll_test.json") as f:
-        conll_test = json.load(f)
+    with open(DATA_DIR / "ner_test.json") as f:
+        ner_test = json.load(f)
 
     gold_ner, pred_ner = [], []
-    for ex in conll_test:
+    for ex in ner_test:
         outputs, encoding = run_onnx_inference(session, tokenizer, ex["words"])
         pred = align_token_preds(encoding, outputs[0], vocabs["ner_labels"], len(ex["words"]))
         gold_ner.append(ex["ner_tags"])
@@ -167,7 +167,7 @@ def main():
     # ── CLS ───────────────────────────────────────────────
     print("Evaluating CLS...")
     gold_cls, pred_cls = [], []
-    for ex in ud_test + conll_test:
+    for ex in ud_test + ner_test:
         if "cls_label" not in ex:
             continue
         text = ex.get("text", " ".join(ex["words"]))

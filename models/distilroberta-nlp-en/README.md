@@ -14,7 +14,7 @@ datasets:
 pipeline_tag: token-classification
 ---
 
-# uniko-distilroberta-nlp-en
+# kniv-distilroberta-nlp-en
 
 Multi-task NLP model for English: NER + POS tagging + dependency parsing in a single forward pass.
 

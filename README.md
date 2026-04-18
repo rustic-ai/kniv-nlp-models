@@ -130,17 +130,16 @@ uv run python -m corpus.pipeline.validate --domain business
 
 ### To HuggingFace ([dragonscale-ai](https://huggingface.co/dragonscale-ai))
 - ONNX models (INT8 quantized) + tokenizers + model cards
-- `uniko-deberta-v3-large-nlp-en` — server-side NLP
-- `uniko-deberta-v3-nlp-en` — edge NLP (distilled)
-- `uniko-phi4-mini-llm-en` — business domain LLM (LoRA adapters)
+- `kniv-deberta-v3-large-nlp-en` — server-side NLP
+- `kniv-deberta-v3-nlp-en` — edge NLP (distilled)
+- `kniv-phi4-mini-llm-en` — business domain LLM (LoRA adapters)
 
 ## Training Data
 
 | Dataset | Tasks | License |
 |---------|-------|---------|
 | [UD English EWT v2.14](https://universaldependencies.org/) | POS, Dep | CC BY-SA 4.0 |
-| [CoNLL-2003](https://www.clips.uantwerpen.be/conll2003/ner/) | NER | Research use |
-| [Custom corpus](corpus/) | All tasks | Mixed (see domain READMEs) |
+| [kniv corpus](corpus/) | NER, CLS | Mixed (see domain READMEs) |
 
 ## Project Structure
 

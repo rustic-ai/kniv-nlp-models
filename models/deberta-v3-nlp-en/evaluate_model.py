@@ -1,6 +1,6 @@
 """Full benchmark of a trained multi-task model on held-out test sets.
 
-Runs inference on CoNLL-2003 test (NER), UD EWT test (POS + dep),
+Runs inference on kniv corpus test (NER), UD EWT test (POS + dep),
 and bootstrap CLS labels.  Reports all metrics and saves eval_results.json.
 
 Usage:
@@ -100,12 +100,12 @@ def main():
     results = {}
 
     # ── NER evaluation ────────────────────────────────────────
-    print("\nEvaluating NER on CoNLL-2003 test...")
-    with open(DATA_DIR / "conll_test.json") as f:
-        conll_test = json.load(f)
+    print("\nEvaluating NER on kniv corpus test...")
+    with open(DATA_DIR / "ner_test.json") as f:
+        ner_test = json.load(f)
 
     gold_ner, pred_ner = [], []
-    for ex in conll_test:
+    for ex in ner_test:
         pred = predict_token_labels(
             model, tokenizer, ex["words"], vocabs["ner_labels"], "ner_logits", device,
         )
@@ -167,7 +167,7 @@ def main():
     # ── CLS evaluation ────────────────────────────────────────
     print("Evaluating CLS on bootstrap labels...")
     gold_cls, pred_cls_list = [], []
-    all_examples = ud_test + conll_test
+    all_examples = ud_test + ner_test
     for ex in all_examples:
         if "cls_label" not in ex:
             continue

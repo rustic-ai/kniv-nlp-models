@@ -4,13 +4,13 @@ Uploads the final train/dev/test CoNLL-U splits along with a dataset card
 and metadata. The dataset can then be loaded with:
 
     from datasets import load_dataset
-    ds = load_dataset("dragonscale-ai/uniko-corpus-en")
+    ds = load_dataset("dragonscale-ai/kniv-corpus-en")
 
 Usage:
     python -m shared.hf_publish_dataset \
         --corpus-dir corpus/output/final \
         --org dragonscale-ai \
-        --name uniko-corpus-en
+        --name kniv-corpus-en
 """
 
 from __future__ import annotations
@@ -219,7 +219,7 @@ def main():
     parser.add_argument("--corpus-dir", type=Path, default=Path("corpus/output/final"),
                         help="Directory with train/dev/test CoNLL-U files")
     parser.add_argument("--org", default="dragonscale-ai", help="HuggingFace organization")
-    parser.add_argument("--name", default="uniko-corpus-en", help="Dataset name on HuggingFace")
+    parser.add_argument("--name", default="kniv-corpus-en", help="Dataset name on HuggingFace")
     args = parser.parse_args()
 
     publish_dataset(args.corpus_dir, args.org, args.name)
