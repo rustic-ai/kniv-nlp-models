@@ -1,0 +1,57 @@
+# Training configuration for deberta-v3-nlp-en
+# Multi-task: NER (CoNLL-03) + POS (UD EWT) + Dep (UD EWT) + CLS (intent)
+
+model:
+  encoder: "microsoft/deberta-v3-small"
+  max_length: 128
+  dropout: 0.1
+
+data:
+  ud_train: "data/ud-english-ewt/en_ewt-ud-train.conllu"
+  ud_dev: "data/ud-english-ewt/en_ewt-ud-dev.conllu"
+  ud_test: "data/ud-english-ewt/en_ewt-ud-test.conllu"
+  conll_dataset: "conll2003"  # loaded via HuggingFace Datasets
+
+training:
+  epochs: 10
+  batch_size: 16
+  learning_rate: 3.0e-5  # slightly lower LR — DeBERTa benefits from gentler fine-tuning
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  # Multi-task loss weights
+  ner_loss_weight: 1.0
+  pos_loss_weight: 1.0
+  dep_loss_weight: 1.0
+  cls_loss_weight: 0.5  # lower weight — less training data than NER/POS/dep
+  # Task alternation: how many batches of each task per cycle
+  batches_per_task: 1
+
+dep2label:
+  # Encoding scheme for dependency parsing as token classification
+  # Format: {signed_offset}@{relation}@{head_UPOS}
+  # Example: +1@nsubj@VERB means "my head is the 1st VERB to the right, relation nsubj"
+  encoding: "rel-pos"
+
+classification:
+  # Sentence-level intent/type classification
+  # Labels: what kind of utterance this is
+  labels:
+    - statement        # declarative factual content ("Caroline works at the hospital")
+    - question         # genuine question ("Where is the store?")
+    - question_fact    # question embedding factual content ("Did you know she went to Paris?")
+    - command          # imperative / request ("Show me the report")
+    - greeting         # social opener ("Hey!", "Hi there")
+    - filler           # reaction / backchannel ("lol", "Wow!", "Sure thing", "Sounds good")
+    - acknowledgment   # agreement / confirmation ("OK", "Got it", "Right")
+  # Bootstrap: use rule-based labeling on UD EWT sentences, then manually
+  # review a sample.  The UD EWT text field often has genre metadata
+  # (reviews, emails, answers, newsgroups) that helps with labeling.
+
+output:
+  dir: "outputs/deberta-v3-nlp-en"
+  save_every_epoch: true
+
+publish:
+  hf_org: "dragonscale-ai"
+  hf_name: "uniko-deberta-v3-nlp-en"
