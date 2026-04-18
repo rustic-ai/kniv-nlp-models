@@ -15,14 +15,26 @@ env/
 data/ud-english-ewt/
 data/conll03/
 data/raw/
+data/prepared/
 
 # Model outputs (large files)
 outputs/
 checkpoints/
+onnx-output/
 *.onnx
 *.pt
 *.bin
 *.safetensors
+*.model  # sentencepiece models
+
+# Corpus output (generated, large)
+corpus/output/
+
+# Git clones inside corpus (collected sources)
+corpus/domains/*/output/
+**/cpython/
+**/documentation/
+**/osbooks-*/
 
 # IDE
 .idea/
@@ -40,5 +52,6 @@ Thumbs.db
 # HuggingFace cache
 .cache/
 
-# Corpus output (generated, large)
-corpus/output/
+# Archives
+*.tar.gz
+*.zip
