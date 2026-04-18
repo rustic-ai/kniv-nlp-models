@@ -1,10 +1,13 @@
-"""Export annotated + validated corpus to final format.
+"""Export annotated + validated + classified corpus to final format.
 
-Merges all domain outputs, applies corrections from validation,
-splits into train/dev/test, and exports as CoNLL-U + HF Datasets.
+Applies GPT validation corrections to spaCy annotations,
+merges CLS labels, splits into train/dev/test, and exports as CoNLL-U.
+
+Pipeline: annotate → validate → classify → export (this step)
 
 Usage:
-    python -m corpus.pipeline.export
+    python -m corpus.pipeline.export \
+        --domains conversation narrative business technical news encyclopedic
 """
 
 from __future__ import annotations
@@ -17,19 +20,141 @@ from pathlib import Path
 from .config import ANNOTATED_DIR, VALIDATED_DIR, FINAL_DIR
 
 
+def load_corrections(domain: str) -> dict[str, list[dict]]:
+    """Load GPT validation corrections for a domain.
+
+    Returns {sent_id: [corrections]} where each correction has
+    token_index, field (pos/dep/ner), old_value, new_value.
+    """
+    # Deduplicate: for each sent_id, keep the last (most recent) result
+    results_file = VALIDATED_DIR / domain / "validation_results.jsonl"
+    if not results_file.exists():
+        return {}
+
+    by_id: dict[str, list[dict]] = {}
+    with open(results_file) as f:
+        for line in f:
+            r = json.loads(line)
+            if r["status"] == "ok" and r["result"].get("corrections"):
+                corrections = r["result"]["corrections"]
+                if corrections:
+                    by_id[r["sent_id"]] = corrections
+
+    return by_id
+
+
+def load_cls_labels(domain: str) -> dict[str, str]:
+    """Load GPT CLS labels for a domain."""
+    cls_file = VALIDATED_DIR / domain / "cls_labels.jsonl"
+    if not cls_file.exists():
+        return {}
+
+    labels = {}
+    with open(cls_file) as f:
+        for line in f:
+            r = json.loads(line)
+            if r["status"] == "ok":
+                labels[r["sent_id"]] = r["cls_label"]
+    return labels
+
+
+def apply_corrections_to_conllu(sentence_block: str, corrections: list[dict]) -> str:
+    """Apply GPT corrections to a CoNLL-U sentence block.
+
+    Modifies POS (column 3), deprel (column 7), and NER (MISC column 9).
+    """
+    lines = sentence_block.split("\n")
+    result = []
+
+    for line in lines:
+        # Comment or metadata lines — pass through
+        if line.startswith("#") or not line.strip():
+            result.append(line)
+            continue
+
+        cols = line.split("\t")
+        if len(cols) < 10:
+            result.append(line)
+            continue
+
+        token_idx = int(cols[0]) - 1  # CoNLL-U is 1-indexed, corrections are 0-indexed
+
+        for corr in corrections:
+            if not isinstance(corr, dict):
+                continue
+            if corr.get("token_index") != token_idx:
+                continue
+
+            field = corr.get("field", "")
+            new_value = corr.get("new_value", "")
+            if not new_value:
+                continue
+
+            # Handle nested dict values (GPT sometimes returns {head: X, dep: Y})
+            if isinstance(new_value, dict):
+                if field == "dep" and "dep" in new_value:
+                    new_value = str(new_value["dep"])
+                elif field == "pos" and "pos" in new_value:
+                    new_value = str(new_value["pos"])
+                else:
+                    continue  # skip malformed corrections
+
+            if field == "pos":
+                cols[3] = str(new_value)  # UPOS column
+            elif field == "dep":
+                cols[7] = str(new_value)  # DEPREL column
+            elif field == "ner":
+                # NER is in MISC column (index 9) as NER=B-ORG etc.
+                if new_value == "O":
+                    cols[9] = "_"
+                else:
+                    cols[9] = f"NER={new_value}"
+
+        result.append("\t".join(cols))
+
+    return "\n".join(result)
+
+
+def add_cls_to_conllu(sentence_block: str, cls_label: str) -> str:
+    """Add CLS label as a comment line in the CoNLL-U block."""
+    lines = sentence_block.split("\n")
+    # Insert after sent_id and text comments
+    insert_at = 0
+    for i, line in enumerate(lines):
+        if line.startswith("#"):
+            insert_at = i + 1
+        else:
+            break
+    lines.insert(insert_at, f"# cls = {cls_label}")
+    return "\n".join(lines)
+
+
+def extract_sent_id(sentence_block: str) -> str | None:
+    """Extract sent_id from a CoNLL-U sentence block."""
+    for line in sentence_block.split("\n"):
+        if line.startswith("# sent_id"):
+            return line.split("=", 1)[1].strip()
+    return None
+
+
 def load_domain_annotations(domain: str) -> list[str]:
-    """Load CoNLL-U annotations for a domain."""
+    """Load CoNLL-U annotations, apply corrections and CLS labels."""
     conllu_file = ANNOTATED_DIR / domain / "annotated.conllu"
     if not conllu_file.exists():
-        print(f"  ⚠ No annotations for domain '{domain}', skipping")
+        print(f"  ⚠ No annotations for domain '{domain}', skipping", flush=True)
         return []
+
+    # Load corrections and CLS labels
+    corrections = load_corrections(domain)
+    cls_labels = load_cls_labels(domain)
+    print(f"  {domain}: {len(corrections)} corrections, {len(cls_labels)} CLS labels", flush=True)
 
     with open(conllu_file) as f:
         content = f.read()
 
-    # Split into sentences (separated by double newlines)
+    # Split into sentences
     sentences = []
-    current = []
+    current: list[str] = []
     for line in content.split("\n"):
         if line.strip() == "" and current:
             sentences.append("\n".join(current))
@@ -39,7 +164,30 @@ def load_domain_annotations(domain: str) -> list[str]:
     if current:
         sentences.append("\n".join(current))
 
-    return [s for s in sentences if s.strip()]
+    # Apply corrections and CLS labels
+    corrected_count = 0
+    cls_count = 0
+    result = []
+    for sent in sentences:
+        if not sent.strip():
+            continue
+
+        sent_id = extract_sent_id(sent)
+
+        # Apply validation corrections
+        if sent_id and sent_id in corrections:
+            sent = apply_corrections_to_conllu(sent, corrections[sent_id])
+            corrected_count += 1
+
+        # Add CLS label
+        if sent_id and sent_id in cls_labels:
+            sent = add_cls_to_conllu(sent, cls_labels[sent_id])
+            cls_count += 1
+
+        result.append(sent)
+
+    print(f"  {domain}: {len(result)} sentences ({corrected_count} corrected, {cls_count} with CLS)", flush=True)
+    return result
 
 
 def merge_and_split(
@@ -53,10 +201,9 @@ def merge_and_split(
 
     for domain in domains:
         sentences = load_domain_annotations(domain)
-        print(f"  {domain}: {len(sentences)} sentences")
         all_sentences.extend(sentences)
 
-    print(f"\nTotal: {len(all_sentences)} sentences")
+    print(f"\nTotal: {len(all_sentences)} sentences", flush=True)
 
     # Shuffle deterministically
     random.seed(seed)
@@ -74,7 +221,7 @@ def merge_and_split(
     }
 
     for name, sents in splits.items():
-        print(f"  {name}: {len(sents)} sentences")
+        print(f"  {name}: {len(sents)} sentences", flush=True)
 
     return splits
 
@@ -84,14 +231,14 @@ def write_conllu(sentences: list[str], output_path: Path):
     with open(output_path, "w") as f:
         for sent in sentences:
             f.write(sent + "\n\n")
-    print(f"  Written: {output_path} ({len(sentences)} sentences)")
+    print(f"  Written: {output_path} ({len(sentences)} sentences)", flush=True)
 
 
 def export_corpus(domains: list[str]):
-    """Export the full corpus."""
+    """Export the full corpus with corrections applied."""
     FINAL_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("Merging domains and splitting...")
+    print("Loading annotations, applying corrections and CLS labels...", flush=True)
     splits = merge_and_split(domains)
 
     for name, sentences in splits.items():
@@ -106,7 +253,7 @@ def export_corpus(domains: list[str]):
     with open(FINAL_DIR / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
-    print(f"\nCorpus exported to {FINAL_DIR}")
+    print(f"\nCorpus exported to {FINAL_DIR}", flush=True)
 
 
 def main():
