@@ -1,7 +1,8 @@
-"""Preprocess conversation utterances into individual sentences.
+"""Preprocess conversation utterances with prev_text linking.
 
-Reads utterances from all collected sources, filters, deduplicates,
-and outputs sentences.jsonl.
+Unlike other domains, conversation utterances are NOT sentence-split.
+Each utterance is kept as one unit (the natural dialog act boundary).
+prev_text is linked by sorting utterances within each conv_id by turn_idx.
 
 Usage:
     python -m corpus.domains.conversation.preprocess
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import defaultdict
 from pathlib import Path
 
 import yaml
@@ -27,28 +29,10 @@ def load_config() -> dict:
 def clean_text(text: str) -> str:
     text = text.strip()
     text = re.sub(r"\s+", " ", text)
-    if text.count('"') == 1:
-        text = text.replace('"', "")
-    return text
-
-
-def split_sentences(text: str) -> list[str]:
-    sentences, current = [], []
-    for word in text.split():
-        current.append(word)
-        if word and word[-1] in ".!?":
-            base = word.rstrip(".!?").lower()
-            if base in {"mr", "mrs", "ms", "dr", "etc", "vs", "e.g", "i.e"} or word.endswith("..."):
-                continue
-            sentence = " ".join(current).strip()
-            if sentence:
-                sentences.append(sentence)
-            current = []
-    if current:
-        sentence = " ".join(current).strip()
-        if sentence:
-            sentences.append(sentence)
-    return sentences
+    # Remove stray ChatML artifacts
+    text = re.sub(r"<\|im_(?:start|end)\|>", "", text)
+    text = re.sub(r"<\|end_of_text\|>", "", text)
+    return text.strip()
 
 
 def is_valid(text: str, min_words: int, max_words: int, min_chars: int,
@@ -61,10 +45,8 @@ def is_valid(text: str, min_words: int, max_words: int, min_chars: int,
     for pattern in skip_patterns:
         if pattern.search(text):
             return False
-    if text == text.upper() and len(text) > 30:
-        return False
     alpha = sum(c.isalpha() or c.isspace() for c in text) / max(len(text), 1)
-    if alpha < 0.7:
+    if alpha < 0.6:
         return False
     return True
 
@@ -77,7 +59,8 @@ def main():
     min_chars = filt.get("min_chars", 15)
     skip_patterns = [re.compile(p) for p in filt.get("skip_patterns", [])]
 
-    all_sentences = []
+    # Load all utterances from all sources
+    all_utterances = []
     for source_dir in sorted(OUTPUT_DIR.iterdir()):
         if not source_dir.is_dir():
             continue
@@ -87,36 +70,70 @@ def main():
                 for line in f:
                     data = json.loads(line)
                     text = clean_text(data.get("text", ""))
-                    if not text:
+                    if not text or not is_valid(text, min_words, max_words, min_chars, skip_patterns):
                         continue
-                    for sent in split_sentences(text):
-                        all_sentences.append({
-                            "text": sent,
-                            "source": data.get("source", source_dir.name),
-                            "domain": "conversation",
-                        })
-                        count += 1
-            print(f"  {source_dir.name}: {count} raw sentences", flush=True)
+                    data["text"] = text
+                    all_utterances.append(data)
+                    count += 1
+            print(f"  {source_dir.name}: {count} valid utterances", flush=True)
 
-    print(f"\nTotal raw: {len(all_sentences)}", flush=True)
+    print(f"\nTotal valid utterances: {len(all_utterances)}", flush=True)
 
-    final, seen = [], set()
-    for sent in all_sentences:
-        text = sent["text"].strip()
-        if not text or not is_valid(text, min_words, max_words, min_chars, skip_patterns):
-            continue
-        key = text.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        final.append(sent)
+    # Dedup by (conv_id, turn_idx) for structured data, by text for unstructured
+    seen_conv_turns = set()
+    seen_texts = set()
+    deduped = []
+    for utt in all_utterances:
+        conv_id = utt.get("conv_id")
+        if conv_id:
+            key = (conv_id, utt.get("turn_idx", 0))
+            if key in seen_conv_turns:
+                continue
+            seen_conv_turns.add(key)
+        else:
+            key = utt["text"].lower()
+            if key in seen_texts:
+                continue
+            seen_texts.add(key)
+        deduped.append(utt)
 
+    print(f"After dedup: {len(deduped)}", flush=True)
+
+    # Group by conv_id and link prev_text
+    by_conv = defaultdict(list)
+    no_conv = []
+    for utt in deduped:
+        conv_id = utt.get("conv_id")
+        if conv_id:
+            by_conv[conv_id].append(utt)
+        else:
+            no_conv.append(utt)
+
+    # Sort each conversation by turn_idx and link prev_text
+    linked = 0
+    final = []
+    for conv_id, turns in by_conv.items():
+        turns.sort(key=lambda x: x.get("turn_idx", 0))
+        for i, turn in enumerate(turns):
+            if i > 0:
+                turn["prev_text"] = turns[i - 1]["text"]
+                linked += 1
+            final.append(turn)
+
+    # Add non-conversation utterances (no prev_text)
+    final.extend(no_conv)
+
+    print(f"Conversations: {len(by_conv)}", flush=True)
+    print(f"Utterances with prev_text: {linked}", flush=True)
+    print(f"Utterances without prev_text: {len(final) - linked}", flush=True)
+
+    # Write output
     output_file = OUTPUT_DIR / "sentences.jsonl"
     with open(output_file, "w") as f:
         for sent in final:
             f.write(json.dumps(sent) + "\n")
 
-    print(f"\nPreprocessed {len(final)} sentences → {output_file}", flush=True)
+    print(f"\nPreprocessed {len(final)} utterances → {output_file}", flush=True)
 
 
 if __name__ == "__main__":

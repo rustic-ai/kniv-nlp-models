@@ -107,11 +107,21 @@ class SequenceClassificationDataset(Dataset):
     def __getitem__(self, idx):
         example = self.examples[idx]
         text = example.get("text", " ".join(example["words"]))
+        prev_text = example.get("prev_text")
 
-        encoding = self.tokenizer(
-            text, max_length=self.max_length, padding="max_length",
-            truncation=True, return_tensors="pt",
-        )
+        if prev_text:
+            # Text-pair encoding: [CLS] prev_text [SEP] text [SEP]
+            encoding = self.tokenizer(
+                prev_text, text,
+                max_length=self.max_length, padding="max_length",
+                truncation="only_first",  # truncate prev_text, preserve current
+                return_tensors="pt",
+            )
+        else:
+            encoding = self.tokenizer(
+                text, max_length=self.max_length, padding="max_length",
+                truncation=True, return_tensors="pt",
+            )
 
         return {
             "input_ids": encoding["input_ids"].squeeze(0),
@@ -250,10 +260,18 @@ def evaluate_on_dev(
     gold_cls, pred_cls = [], []
     for ex in cls_dev_examples:
         text = ex.get("text", " ".join(ex["words"]))
-        encoding = tokenizer(
-            text, max_length=max_length, padding="max_length",
-            truncation=True, return_tensors="pt",
-        )
+        prev_text = ex.get("prev_text")
+        if prev_text:
+            encoding = tokenizer(
+                prev_text, text,
+                max_length=max_length, padding="max_length",
+                truncation="only_first", return_tensors="pt",
+            )
+        else:
+            encoding = tokenizer(
+                text, max_length=max_length, padding="max_length",
+                truncation=True, return_tensors="pt",
+            )
         with torch.no_grad():
             out = model(encoding["input_ids"].to(device), encoding["attention_mask"].to(device))
         pred_idx = out["cls_logits"][0].cpu().argmax().item()

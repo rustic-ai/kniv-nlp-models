@@ -46,29 +46,12 @@ CLS_LABELS = [
 
 MAX_CONCURRENT = 50
 
-SYSTEM_PROMPT = """You are classifying sentences by their communicative function.
+SYSTEM_PROMPT = """Classify each sentence by its communicative function.
+Some sentences include a prior utterance (PREV) for context.
 
-Assign exactly ONE label from this list:
-- inform: states a fact, opinion, or observation ("Revenue grew 15%", "The meeting is at 3pm")
-- correction: corrects prior information ("No, it was actually Tuesday", "That's wrong, the budget is 50K")
-- agreement: agrees with or confirms something ("Yes, exactly", "That's correct", "I agree")
-- question: asks for information ("Where is the report?", "Did you finish?", "How much?")
-- plan_commit: commits to action, offers, suggests, or plans ("I'll send it tomorrow", "Let's try option B", "We could use a different approach")
-- request: asks someone to do something ("Send me the report", "Please update the spreadsheet", "Show me the data")
-- feedback: acknowledges without adding information ("OK", "Got it", "I see", "Hmm", "Right")
-- social: greeting, goodbye, thanks, apology ("Hi", "Thanks", "Sorry about that", "See you later")
-- filler: turn management, stalling, non-content ("Um", "Well", "So", "Anyway", "Let me think")
+Labels: inform, correction, agreement, question, plan_commit, request, feedback, social, filler
 
-You will receive numbered sentences. Return one label per line, in the same order.
-Example input:
-1. How are you?
-2. Revenue increased 15%.
-3. Send me the report.
-
-Example output:
-social
-inform
-request"""
+Return one label per line, same order as input."""
 
 # Sentences per API call — amortizes system prompt cost across batch
 CLASSIFY_BATCH_SIZE = 20
@@ -76,13 +59,21 @@ CLASSIFY_BATCH_SIZE = 20
 
 async def classify_batch(
     client: AsyncOpenAI,
-    batch: list[tuple[str, str]],  # [(sent_id, text), ...]
+    batch: list[tuple[str, str, str | None]],  # [(sent_id, text, prev_text), ...]
     semaphore: asyncio.Semaphore,
 ) -> list[dict]:
     """Classify a batch of sentences in one API call."""
     async with semaphore:
-        # Format numbered list
-        numbered = "\n".join(f"{i+1}. {text}" for i, (_, text) in enumerate(batch))
+        # Format numbered list — include prev_text when available
+        parts = []
+        for i, (_, text, prev_text) in enumerate(batch):
+            if prev_text:
+                # Truncate prev_text to keep costs down
+                prev = prev_text[-150:] if len(prev_text) > 150 else prev_text
+                parts.append(f"{i+1}. PREV: {prev}\n    CURR: {text}")
+            else:
+                parts.append(f"{i+1}. {text}")
+        numbered = "\n".join(parts)
 
         try:
             response = await client.chat.completions.create(
@@ -97,7 +88,7 @@ async def classify_batch(
             labels = [l.strip().lower() for l in content.split("\n") if l.strip()]
 
             results = []
-            for i, (sent_id, _) in enumerate(batch):
+            for i, (sent_id, _, _) in enumerate(batch):
                 if i < len(labels):
                     label = labels[i]
                     # Strip numbering if model includes it (e.g., "1. inform")
@@ -115,7 +106,7 @@ async def classify_batch(
 
             return results
         except Exception as e:
-            return [{"sent_id": sid, "status": "error", "error": str(e)} for sid, _ in batch]
+            return [{"sent_id": sid, "status": "error", "error": str(e)} for sid, _, _ in batch]
 
 
 async def classify_domain(domain: str, resume: bool = False):
@@ -159,7 +150,7 @@ async def classify_domain(domain: str, resume: bool = False):
     # Build batches of CLASSIFY_BATCH_SIZE sentences for API efficiency
     api_batches = []
     for i in range(0, len(sentences), CLASSIFY_BATCH_SIZE):
-        batch = [(s["sent_id"], s["text"]) for s in sentences[i:i + CLASSIFY_BATCH_SIZE]]
+        batch = [(s["sent_id"], s["text"], s.get("prev_text")) for s in sentences[i:i + CLASSIFY_BATCH_SIZE]]
         api_batches.append(batch)
 
     chunk_size = 25  # concurrent API batches per progress chunk (25 × 20 = 500 sentences)

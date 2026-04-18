@@ -264,12 +264,15 @@ def load_corpus_ner(
                 else:
                     cls_label = classify_sentence(text)
 
-                all_examples.append({
+                example = {
                     "words": words,
                     "text": text,
                     "ner_tags": bio_tags,
                     "cls_label": cls_label,
-                })
+                }
+                if data.get("prev_text"):
+                    example["prev_text"] = data["prev_text"]
+                all_examples.append(example)
                 count += 1
 
         src = f"{gpt_used} GPT + {count - gpt_used} bootstrap" if gpt_used else "all bootstrap"
