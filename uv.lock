@@ -944,6 +944,72 @@ wheels = [
 ]
 
 [[package]]
+name = "kniv-nlp-models"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "accelerate" },
+    { name = "conllu" },
+    { name = "datasets" },
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
+    { name = "optimum", extra = ["onnxruntime"] },
+    { name = "pyyaml" },
+    { name = "sentencepiece" },
+    { name = "seqeval" },
+    { name = "torch" },
+    { name = "transformers" },
+]
+
+[package.optional-dependencies]
+corpus = [
+    { name = "openai" },
+    { name = "requests" },
+    { name = "spacy" },
+]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+eval = [
+    { name = "scikit-learn" },
+    { name = "spacy" },
+]
+llm = [
+    { name = "bitsandbytes" },
+    { name = "peft" },
+    { name = "trl" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "accelerate", specifier = ">=0.28" },
+    { name = "bitsandbytes", marker = "extra == 'llm'", specifier = ">=0.43" },
+    { name = "conllu", specifier = ">=4.5" },
+    { name = "datasets", specifier = ">=2.18" },
+    { name = "huggingface-hub", specifier = ">=0.22" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "onnxruntime", specifier = ">=1.17" },
+    { name = "openai", marker = "extra == 'corpus'", specifier = ">=1.0" },
+    { name = "optimum", extras = ["onnxruntime"], specifier = ">=1.18" },
+    { name = "peft", marker = "extra == 'llm'", specifier = ">=0.11" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "requests", marker = "extra == 'corpus'", specifier = ">=2.31" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
+    { name = "scikit-learn", marker = "extra == 'eval'", specifier = ">=1.4" },
+    { name = "sentencepiece", specifier = ">=0.2.1" },
+    { name = "seqeval", specifier = ">=1.2" },
+    { name = "spacy", marker = "extra == 'corpus'", specifier = ">=3.7" },
+    { name = "spacy", marker = "extra == 'eval'", specifier = ">=3.7" },
+    { name = "torch", specifier = ">=2.2" },
+    { name = "transformers", specifier = ">=4.40" },
+    { name = "trl", marker = "extra == 'llm'", specifier = ">=0.9" },
+]
+provides-extras = ["dev", "eval", "corpus", "llm"]
+
+[[package]]
 name = "markdown-it-py"
 version = "4.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2997,72 +3063,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/19/f5/cd531b2d15a671a40
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b0/70/d460bd685a170790ec89317e9bd33047988e4bce507b831f5db771e142de/tzdata-2026.1-py2.py3-none-any.whl", hash = "sha256:4b1d2be7ac37ceafd7327b961aa3a54e467efbdb563a23655fbfe0d39cfc42a9", size = 348952, upload-time = "2026-04-03T11:25:20.313Z" },
 ]
-
-[[package]]
-name = "uniko-nlp-models"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "accelerate" },
-    { name = "conllu" },
-    { name = "datasets" },
-    { name = "huggingface-hub" },
-    { name = "numpy" },
-    { name = "onnxruntime" },
-    { name = "optimum", extra = ["onnxruntime"] },
-    { name = "pyyaml" },
-    { name = "sentencepiece" },
-    { name = "seqeval" },
-    { name = "torch" },
-    { name = "transformers" },
-]
-
-[package.optional-dependencies]
-corpus = [
-    { name = "openai" },
-    { name = "requests" },
-    { name = "spacy" },
-]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-eval = [
-    { name = "scikit-learn" },
-    { name = "spacy" },
-]
-llm = [
-    { name = "bitsandbytes" },
-    { name = "peft" },
-    { name = "trl" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "accelerate", specifier = ">=0.28" },
-    { name = "bitsandbytes", marker = "extra == 'llm'", specifier = ">=0.43" },
-    { name = "conllu", specifier = ">=4.5" },
-    { name = "datasets", specifier = ">=2.18" },
-    { name = "huggingface-hub", specifier = ">=0.22" },
-    { name = "numpy", specifier = ">=1.26" },
-    { name = "onnxruntime", specifier = ">=1.17" },
-    { name = "openai", marker = "extra == 'corpus'", specifier = ">=1.0" },
-    { name = "optimum", extras = ["onnxruntime"], specifier = ">=1.18" },
-    { name = "peft", marker = "extra == 'llm'", specifier = ">=0.11" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "requests", marker = "extra == 'corpus'", specifier = ">=2.31" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
-    { name = "scikit-learn", marker = "extra == 'eval'", specifier = ">=1.4" },
-    { name = "sentencepiece", specifier = ">=0.2.1" },
-    { name = "seqeval", specifier = ">=1.2" },
-    { name = "spacy", marker = "extra == 'corpus'", specifier = ">=3.7" },
-    { name = "spacy", marker = "extra == 'eval'", specifier = ">=3.7" },
-    { name = "torch", specifier = ">=2.2" },
-    { name = "transformers", specifier = ">=4.40" },
-    { name = "trl", marker = "extra == 'llm'", specifier = ">=0.9" },
-]
-provides-extras = ["dev", "eval", "corpus", "llm"]
 
 [[package]]
 name = "urllib3"

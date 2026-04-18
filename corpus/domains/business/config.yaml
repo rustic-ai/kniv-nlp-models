@@ -51,7 +51,7 @@ sources:
       - 829224     # Starbucks
       - 896878     # Intuit
       - 1594805    # Shopify
-    user_agent: "uniko-nlp-models research@dragonscale.ai"
+    user_agent: "kniv-nlp-models research@dragonscale.ai"
     max_filings_per_company: 2   # most recent 10-K filings
 
   enron:

@@ -1,4 +1,4 @@
-# uniko-nlp-models
+# kniv-nlp-models
 
 Multi-task NLP model training and LLM domain adaptation for the [uniko](https://github.com/rustic-ai/uniko) cognitive memory system.
 

@@ -65,8 +65,8 @@ let dep_logits = &outputs["dep_logits"];
 ## Training
 
 ```bash
-git clone https://github.com/rustic-ai/uniko-nlp-models
-cd uniko-nlp-models
+git clone https://github.com/rustic-ai/kniv-nlp-models
+cd kniv-nlp-models
 ./scripts/setup.sh
 ./scripts/train.sh distilroberta-nlp-en
 ./scripts/export.sh distilroberta-nlp-en
