@@ -18,7 +18,7 @@ data:
 
 training:
   epochs: 10
-  batch_size: 8             # smaller batch — large model needs more VRAM
+  batch_size: 16            # T4 has 15GB VRAM, uses ~12GB at batch=16
   learning_rate: 2.0e-5     # lower LR for larger model
   warmup_ratio: 0.1
   weight_decay: 0.01
