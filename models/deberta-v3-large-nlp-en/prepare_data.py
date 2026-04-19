@@ -269,6 +269,7 @@ def load_corpus_ner(
                     "text": text,
                     "ner_tags": bio_tags,
                     "cls_label": cls_label,
+                    "_sent_id": data.get("sent_id", f"{domain}-{count}"),
                 }
                 if data.get("prev_text"):
                     example["prev_text"] = data["prev_text"]
@@ -414,11 +415,70 @@ def main():
     gmb_ner = load_gmb_ner()
     print(f"  GMB — Train: {len(gmb_ner['train'])}, Dev: {len(gmb_ner['validation'])}, Test: {len(gmb_ner['test'])}")
 
-    # Merge: corpus + GMB
-    ner_data = {
-        split: corpus_ner[split] + gmb_ner[split]
-        for split in ["train", "validation", "test"]
+    # Subsample for manageable training size
+    # Conversation gets highest weight (richest CLS, has prev_text)
+    # GMB capped at 15K (still 3x CoNLL-2003)
+    SUBSAMPLE_TARGETS = {
+        "conversation": 10769,
+        "business": 8076,
+        "technical": 5384,
+        "narrative": 4038,
+        "news": 4038,
+        "encyclopedic": 2692,
     }
+    GMB_CAP = 15000
+
+    def subsample_by_domain(examples: list[dict], targets: dict, seed: int = 42) -> list[dict]:
+        """Subsample examples to target counts per domain, preserving CLS diversity."""
+        from collections import defaultdict
+        by_domain = defaultdict(list)
+        for ex in examples:
+            # Infer domain from sent_id if available
+            sent_id = ex.get("_sent_id", "")
+            domain = sent_id.split("-")[0] if "-" in sent_id else "unknown"
+            by_domain[domain].append(ex)
+
+        rng = random.Random(seed)
+        sampled = []
+        for domain, target in targets.items():
+            pool = by_domain.get(domain, [])
+            if not pool:
+                continue
+            n = min(target, len(pool))
+            sampled.extend(rng.sample(pool, n))
+            print(f"    {domain}: {n} / {len(pool)}", flush=True)
+
+        # Include any domains not in targets (pass through)
+        for domain, pool in by_domain.items():
+            if domain not in targets and domain != "unknown":
+                sampled.extend(pool)
+                print(f"    {domain}: {len(pool)} (all)", flush=True)
+
+        rng.shuffle(sampled)
+        return sampled
+
+    # Tag corpus examples with domain for subsampling
+    for ex in corpus_ner["train"]:
+        # sent_id was lost in prepare_data — infer domain from prev_text presence
+        # This is a rough heuristic; proper fix is to preserve sent_id
+        pass  # Domain info already embedded if source is set
+
+    # Subsample GMB
+    gmb_train_sampled = random.Random(42).sample(gmb_ner["train"], min(GMB_CAP, len(gmb_ner["train"])))
+    print(f"  GMB subsampled: {len(gmb_train_sampled)} / {len(gmb_ner['train'])}")
+
+    # Subsample corpus by domain
+    print(f"  Corpus subsampling:")
+    corpus_train_sampled = subsample_by_domain(corpus_ner["train"], SUBSAMPLE_TARGETS)
+    print(f"  Corpus subsampled: {len(corpus_train_sampled)} / {len(corpus_ner['train'])}")
+
+    # Merge subsampled: corpus + GMB
+    ner_data = {
+        "train": corpus_train_sampled + gmb_train_sampled,
+        "validation": corpus_ner["validation"] + gmb_ner["validation"],  # keep full dev/test
+        "test": corpus_ner["test"] + gmb_ner["test"],
+    }
+    random.shuffle(ner_data["train"])
     print(f"  Combined — Train: {len(ner_data['train'])}, Dev: {len(ner_data['validation'])}, Test: {len(ner_data['test'])}")
     print_cls_distribution(ner_data["train"], "NER Train")
 
@@ -431,9 +491,13 @@ def main():
         with open(OUTPUT_DIR / f"{name}.json", "w") as f:
             json.dump(data, f)
 
+    # Strip internal _sent_id before saving
+    def clean_examples(examples):
+        return [{k: v for k, v in ex.items() if not k.startswith("_")} for ex in examples]
+
     for name, key in [("ner_train", "train"), ("ner_dev", "validation"), ("ner_test", "test")]:
         with open(OUTPUT_DIR / f"{name}.json", "w") as f:
-            json.dump(ner_data[key], f)
+            json.dump(clean_examples(ner_data[key]), f)
 
     # Save label vocabularies
     with open(OUTPUT_DIR / "label_vocabs.json", "w") as f:

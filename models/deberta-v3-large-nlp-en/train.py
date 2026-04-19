@@ -117,7 +117,7 @@ class MultiTaskDataset(Dataset):
                 encoding = self.tokenizer(
                     prev_text, text,
                     max_length=self.max_length, padding="max_length",
-                    truncation="only_first", return_tensors="pt",
+                    truncation=True, return_tensors="pt",
                 )
             else:
                 encoding = self.tokenizer(
