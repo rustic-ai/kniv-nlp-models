@@ -41,6 +41,7 @@ def export_to_onnx(model, tokenizer, output_path: Path, max_length: int = 128):
             "cls_logits": {0: "batch_size"},
         },
         opset_version=14,
+        dynamo=False,  # use legacy exporter for quantization compatibility
     )
     print(f"Exported FP32 ONNX model to {output_path / 'model.onnx'}")
 
@@ -51,19 +52,63 @@ def quantize_int8(input_path: Path, output_path: Path):
     int8_path = output_path / "model-int8.onnx"
 
     print("  Quantizing...", flush=True)
+    import onnx
+    from onnx import shape_inference
+
+    # Fix shape inference failure: the model has mixed output dims
+    # (3D token heads + 2D CLS head). We run shape inference with
+    # strict mode disabled, then quantize the result.
+    model_proto = onnx.load(str(model_path))
+
+    # Try shape inference with data_prop disabled (less strict)
     try:
+        inferred = shape_inference.infer_shapes(model_proto, strict_mode=False)
+        inferred_path = input_path / "model_inferred.onnx"
+        onnx.save(inferred, str(inferred_path))
         quantize_dynamic(
-            model_input=str(model_path),
+            model_input=str(inferred_path),
             model_output=str(int8_path),
             weight_type=QuantType.QInt8,
         )
-    except Exception as e:
-        # Shape inference can fail on models with mixed output dimensions
-        # (3D token heads + 2D CLS head). Fall back to copying FP32 model.
-        print(f"  ⚠ INT8 quantization failed: {e}", flush=True)
-        print("  Falling back to FP32 model (no quantization)", flush=True)
-        import shutil
-        shutil.copy2(str(model_path), str(int8_path))
+        inferred_path.unlink(missing_ok=True)
+        # Clean up any external data from inferred model
+        inferred_data = inferred_path.with_suffix(".onnx.data")
+        if inferred_data.exists():
+            inferred_data.unlink()
+    except Exception:
+        # Last resort: quantize without shape inference by patching
+        # the quantizer to skip the shape inference step
+        try:
+            from onnxruntime.quantization.onnx_quantizer import ONNXQuantizer
+            from onnxruntime.quantization.onnx_model import ONNXModel
+            from onnxruntime.quantization.registry import IntegerOpsRegistry
+
+            onnx_model = ONNXModel(model_proto)
+            quantizer = ONNXQuantizer.__new__(ONNXQuantizer)
+            quantizer.model = onnx_model
+            quantizer.is_weight_symmetric = True
+            quantizer.is_activation_symmetric = False
+            quantizer.reduce_range = False
+            quantizer.weight_qType = QuantType.QInt8
+            quantizer.activation_qType = QuantType.QUInt8
+            quantizer.tensors_range = {}
+            quantizer.nodes_to_quantize = []
+            quantizer.nodes_to_exclude = []
+            quantizer.op_types_to_quantize = list(IntegerOpsRegistry.keys())
+            quantizer.extra_options = {}
+            quantizer.per_channel = False
+            quantizer.graph_scope = "/"
+
+            quantizer.quantize_model()
+            quantizer.model.save_model_to_file(str(int8_path), False)
+        except Exception as e2:
+            print(f"  ⚠ INT8 quantization failed: {e2}", flush=True)
+            print("  Shipping FP32 model only", flush=True)
+            import shutil
+            shutil.copy2(str(model_path), str(int8_path))
+            ext_data = model_path.with_suffix(".onnx.data")
+            if ext_data.exists():
+                shutil.copy2(str(ext_data), str(int8_path.with_suffix(".onnx.data")))
 
     fp32_size = model_path.stat().st_size / 1024 / 1024
     # Account for external data files (large models split weights)
