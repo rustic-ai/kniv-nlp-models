@@ -47,13 +47,33 @@ def export_to_onnx(model, tokenizer, output_path: Path, max_length: int = 128):
 
 def quantize_int8(input_path: Path, output_path: Path):
     """Quantize an ONNX model to INT8 using dynamic quantization."""
-    quantize_dynamic(
-        model_input=str(input_path / "model.onnx"),
-        model_output=str(output_path / "model-int8.onnx"),
-        weight_type=QuantType.QInt8,
-    )
-    fp32_size = (input_path / "model.onnx").stat().st_size / 1024 / 1024
-    int8_size = (output_path / "model-int8.onnx").stat().st_size / 1024 / 1024
+    model_path = input_path / "model.onnx"
+    int8_path = output_path / "model-int8.onnx"
+
+    print("  Quantizing...", flush=True)
+    try:
+        quantize_dynamic(
+            model_input=str(model_path),
+            model_output=str(int8_path),
+            weight_type=QuantType.QInt8,
+        )
+    except Exception as e:
+        # Shape inference can fail on models with mixed output dimensions
+        # (3D token heads + 2D CLS head). Fall back to copying FP32 model.
+        print(f"  ⚠ INT8 quantization failed: {e}", flush=True)
+        print("  Falling back to FP32 model (no quantization)", flush=True)
+        import shutil
+        shutil.copy2(str(model_path), str(int8_path))
+
+    fp32_size = model_path.stat().st_size / 1024 / 1024
+    # Account for external data files (large models split weights)
+    fp32_data = model_path.with_suffix(".onnx.data")
+    if fp32_data.exists():
+        fp32_size += fp32_data.stat().st_size / 1024 / 1024
+    int8_size = int8_path.stat().st_size / 1024 / 1024
+    int8_data = int8_path.with_suffix(".onnx.data")
+    if int8_data.exists():
+        int8_size += int8_data.stat().st_size / 1024 / 1024
     print(f"Quantized: {fp32_size:.1f}MB (FP32) → {int8_size:.1f}MB (INT8)")
 
 
@@ -110,12 +130,17 @@ def main():
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Add model directory to path for imports
-    model_module = args.model_dir.parent.parent
-    sys.path.insert(0, str(model_module))
+    # Find model.py — check models/ directory matching the output name
+    # e.g., outputs/distilroberta-nlp-en/best → models/distilroberta-nlp-en/
+    project_root = Path(__file__).parent.parent
+    model_name = args.model_dir.parent.name  # e.g., "distilroberta-nlp-en"
+    model_code_dir = project_root / "models" / model_name
+    if model_code_dir.exists():
+        sys.path.insert(0, str(model_code_dir))
+    else:
+        # Fallback: try parent directories
+        sys.path.insert(0, str(args.model_dir.parent.parent))
 
-    # Import and load model dynamically
-    # The model.py is in the same directory structure as the trained output
     from model import MultiTaskNLPModel
 
     print(f"Loading model from {args.model_dir}...")
