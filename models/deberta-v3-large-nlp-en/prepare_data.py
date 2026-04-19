@@ -204,21 +204,23 @@ def load_corpus_ner(
     dev_ratio: float = 0.1,
     test_ratio: float = 0.1,
     seed: int = 42,
+    corpus_dir: Path | None = None,
+    validated_dir: Path | None = None,
 ) -> dict[str, list[dict]]:
     """Load NER data from the kniv validated corpus.
 
     Extracts NER annotations from spaCy-annotated JSONL files.
     Splits into train/validation/test by document (not by sentence).
     """
+    corpus_dir = corpus_dir or CORPUS_DIR
     if domains is None:
-        # Use all available annotated domains
-        domains = [d.name for d in CORPUS_DIR.iterdir() if d.is_dir() and (d / "annotated.jsonl").exists()]
+        domains = [d.name for d in corpus_dir.iterdir() if d.is_dir() and (d / "annotated.jsonl").exists()]
 
-    VALIDATED_DIR = CORPUS_DIR.parent / "validated"
+    VALIDATED_DIR = validated_dir or (CORPUS_DIR.parent / "validated")
 
     all_examples = []
     for domain in sorted(domains):
-        jsonl_file = CORPUS_DIR / domain / "annotated.jsonl"
+        jsonl_file = corpus_dir / domain / "annotated.jsonl"
         if not jsonl_file.exists():
             print(f"  ⚠ No annotations for domain '{domain}', skipping")
             continue
@@ -397,18 +399,76 @@ def print_cls_distribution(examples: list[dict], name: str):
         print(f"    {label:20s}: {count:6d} ({pct:5.1f}%)")
 
 
+def load_from_gold_parquet(parquet_path: Path) -> dict[str, list[dict]]:
+    """Load corpus data from gold-filtered Parquet files.
+
+    Returns train/validation/test splits with the same format as load_corpus_ner().
+    """
+    import pandas as pd
+
+    splits = {}
+    for split_name, file_name in [("train", "train.parquet"),
+                                   ("validation", "dev.parquet"),
+                                   ("test", "test.parquet")]:
+        path = parquet_path / file_name
+        if not path.exists():
+            # Try alternate naming
+            for p in parquet_path.glob(f"{file_name.split('.')[0]}*.parquet"):
+                path = p
+                break
+        if not path.exists():
+            print(f"  Warning: {path} not found, skipping {split_name}")
+            splits[split_name] = []
+            continue
+
+        df = pd.read_parquet(path)
+        examples = []
+        for _, row in df.iterrows():
+            ex = {
+                "words": list(row["tokens"]),
+                "text": row["text"],
+                "ner_tags": list(row["ner_tags"]),
+                "cls_label": row.get("cls", "inform"),
+                "_sent_id": row.get("sent_id", ""),
+            }
+            prev_text = row.get("prev_text")
+            if prev_text and isinstance(prev_text, str) and prev_text.strip():
+                ex["prev_text"] = prev_text
+            examples.append(ex)
+
+        splits[split_name] = examples
+        print(f"  {split_name}: {len(examples)} examples from Parquet")
+
+    return splits
+
+
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Prepare training data")
+    parser.add_argument("--gold", type=Path, default=None,
+                        help="Path to gold-filtered Parquet dir (e.g. corpus/output/final-gold)")
+    args = parser.parse_args()
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # UD data — always from CoNLL-U (expert-annotated, not filtered)
+    ud_train_path = UD_TRAIN
+    ud_dev_path = UD_DEV
+    ud_test_path = UD_TEST
+
     print("Loading UD English EWT...")
-    ud_train = load_ud_data(UD_TRAIN)
-    ud_dev = load_ud_data(UD_DEV)
-    ud_test = load_ud_data(UD_TEST)
+    ud_train = load_ud_data(ud_train_path)
+    ud_dev = load_ud_data(ud_dev_path)
+    ud_test = load_ud_data(ud_test_path)
     print(f"  Train: {len(ud_train)}, Dev: {len(ud_dev)}, Test: {len(ud_test)}")
     print_cls_distribution(ud_train, "UD Train")
 
-    print("Loading corpus NER (kniv validated, spaCy annotations)...")
-    corpus_ner = load_corpus_ner()
+    if args.gold:
+        print(f"Loading gold-filtered corpus from Parquet: {args.gold}...")
+        corpus_ner = load_from_gold_parquet(args.gold)
+    else:
+        print("Loading corpus NER (kniv validated, spaCy annotations)...")
+        corpus_ner = load_corpus_ner()
     print(f"  Corpus — Train: {len(corpus_ner['train'])}, Dev: {len(corpus_ner['validation'])}, Test: {len(corpus_ner['test'])}")
 
     # Subsample for manageable training size
