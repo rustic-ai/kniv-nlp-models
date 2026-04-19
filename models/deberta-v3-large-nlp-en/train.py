@@ -302,7 +302,7 @@ def evaluate_all(model, tokenizer, device, vocabs, ner_dev, ud_dev, cls_dev, max
         prev_text = ex.get("prev_text")
         if prev_text:
             encoding = tokenizer(prev_text, text, max_length=max_length,
-                                 padding="max_length", truncation="only_first", return_tensors="pt")
+                                 padding="max_length", truncation=True, return_tensors="pt")
         else:
             encoding = tokenizer(text, max_length=max_length,
                                  padding="max_length", truncation=True, return_tensors="pt")
@@ -405,11 +405,11 @@ def train(quick_test: bool = False):
         warmup_ratio=config["training"]["warmup_ratio"],
         weight_decay=config["training"]["weight_decay"],
         max_grad_norm=config["training"]["max_grad_norm"],
-        bf16=True,
+        fp16=True,  # fp16 instead of bf16 — more stable for DeBERTa gradient computation
         logging_steps=100,
         eval_strategy="no",
         save_strategy="epoch",
-        save_total_limit=3,
+        save_total_limit=5,
         report_to="none",
         remove_unused_columns=False,
         dataloader_num_workers=0,

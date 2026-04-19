@@ -407,33 +407,26 @@ def main():
     print(f"  Train: {len(ud_train)}, Dev: {len(ud_dev)}, Test: {len(ud_test)}")
     print_cls_distribution(ud_train, "UD Train")
 
-    print("Loading corpus NER (kniv validated)...")
+    print("Loading corpus NER (kniv validated, spaCy annotations)...")
     corpus_ner = load_corpus_ner()
     print(f"  Corpus — Train: {len(corpus_ner['train'])}, Dev: {len(corpus_ner['validation'])}, Test: {len(corpus_ner['test'])}")
 
-    print("Loading GMB NER (CC BY 4.0, human-corrected)...")
-    gmb_ner = load_gmb_ner()
-    print(f"  GMB — Train: {len(gmb_ner['train'])}, Dev: {len(gmb_ner['validation'])}, Test: {len(gmb_ner['test'])}")
-
     # Subsample for manageable training size
     # Conversation gets highest weight (richest CLS, has prev_text)
-    # GMB capped at 15K (still 3x CoNLL-2003)
     SUBSAMPLE_TARGETS = {
-        "conversation": 10769,
-        "business": 8076,
-        "technical": 5384,
-        "narrative": 4038,
-        "news": 4038,
-        "encyclopedic": 2692,
+        "conversation": 15000,
+        "business": 10000,
+        "technical": 7000,
+        "narrative": 5000,
+        "news": 5000,
+        "encyclopedic": 3000,
     }
-    GMB_CAP = 15000
 
     def subsample_by_domain(examples: list[dict], targets: dict, seed: int = 42) -> list[dict]:
-        """Subsample examples to target counts per domain, preserving CLS diversity."""
+        """Subsample examples to target counts per domain."""
         from collections import defaultdict
         by_domain = defaultdict(list)
         for ex in examples:
-            # Infer domain from sent_id if available
             sent_id = ex.get("_sent_id", "")
             domain = sent_id.split("-")[0] if "-" in sent_id else "unknown"
             by_domain[domain].append(ex)
@@ -457,29 +450,17 @@ def main():
         rng.shuffle(sampled)
         return sampled
 
-    # Tag corpus examples with domain for subsampling
-    for ex in corpus_ner["train"]:
-        # sent_id was lost in prepare_data — infer domain from prev_text presence
-        # This is a rough heuristic; proper fix is to preserve sent_id
-        pass  # Domain info already embedded if source is set
-
-    # Subsample GMB
-    gmb_train_sampled = random.Random(42).sample(gmb_ner["train"], min(GMB_CAP, len(gmb_ner["train"])))
-    print(f"  GMB subsampled: {len(gmb_train_sampled)} / {len(gmb_ner['train'])}")
-
-    # Subsample corpus by domain
     print(f"  Corpus subsampling:")
     corpus_train_sampled = subsample_by_domain(corpus_ner["train"], SUBSAMPLE_TARGETS)
     print(f"  Corpus subsampled: {len(corpus_train_sampled)} / {len(corpus_ner['train'])}")
 
-    # Merge subsampled: corpus + GMB
     ner_data = {
-        "train": corpus_train_sampled + gmb_train_sampled,
-        "validation": corpus_ner["validation"] + gmb_ner["validation"],  # keep full dev/test
-        "test": corpus_ner["test"] + gmb_ner["test"],
+        "train": corpus_train_sampled,
+        "validation": corpus_ner["validation"],
+        "test": corpus_ner["test"],
     }
     random.shuffle(ner_data["train"])
-    print(f"  Combined — Train: {len(ner_data['train'])}, Dev: {len(ner_data['validation'])}, Test: {len(ner_data['test'])}")
+    print(f"  Final — Train: {len(ner_data['train'])}, Dev: {len(ner_data['validation'])}, Test: {len(ner_data['test'])}")
     print_cls_distribution(ner_data["train"], "NER Train")
 
     print("Building dep2label vocabulary...")
