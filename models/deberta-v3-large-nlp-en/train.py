@@ -446,9 +446,9 @@ def train(quick_test: bool = False):
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         num_train_epochs=epochs,
-        per_device_train_batch_size=16,  # fp32 needs smaller batch; effective = 16 * 4 = 64
-        per_device_eval_batch_size=16,
-        gradient_accumulation_steps=4,
+        per_device_train_batch_size=64,
+        per_device_eval_batch_size=64,
+        gradient_accumulation_steps=1,
         gradient_checkpointing=True,  # Recompute activations to fit fp32 in 40GB
         learning_rate=config["training"]["learning_rate"],
         warmup_ratio=config["training"]["warmup_ratio"],
@@ -515,7 +515,7 @@ def train(quick_test: bool = False):
     )
 
     print(f"\nTraining for {epochs} epochs", flush=True)
-    print(f"  Batch size: 16 x 4 accum = 64 effective, fp32, grad checkpoint", flush=True)
+    print(f"  Batch size: 64, fp32, grad checkpoint", flush=True)
     print(f"  Task weights: {task_weights}", flush=True)
     print(flush=True)
 
