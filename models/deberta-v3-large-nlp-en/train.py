@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -200,19 +201,46 @@ class MultiTaskTrainer(Trainer):
                     task_labels.view(-1),
                 )
 
-            task_losses[task_name] = loss.detach().item()
+            loss_val = loss.detach().item()
+            task_losses[task_name] = loss_val
+
+            # Detect anomalies early
+            if math.isnan(loss_val) or math.isinf(loss_val) or loss_val == 0.0:
+                step = self.state.global_step
+                grad_norm = max(
+                    (p.grad.norm().item() for p in model.parameters() if p.grad is not None),
+                    default=0.0,
+                )
+                logit_stats = f"min={task_logits.min().item():.4f} max={task_logits.max().item():.4f} mean={task_logits.mean().item():.4f}"
+                print(f"\n  ⚠ ANOMALY at step {step}: {task_name} loss={loss_val} "
+                      f"logits=[{logit_stats}] max_grad={grad_norm:.6f} "
+                      f"batch_tasks={[task_names[t] for t in task_ids.unique().tolist()]}",
+                      flush=True)
+
             total_loss = total_loss + loss * self.task_weights[task_name]
 
         # Store per-task losses for custom logging
         self._last_task_losses = task_losses
 
+        # Check total loss
+        total_val = total_loss.detach().item()
+        if math.isnan(total_val) or math.isinf(total_val):
+            step = self.state.global_step
+            print(f"\n  ⚠ TOTAL LOSS ANOMALY at step {step}: {total_val} "
+                  f"task_losses={task_losses}", flush=True)
+
         return (total_loss, outputs) if return_outputs else total_loss
 
     def log(self, logs: dict[str, float], **kwargs):
-        """Override to append per-task losses."""
+        """Override to append per-task losses and grad norm."""
         if hasattr(self, "_last_task_losses") and self._last_task_losses:
             for task, loss in self._last_task_losses.items():
                 logs[f"loss_{task}"] = round(loss, 4)
+        # Add gradient norm
+        grad_norms = [p.grad.norm().item() for p in self.model.parameters()
+                      if p.grad is not None]
+        if grad_norms:
+            logs["grad_norm"] = round(max(grad_norms), 4)
         super().log(logs, **kwargs)
 
 
