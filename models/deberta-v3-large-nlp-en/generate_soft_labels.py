@@ -100,7 +100,7 @@ def generate(model_dir: str):
     print(f"Device: {device}", flush=True)
     print(f"Loading teacher from {model_dir}...", flush=True)
 
-    model = MultiTaskNLPModel.load(model_dir, encoder_name).to(device)
+    model = MultiTaskNLPModel.load(model_dir, encoder_name).float().to(device)
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
 
