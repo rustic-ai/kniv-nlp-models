@@ -261,7 +261,7 @@ def train(soft_labels_dir: str, temperature: float = 3.0, alpha: float = 0.5):
         ner_labels=ner_labels, pos_labels=pos_labels,
         dep_labels=dep_labels, cls_labels=cls_labels,
         dropout=config["model"]["dropout"],
-    ).to(device)
+    ).float().to(device)
 
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Student parameters: {param_count:,}", flush=True)
