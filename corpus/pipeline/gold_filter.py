@@ -173,27 +173,39 @@ def build_pos_prompt(text: str, tokens: list[str], pos_tags: list[str]) -> str |
 BATCH_SIZE = 256
 
 
+MAX_RETRIES = 3
+
+
 def validate_batch(llm, prompts: list[tuple[int, str]], concurrency: int) -> dict[int, bool]:
-    """Send prompts in parallel, return {index: is_clean} map."""
+    """Send prompts in parallel, return {index: is_clean} map.
+
+    Retries failed calls up to MAX_RETRIES times. If all retries fail,
+    raises instead of silently marking as clean.
+    """
     results = {}
 
-    if not llm.supports_parallel or concurrency <= 1:
-        for idx, prompt in prompts:
+    def _check_with_retry(item):
+        idx, prompt = item
+        for attempt in range(MAX_RETRIES):
             try:
-                results[idx] = is_correct(llm.ask(prompt))
-            except Exception:
-                results[idx] = True
+                return idx, is_correct(llm.ask(prompt))
+            except Exception as e:
+                if attempt == MAX_RETRIES - 1:
+                    raise RuntimeError(
+                        f"LLM call failed after {MAX_RETRIES} retries: {e}"
+                    ) from e
+                import time
+                time.sleep(1)
+        return idx, True  # unreachable
+
+    if not llm.supports_parallel or concurrency <= 1:
+        for item in prompts:
+            idx, clean = _check_with_retry(item)
+            results[idx] = clean
         return results
 
-    def _check(item):
-        idx, prompt = item
-        try:
-            return idx, is_correct(llm.ask(prompt))
-        except Exception:
-            return idx, True
-
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = [pool.submit(_check, item) for item in prompts]
+        futures = [pool.submit(_check_with_retry, item) for item in prompts]
         for future in as_completed(futures):
             idx, clean = future.result()
             results[idx] = clean
