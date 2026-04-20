@@ -412,14 +412,16 @@ def train(quick_test: bool = False):
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         num_train_epochs=epochs,
-        per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=batch_size,
+        per_device_train_batch_size=16,  # fp32 needs smaller batch; effective = 16 * 4 = 64
+        per_device_eval_batch_size=16,
+        gradient_accumulation_steps=4,
+        gradient_checkpointing=True,  # Recompute activations to fit fp32 in 40GB
         learning_rate=config["training"]["learning_rate"],
         warmup_ratio=config["training"]["warmup_ratio"],
         weight_decay=config["training"]["weight_decay"],
         max_grad_norm=config["training"]["max_grad_norm"],
-        bf16=False,  # fp32 — both fp16 and bf16 cause loss underflow with DeBERTa-v3-large
-        logging_steps=7,
+        bf16=False,  # fp32 — bf16 loss collapsed at step 2394 (undiagnosed)
+        logging_steps=20,  # ~100 logs per epoch
         eval_strategy="no",
         save_strategy="epoch",
         save_total_limit=5,
@@ -479,7 +481,7 @@ def train(quick_test: bool = False):
     )
 
     print(f"\nTraining for {epochs} epochs", flush=True)
-    print(f"  Batch size: {batch_size}, fp32 (no mixed precision)", flush=True)
+    print(f"  Batch size: 16 x 4 accum = 64 effective, fp32, grad checkpoint", flush=True)
     print(f"  Task weights: {task_weights}", flush=True)
     print(flush=True)
 
