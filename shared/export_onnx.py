@@ -189,7 +189,7 @@ def main():
     from model import MultiTaskNLPModel
 
     print(f"Loading model from {args.model_dir}...")
-    model = MultiTaskNLPModel.load(str(args.model_dir), args.encoder)
+    model = MultiTaskNLPModel.load(str(args.model_dir), args.encoder).float()
     tokenizer = AutoTokenizer.from_pretrained(str(args.model_dir))
 
     param_count = sum(p.numel() for p in model.parameters())
