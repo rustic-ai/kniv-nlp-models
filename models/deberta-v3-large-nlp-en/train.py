@@ -232,16 +232,22 @@ class MultiTaskTrainer(Trainer):
         return (total_loss, outputs) if return_outputs else total_loss
 
     def log(self, logs, *args, **kwargs):
-        """Override to append per-task losses and grad norm."""
-        if hasattr(self, "_last_task_losses") and self._last_task_losses:
-            for task, loss in self._last_task_losses.items():
-                logs[f"loss_{task}"] = round(loss, 4)
-        # Add gradient norm
-        grad_norms = [p.grad.norm().item() for p in self.model.parameters()
-                      if p.grad is not None]
-        if grad_norms:
-            logs["grad_norm"] = round(max(grad_norms), 4)
+        """Override to print per-task losses and grad norm to stdout."""
         super().log(logs, *args, **kwargs)
+        if "loss" in logs and hasattr(self, "_last_task_losses") and self._last_task_losses:
+            step = self.state.global_step
+            epoch = self.state.epoch or 0
+            tl = self._last_task_losses
+            parts = [f"step={step}", f"epoch={epoch:.2f}", f"loss={logs['loss']:.4f}"]
+            for task in ["ner", "pos", "dep", "cls"]:
+                if task in tl:
+                    parts.append(f"{task}={tl[task]:.4f}")
+            # Grad norm
+            grad_norms = [p.grad.norm().item() for p in self.model.parameters()
+                          if p.grad is not None]
+            if grad_norms:
+                parts.append(f"grad={max(grad_norms):.4f}")
+            print("  " + "  ".join(parts), flush=True)
 
 
 # ── Evaluation ────────────────────────────────────────────────────
