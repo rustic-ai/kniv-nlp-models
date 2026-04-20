@@ -405,7 +405,7 @@ def train(quick_test: bool = False):
         warmup_ratio=config["training"]["warmup_ratio"],
         weight_decay=config["training"]["weight_decay"],
         max_grad_norm=config["training"]["max_grad_norm"],
-        fp16=True,  # fp16 instead of bf16 — more stable for DeBERTa gradient computation
+        bf16=True,  # A100 has native bf16; PyTorch 2.10 GradScaler rejects fp16 gradients
         logging_steps=7,
         eval_strategy="no",
         save_strategy="epoch",
@@ -431,7 +431,7 @@ def train(quick_test: bool = False):
     )
 
     print(f"\nTraining for {epochs} epochs", flush=True)
-    print(f"  Batch size: {batch_size}, bf16: True", flush=True)
+    print(f"  Batch size: {batch_size}, bf16: {training_args.bf16}", flush=True)
     print(f"  Task weights: {task_weights}", flush=True)
     print(flush=True)
 
