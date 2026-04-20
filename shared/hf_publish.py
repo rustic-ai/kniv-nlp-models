@@ -41,7 +41,7 @@ def preflight_check(onnx_dir: Path, model_card: Path) -> list[str]:
 
 def publish(model_name: str, onnx_dir: Path, model_card: Path, org: str = "dragonscale-ai"):
     """Upload ONNX model, tokenizer, and model card to HuggingFace Hub."""
-    repo_id = f"{org}/uniko-{model_name}"
+    repo_id = f"{org}/kniv-{model_name}"
 
     # Pre-flight check
     errors = preflight_check(onnx_dir, model_card)
