@@ -51,6 +51,13 @@ class MultiTaskNLPModel(nn.Module):
         self.dep_labels = dep_labels
         self.cls_labels = cls_labels
 
+    def gradient_checkpointing_enable(self, **kwargs):
+        """Delegate to the encoder for HF Trainer compatibility."""
+        self.encoder.gradient_checkpointing_enable(**kwargs)
+
+    def gradient_checkpointing_disable(self):
+        self.encoder.gradient_checkpointing_disable()
+
     def forward(
         self,
         input_ids: torch.Tensor,
