@@ -399,6 +399,7 @@ def train(quick_test: bool = False):
         dropout=config["model"]["dropout"],
     )
 
+    model = model.float()  # Ensure all weights are fp32
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model: {encoder_name}", flush=True)
     print(f"Parameters: {param_count:,}", flush=True)
