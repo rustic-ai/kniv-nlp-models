@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -521,7 +522,11 @@ def train(quick_test: bool = False):
     print(f"  Task weights: {task_weights}", flush=True)
     print(flush=True)
 
-    trainer.train()
+    # Resume from checkpoint if available
+    resume_from = os.environ.get("RESUME_CHECKPOINT")
+    if resume_from and Path(resume_from).exists():
+        print(f"  Resuming from {resume_from}", flush=True)
+    trainer.train(resume_from_checkpoint=resume_from if resume_from and Path(resume_from).exists() else None)
 
     # Save final model
     final_dir = output_dir / "final"
