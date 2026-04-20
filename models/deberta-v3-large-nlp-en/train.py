@@ -29,6 +29,7 @@ from transformers import (
     AutoTokenizer,
     Trainer,
     TrainingArguments,
+    TrainerCallback,
     EarlyStoppingCallback,
 )
 import yaml
@@ -182,6 +183,7 @@ class MultiTaskTrainer(Trainer):
         task_names = ["ner", "pos", "dep", "cls"]
         logit_keys = ["ner_logits", "pos_logits", "dep_logits", "cls_logits"]
 
+        task_losses = {}
         for task_idx, (task_name, logit_key) in enumerate(zip(task_names, logit_keys)):
             mask = task_ids == task_idx
             if not mask.any():
@@ -191,7 +193,6 @@ class MultiTaskTrainer(Trainer):
             task_labels = labels[mask]
 
             if task_name == "cls":
-                # CLS labels were padded — real label is at position 0
                 loss = self.seq_loss_fn(task_logits, task_labels[:, 0])
             else:
                 loss = self.token_loss_fn(
@@ -199,9 +200,20 @@ class MultiTaskTrainer(Trainer):
                     task_labels.view(-1),
                 )
 
+            task_losses[task_name] = loss.detach().item()
             total_loss = total_loss + loss * self.task_weights[task_name]
 
+        # Store per-task losses for custom logging
+        self._last_task_losses = task_losses
+
         return (total_loss, outputs) if return_outputs else total_loss
+
+    def log(self, logs: dict[str, float], **kwargs):
+        """Override to append per-task losses."""
+        if hasattr(self, "_last_task_losses") and self._last_task_losses:
+            for task, loss in self._last_task_losses.items():
+                logs[f"loss_{task}"] = round(loss, 4)
+        super().log(logs, **kwargs)
 
 
 # ── Evaluation ────────────────────────────────────────────────────
@@ -405,7 +417,7 @@ def train(quick_test: bool = False):
         warmup_ratio=config["training"]["warmup_ratio"],
         weight_decay=config["training"]["weight_decay"],
         max_grad_norm=config["training"]["max_grad_norm"],
-        bf16=True,  # A100 has native bf16; PyTorch 2.10 GradScaler rejects fp16 gradients
+        bf16=False,  # fp32 — both fp16 and bf16 cause loss underflow with DeBERTa-v3-large
         logging_steps=7,
         eval_strategy="no",
         save_strategy="epoch",
@@ -422,16 +434,51 @@ def train(quick_test: bool = False):
         "cls": config["training"]["cls_loss_weight"],
     }
 
+    # Epoch-end evaluation callback
+    class EpochEvalCallback(TrainerCallback):
+        def __init__(self, eval_model, eval_tokenizer, eval_device, eval_vocabs,
+                     eval_ner_dev, eval_ud_dev, eval_max_length):
+            self.eval_model = eval_model
+            self.eval_tokenizer = eval_tokenizer
+            self.eval_device = eval_device
+            self.eval_vocabs = eval_vocabs
+            self.eval_ner_dev = eval_ner_dev[:500]
+            self.eval_ud_dev = eval_ud_dev[:500]
+            self.eval_cls_dev = [ex for ex in (eval_ud_dev[:500] + eval_ner_dev[:500])
+                                if "cls_label" in ex]
+            self.eval_max_length = eval_max_length
+
+        def on_epoch_end(self, args, state, control, **kwargs):
+            epoch = int(state.epoch)
+            print(f"\n  Evaluating after epoch {epoch}...", flush=True)
+            results = evaluate_all(
+                self.eval_model, self.eval_tokenizer, self.eval_device,
+                self.eval_vocabs, self.eval_ner_dev, self.eval_ud_dev,
+                self.eval_cls_dev, self.eval_max_length,
+            )
+            ner_f1 = results.get("ner", {}).get("f1", 0)
+            pos_acc = results.get("pos", {}).get("accuracy", 0)
+            dep_uas = results.get("dep", {}).get("uas", 0)
+            cls_f1 = results.get("cls", {}).get("macro_f1", 0)
+            comp = composite_score(results)
+            print(f"  Epoch {epoch}: NER F1={ner_f1:.3f}  POS={pos_acc:.3f}  "
+                  f"DEP UAS={dep_uas:.3f}  CLS F1={cls_f1:.3f}  "
+                  f"Composite={comp:.3f}\n", flush=True)
+
+    device = next(model.parameters()).device
+    eval_cb = EpochEvalCallback(model, tokenizer, device, vocabs, ner_dev, ud_dev, max_length)
+
     trainer = MultiTaskTrainer(
         task_weights=task_weights,
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         data_collator=multitask_collator,
+        callbacks=[eval_cb],
     )
 
     print(f"\nTraining for {epochs} epochs", flush=True)
-    print(f"  Batch size: {batch_size}, bf16: {training_args.bf16}", flush=True)
+    print(f"  Batch size: {batch_size}, fp32 (no mixed precision)", flush=True)
     print(f"  Task weights: {task_weights}", flush=True)
     print(flush=True)
 
