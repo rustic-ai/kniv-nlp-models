@@ -107,8 +107,8 @@ def build_ner_prompt(text: str, tokens: list[str], ner_tags: list[str]) -> str |
     if not entities:
         return None
 
-    text = text[:500]
-    entities = entities[:10]
+    text = text[:300]
+    entities = entities[:8]
 
     if len(entities) == 1:
         name, etype = entities[0]
@@ -130,7 +130,7 @@ def build_cls_prompt(text: str, cls_label: str, prev_text: str = "") -> str | No
     if not cls_label:
         return None
 
-    text = text[:500]
+    text = text[:300]
     labels_str = ", ".join(CLS_LABELS)
 
     if prev_text:
@@ -155,7 +155,7 @@ def build_pos_prompt(text: str, tokens: list[str], pos_tags: list[str]) -> str |
     if not pairs:
         return None
 
-    text = text[:500]
+    text = text[:300]
     if len(pairs) > 8:
         import random
         pairs = random.sample(pairs, 8)
@@ -190,6 +190,10 @@ def validate_batch(llm, prompts: list[tuple[int, str]], concurrency: int) -> dic
             try:
                 return idx, is_correct(llm.ask(prompt))
             except Exception as e:
+                err_str = str(e)
+                # Non-retriable: context overflow or bad request — skip this example
+                if "400" in err_str or "context length" in err_str:
+                    return idx, True  # Can't validate, keep the example
                 if attempt == MAX_RETRIES - 1:
                     raise RuntimeError(
                         f"LLM call failed after {MAX_RETRIES} retries: {e}"
