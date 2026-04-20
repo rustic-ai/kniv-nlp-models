@@ -231,7 +231,7 @@ class MultiTaskTrainer(Trainer):
 
         return (total_loss, outputs) if return_outputs else total_loss
 
-    def log(self, logs: dict[str, float], **kwargs):
+    def log(self, logs, *args, **kwargs):
         """Override to append per-task losses and grad norm."""
         if hasattr(self, "_last_task_losses") and self._last_task_losses:
             for task, loss in self._last_task_losses.items():
@@ -241,7 +241,7 @@ class MultiTaskTrainer(Trainer):
                       if p.grad is not None]
         if grad_norms:
             logs["grad_norm"] = round(max(grad_norms), 4)
-        super().log(logs, **kwargs)
+        super().log(logs, *args, **kwargs)
 
 
 # ── Evaluation ────────────────────────────────────────────────────
