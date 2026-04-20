@@ -39,9 +39,7 @@ from model import MultiTaskNLPModel
 
 # Import the standard train module for reusable components
 from train import (
-    TokenClassificationDataset,
-    SequenceClassificationDataset,
-    evaluate_on_dev,
+    evaluate_all as evaluate_on_dev,
     composite_score,
 )
 
