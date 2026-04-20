@@ -488,8 +488,10 @@ def train(quick_test: bool = False):
         def on_epoch_end(self, args, state, control, **kwargs):
             epoch = int(state.epoch)
             print(f"\n  Evaluating after epoch {epoch}...", flush=True)
+            # Resolve device dynamically (Trainer may have moved model to CUDA)
+            device = next(self.eval_model.parameters()).device
             results = evaluate_all(
-                self.eval_model, self.eval_tokenizer, self.eval_device,
+                self.eval_model, self.eval_tokenizer, device,
                 self.eval_vocabs, self.eval_ner_dev, self.eval_ud_dev,
                 self.eval_cls_dev, self.eval_max_length,
             )
