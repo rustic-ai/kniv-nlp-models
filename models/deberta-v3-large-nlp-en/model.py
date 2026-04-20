@@ -99,7 +99,9 @@ class MultiTaskNLPModel(nn.Module):
         path = Path(output_dir)
         path.mkdir(parents=True, exist_ok=True)
 
-        torch.save(self.state_dict(), path / "model.pt")
+        # Save in fp32 to avoid dtype mismatches when loading
+        state = {k: v.float() if v.is_floating_point() else v for k, v in self.state_dict().items()}
+        torch.save(state, path / "model.pt")
         self.encoder.config.save_pretrained(path)
 
         with open(path / "label_maps.json", "w") as f:
