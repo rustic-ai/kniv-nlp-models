@@ -40,10 +40,16 @@ class MultiTaskNLPModel(nn.Module):
         dep_labels: list[str] | None = None,
         cls_labels: list[str] | None = None,
         dropout: float = 0.1,
+        _empty_encoder: bool = False,
     ):
         super().__init__()
         self.config = AutoConfig.from_pretrained(encoder_name)
-        self.encoder = AutoModel.from_pretrained(encoder_name)
+        if _empty_encoder:
+            # Create encoder architecture without downloading pretrained weights
+            # (used when loading all weights from a checkpoint)
+            self.encoder = AutoModel.from_config(self.config)
+        else:
+            self.encoder = AutoModel.from_pretrained(encoder_name)
         hidden_size = self.config.hidden_size
 
         self.dropout = nn.Dropout(dropout)
@@ -126,9 +132,12 @@ class MultiTaskNLPModel(nn.Module):
         with open(path / "label_maps.json") as f:
             label_maps = json.load(f)
 
-        # Create cascade model with POS only, convert to fp32 BEFORE loading
-        # teacher weights (HF downloads encoder in fp16, teacher saved in fp32)
-        model = cls(encoder_name=encoder_name, pos_labels=label_maps["pos_labels"]).float()
+        # Create model shell without downloading pretrained weights
+        model = cls(
+            encoder_name=encoder_name,
+            pos_labels=label_maps["pos_labels"],
+            _empty_encoder=True,
+        )
 
         # Load teacher weights directly — strict=False skips NER/DEP/CLS head keys
         teacher_state = torch.load(path / "model.pt", weights_only=True)
@@ -225,6 +234,7 @@ class MultiTaskNLPModel(nn.Module):
             ner_labels=label_maps.get("ner_labels"),
             dep_labels=label_maps.get("dep_labels"),
             cls_labels=label_maps.get("cls_labels"),
+            _empty_encoder=True,
         )
         model.load_state_dict(torch.load(path / "model.pt", weights_only=True))
         return model
