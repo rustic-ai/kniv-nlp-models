@@ -192,6 +192,18 @@ let outputs = session.run(ort::inputs![
 | `label_maps.json` | <1 MB | NER/POS/DEP/CLS label vocabularies |
 | `tokenizer.json` | 8 MB | DeBERTa-v3 tokenizer |
 
+## Important: Use This Model's Tokenizer
+
+Always load the tokenizer from this repo, **not** from `microsoft/deberta-v3-large`. The upstream HuggingFace tokenizer may omit BOS/EOS special tokens, shifting all positions and producing incorrect results.
+
+```python
+# Correct
+tokenizer = AutoTokenizer.from_pretrained("dragonscale-ai/kniv-deberta-v3-large-nlp-en")
+
+# WRONG — may omit special tokens
+tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v3-large")
+```
+
 ## Limitations
 
 - **English only**
