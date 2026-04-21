@@ -149,7 +149,7 @@ class MultiTaskNLPModel(nn.Module):
         # Verify a sample weight actually loaded
         sample_key = "encoder.encoder.layer.0.attention.self.query_proj.weight"
         if sample_key in filtered:
-            match = torch.equal(model.state_dict()[sample_key], filtered[sample_key])
+            match = torch.equal(model.state_dict()[sample_key].cpu(), filtered[sample_key].cpu())
             print(f"  Encoder weight verification: {'OK' if match else 'FAILED'}", flush=True)
 
         print(f"  Loaded {len(filtered)} params, dropped {len(dropped)} "
