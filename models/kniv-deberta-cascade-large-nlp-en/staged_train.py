@@ -58,31 +58,37 @@ STAGE_CONFIG = {
         "base_lr": 1e-5,   # encoder + existing heads
     },
     2: {
-        "name": "POS+NER",
-        "tasks": ["pos", "ner"],
+        "name": "NER (frozen encoder+POS)",
+        "tasks": ["ner"],           # only NER data — POS is frozen
+        "eval_tasks": ["pos", "ner"],  # but eval both to check POS doesn't degrade
         "new_head": "ner",
-        "head_type": "mlp",   # MLP: LayerNorm → Linear(1041,1024) → GELU → Drop → Linear(1024,37)
+        "head_type": "mlp",
+        "freeze_base": True,
         "epochs": 5,
-        "head_lr": 1e-4,      # new NER head learns fast
-        "base_lr": 1e-6,      # encoder+POS barely moves
+        "head_lr": 1e-4,
+        "base_lr": None,
     },
     3: {
-        "name": "POS+NER+DEP",
-        "tasks": ["pos", "ner", "dep"],
+        "name": "DEP (frozen encoder+POS+NER)",
+        "tasks": ["dep"],
+        "eval_tasks": ["pos", "ner", "dep"],
         "new_head": "dep",
         "head_type": "linear",
+        "freeze_base": True,
         "epochs": 5,
         "head_lr": 1e-4,
-        "base_lr": 1e-6,
+        "base_lr": None,
     },
     4: {
-        "name": "POS+NER+DEP+CLS",
-        "tasks": ["pos", "ner", "dep", "cls"],
+        "name": "CLS (frozen encoder+POS+NER+DEP)",
+        "tasks": ["cls"],
+        "eval_tasks": ["pos", "ner", "dep", "cls"],
         "new_head": "cls",
         "head_type": "linear",
+        "freeze_base": True,
         "epochs": 5,
         "head_lr": 1e-4,
-        "base_lr": 1e-6,
+        "base_lr": None,
     },
     5: {
         "name": "Joint fine-tune",
@@ -208,26 +214,43 @@ def train_stage(stage: int, checkpoint: str | None = None):
 
     print(f"Train: {len(train_dataset):,} examples, {len(train_loader)} batches/epoch", flush=True)
 
-    # ── Optimizer with differential learning rates ───────────
+    # ── Optimizer: freeze base params for stages 2-4, train only new head ──
     new_head_name = stage_cfg["new_head"]
-    head_params = []
-    base_params = []
+    freeze_base = stage_cfg.get("freeze_base", False)
 
-    for name, param in model.named_parameters():
-        if new_head_name and f"{new_head_name}_head" in name:
-            head_params.append(param)
-        else:
-            base_params.append(param)
-
-    param_groups = []
-    if base_params:
-        param_groups.append({"params": base_params, "lr": stage_cfg["base_lr"]})
-    if head_params:
-        param_groups.append({"params": head_params, "lr": stage_cfg["head_lr"]})
-
-    # Stage 5 (joint): single LR for everything
-    if stage == 5:
+    if freeze_base and new_head_name:
+        # Freeze encoder + all existing heads — only train the new head
+        head_params = []
+        frozen_count = 0
+        for name, param in model.named_parameters():
+            if f"{new_head_name}_head" in name:
+                param.requires_grad = True
+                head_params.append(param)
+            else:
+                param.requires_grad = False
+                frozen_count += 1
+        param_groups = [{"params": head_params, "lr": stage_cfg["head_lr"]}]
+        trainable = sum(p.numel() for p in head_params)
+        print(f"  Frozen: {frozen_count} params, Trainable: {trainable:,} ({new_head_name}_head only)", flush=True)
+    elif stage == 5:
+        # Stage 5 (joint): single LR for everything, all unfrozen
+        for param in model.parameters():
+            param.requires_grad = True
         param_groups = [{"params": list(model.parameters()), "lr": stage_cfg["base_lr"]}]
+    else:
+        # Differential LR (fallback)
+        head_params = []
+        base_params = []
+        for name, param in model.named_parameters():
+            if new_head_name and f"{new_head_name}_head" in name:
+                head_params.append(param)
+            else:
+                base_params.append(param)
+        param_groups = []
+        if base_params:
+            param_groups.append({"params": base_params, "lr": stage_cfg["base_lr"]})
+        if head_params:
+            param_groups.append({"params": head_params, "lr": stage_cfg["head_lr"]})
 
     optimizer = torch.optim.AdamW(param_groups, weight_decay=config["training"]["weight_decay"])
 
@@ -332,12 +355,14 @@ def train_stage(stage: int, checkpoint: str | None = None):
         print(f"  {' | '.join(parts)}", flush=True)
 
         # Eval only active heads
+        # Eval on all eval_tasks (includes frozen heads to verify no degradation)
+        eval_tasks = stage_cfg.get("eval_tasks", active_tasks)
         dev_results = evaluate_active(
             model, tokenizer, device, vocabs,
-            ner_dev[:500] if "ner" in active_tasks else [],
+            ner_dev[:500] if "ner" in eval_tasks else [],
             ud_dev[:500],
-            cls_dev[:500] if "cls" in active_tasks else [],
-            max_length, active_tasks,
+            cls_dev[:500] if "cls" in eval_tasks else [],
+            max_length, eval_tasks,
         )
 
         # Print results
@@ -351,7 +376,7 @@ def train_stage(stage: int, checkpoint: str | None = None):
         if "cls" in dev_results:
             parts.append(f"CLS F1={dev_results['cls'].get('macro_f1', 0):.3f}")
 
-        comp = composite_score_active(dev_results, active_tasks)
+        comp = composite_score_active(dev_results, eval_tasks)
         parts.append(f"Composite={comp:.3f}")
         print(f"  Dev: {' | '.join(parts)}", flush=True)
 
