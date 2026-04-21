@@ -61,14 +61,16 @@ STAGE_CONFIG = {
         "name": "POS+NER",
         "tasks": ["pos", "ner"],
         "new_head": "ner",
+        "head_type": "mlp",   # MLP: LayerNorm → Linear(1041,1024) → GELU → Drop → Linear(1024,37)
         "epochs": 5,
-        "head_lr": 1e-4,   # new NER head learns fast
-        "base_lr": 1e-6,   # encoder+POS barely moves
+        "head_lr": 1e-4,      # new NER head learns fast
+        "base_lr": 1e-6,      # encoder+POS barely moves
     },
     3: {
         "name": "POS+NER+DEP",
         "tasks": ["pos", "ner", "dep"],
         "new_head": "dep",
+        "head_type": "linear",
         "epochs": 5,
         "head_lr": 1e-4,
         "base_lr": 1e-6,
@@ -77,6 +79,7 @@ STAGE_CONFIG = {
         "name": "POS+NER+DEP+CLS",
         "tasks": ["pos", "ner", "dep", "cls"],
         "new_head": "cls",
+        "head_type": "linear",
         "epochs": 5,
         "head_lr": 1e-4,
         "base_lr": 1e-6,
@@ -129,15 +132,37 @@ def train_stage(stage: int, checkpoint: str | None = None):
     else:
         assert checkpoint, f"Stage {stage} requires --checkpoint from previous stage"
         print(f"Loading checkpoint: {checkpoint}", flush=True)
-        model = MultiTaskNLPModel.load(checkpoint, encoder_name).float().to(device)
+
+        # Support loading from existing non-cascade teacher
+        checkpoint_labels = Path(checkpoint) / "label_maps.json"
+        if checkpoint_labels.exists():
+            with open(checkpoint_labels) as f:
+                ckpt_labels = json.load(f)
+            # If checkpoint has all 4 heads but no cascade structure,
+            # it's the old teacher — load via load_from_teacher
+            if "ner_labels" in ckpt_labels and "pos_labels" in ckpt_labels:
+                has_cascade = "pos_labels" in ckpt_labels and "ner_labels" not in ckpt_labels
+                # Old teacher has all 4, cascade stage1 has only pos
+                old_teacher = all(k in ckpt_labels for k in ["ner_labels", "pos_labels", "dep_labels", "cls_labels"])
+                if old_teacher and stage == 2:
+                    print("  Detected old teacher checkpoint — loading encoder + POS only", flush=True)
+                    model = MultiTaskNLPModel.load_from_teacher(checkpoint, encoder_name).float().to(device)
+                else:
+                    model = MultiTaskNLPModel.load(checkpoint, encoder_name).float().to(device)
+            else:
+                model = MultiTaskNLPModel.load(checkpoint, encoder_name).float().to(device)
+        else:
+            model = MultiTaskNLPModel.load(checkpoint, encoder_name).float().to(device)
 
         # Add new head if this stage introduces one
         if stage_cfg["new_head"]:
             head_name = stage_cfg["new_head"]
             label_list = {"ner": ner_labels, "dep": dep_labels, "cls": cls_labels}[head_name]
-            model.add_head(head_name, label_list)
+            # NER uses MLP head; DEP/CLS start as linear (can be changed)
+            head_type = stage_cfg.get("head_type", "linear")
+            model.add_head(head_name, label_list, head_type=head_type)
             model = model.to(device)
-            print(f"Added {head_name} head ({len(label_list)} labels)", flush=True)
+            print(f"Added {head_name} head ({head_type}, {len(label_list)} labels)", flush=True)
 
     model.gradient_checkpointing_enable()
 

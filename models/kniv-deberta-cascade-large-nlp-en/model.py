@@ -74,26 +74,78 @@ class MultiTaskNLPModel(nn.Module):
                 hidden_size + len(pos_labels) + len(ner_labels), len(cls_labels),
             )
 
-    def add_head(self, head_name: str, labels: list[str]):
-        """Add a new cascade head after loading a previous-stage checkpoint."""
+    def _make_mlp_head(self, in_dim: int, out_dim: int) -> nn.Sequential:
+        """MLP head: LayerNorm → Linear → GELU → Dropout → Linear."""
+        hidden_size = self.config.hidden_size
+        return nn.Sequential(
+            nn.LayerNorm(in_dim),
+            nn.Linear(in_dim, hidden_size),
+            nn.GELU(),
+            nn.Dropout(self.dropout.p),
+            nn.Linear(hidden_size, out_dim),
+        )
+
+    def add_head(self, head_name: str, labels: list[str], head_type: str = "linear"):
+        """Add a new cascade head after loading a previous-stage checkpoint.
+
+        Args:
+            head_name: "ner", "dep", or "cls"
+            labels: list of label strings
+            head_type: "linear" or "mlp"
+        """
         hidden_size = self.config.hidden_size
         num_pos = len(self.pos_labels)
+        make = self._make_mlp_head if head_type == "mlp" else nn.Linear
 
         if head_name == "ner":
             self.ner_labels = labels
-            self.ner_head = nn.Linear(hidden_size + num_pos, len(labels))
+            in_dim = hidden_size + num_pos
+            self.ner_head = make(in_dim, len(labels))
         elif head_name == "dep":
             assert self.ner_labels is not None, "DEP requires NER head in cascade"
             self.dep_labels = labels
             num_ner = len(self.ner_labels)
-            self.dep_head = nn.Linear(hidden_size + num_pos + num_ner, len(labels))
+            in_dim = hidden_size + num_pos + num_ner
+            self.dep_head = make(in_dim, len(labels))
         elif head_name == "cls":
             assert self.ner_labels is not None, "CLS requires NER head in cascade"
             self.cls_labels = labels
             num_ner = len(self.ner_labels)
-            self.cls_head = nn.Linear(hidden_size + num_pos + num_ner, len(labels))
+            in_dim = hidden_size + num_pos + num_ner
+            self.cls_head = make(in_dim, len(labels))
         else:
             raise ValueError(f"Unknown head: {head_name}")
+
+    @classmethod
+    def load_from_teacher(cls, teacher_dir: str, encoder_name: str) -> "MultiTaskNLPModel":
+        """Load encoder + POS head from an existing (non-cascade) teacher.
+
+        Drops NER/DEP/CLS heads — only keeps encoder weights and POS head.
+        """
+        path = Path(teacher_dir)
+        with open(path / "label_maps.json") as f:
+            label_maps = json.load(f)
+
+        # Create cascade model with POS only
+        model = cls(encoder_name=encoder_name, pos_labels=label_maps["pos_labels"])
+
+        # Load teacher state dict, keeping only matching keys
+        teacher_state = torch.load(path / "model.pt", weights_only=True)
+        model_state = model.state_dict()
+
+        loaded = []
+        skipped = []
+        for key, value in teacher_state.items():
+            if key in model_state and model_state[key].shape == value.shape:
+                model_state[key] = value
+                loaded.append(key.split(".")[0])
+            else:
+                skipped.append(key)
+
+        model.load_state_dict(model_state)
+        print(f"  Loaded {len(loaded)} params from teacher, skipped {len(skipped)} "
+              f"(dropped heads: {set(k.split('.')[0] for k in skipped)})", flush=True)
+        return model
 
     def gradient_checkpointing_enable(self, **kwargs):
         self.encoder.gradient_checkpointing_enable(**kwargs)
