@@ -126,7 +126,12 @@ def train_stage(stage: int, checkpoint: str | None = None):
 
     encoder_name = config["model"]["encoder"]
     max_length = config["model"]["max_length"]
-    tokenizer = AutoTokenizer.from_pretrained(encoder_name)
+    # Load tokenizer from checkpoint (not HF hub) — the teacher's saved
+    # tokenizer includes BOS/EOS tokens that the HF default may omit
+    if checkpoint:
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(encoder_name)
 
     # ── Build or load model ──────────────────────────────────
     if stage == 1:
