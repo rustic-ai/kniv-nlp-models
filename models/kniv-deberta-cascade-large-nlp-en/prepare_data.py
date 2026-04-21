@@ -403,6 +403,75 @@ FEWNERD_OTHER_TO_SPACY = {
 SPACY_NUMERIC_TYPES = {"DATE", "TIME", "PERCENT", "MONEY", "QUANTITY", "ORDINAL", "CARDINAL"}
 
 
+def _align_spacy_pos(doc, tokens: list[str], char_to_tok: dict) -> list[str]:
+    """Align spaCy POS tags to pre-tokenized words via character offsets."""
+    # Map each token index to the spaCy token's UPOS
+    pos_tags = ["X"] * len(tokens)  # default to X for unaligned
+    for spacy_tok in doc:
+        mid_char = (spacy_tok.idx + spacy_tok.idx + len(spacy_tok.text)) // 2
+        tok_idx = char_to_tok.get(mid_char)
+        if tok_idx is not None and tok_idx < len(tokens):
+            # Map spaCy fine-grained POS to UPOS
+            upos = spacy_tok.pos_
+            if upos in UPOS_TAGS:
+                pos_tags[tok_idx] = upos
+    return pos_tags
+
+
+def enrich_ud_with_ner(ud_examples: list[dict]) -> list[dict]:
+    """Add spaCy NER tags to UD EWT examples (which only have POS+DEP).
+
+    Returns a new list with 'ner_tags' added to each example.
+    Only adds NER where spaCy finds entities — no human NER available.
+    """
+    import spacy
+    nlp = spacy.load("en_core_web_sm", disable=["parser", "lemmatizer"])
+    print("  Enriching UD EWT with spaCy NER...")
+
+    enriched = []
+    ner_count = 0
+    for ex in ud_examples:
+        tokens = ex["words"]
+        text = ex["text"]
+        doc = nlp(text)
+
+        # Build char-to-token mapping
+        char_pos = 0
+        char_to_tok = {}
+        for ti, tok in enumerate(tokens):
+            start = text.find(tok, char_pos)
+            if start == -1:
+                start = char_pos
+            for c in range(start, start + len(tok)):
+                char_to_tok[c] = ti
+            char_pos = start + len(tok)
+
+        # Extract NER tags
+        bio_tags = ["O"] * len(tokens)
+        has_ner = False
+        for ent in doc.ents:
+            if ent.label_ not in [t for t in SPACY_ENTITY_TYPES]:
+                continue
+            tok_start = char_to_tok.get(ent.start_char)
+            tok_end = char_to_tok.get(ent.end_char - 1)
+            if tok_start is None or tok_end is None:
+                continue
+            bio_tags[tok_start] = f"B-{ent.label_}"
+            for t in range(tok_start + 1, tok_end + 1):
+                bio_tags[t] = f"I-{ent.label_}"
+            has_ner = True
+
+        if has_ner:
+            ner_count += 1
+
+        enriched_ex = dict(ex)
+        enriched_ex["ner_tags"] = bio_tags
+        enriched.append(enriched_ex)
+
+    print(f"  UD EWT NER enrichment: {ner_count}/{len(ud_examples)} sentences got entities")
+    return enriched
+
+
 def load_few_nerd(
     dev_ratio: float = 0.1,
     test_ratio: float = 0.1,
@@ -428,12 +497,10 @@ def load_few_nerd(
     coarse_names = dataset["train"].features["ner_tags"].feature.names
     fine_names = dataset["train"].features["fine_ner_tags"].feature.names
 
-    # Load spaCy for numeric enrichment
-    nlp = None
-    if enrich_numeric:
-        import spacy
-        nlp = spacy.load("en_core_web_sm", disable=["parser", "lemmatizer"])
-        print("  spaCy loaded for numeric enrichment")
+    # Load spaCy for numeric NER enrichment + POS tagging
+    import spacy
+    nlp = spacy.load("en_core_web_sm")
+    print("  spaCy loaded for NER enrichment + POS tagging")
 
     all_examples = []
     enriched_count = 0
@@ -478,48 +545,47 @@ def load_few_nerd(
                 else:
                     bio_tags.append("O")  # unmapped "other" subtypes
 
-            # Enrich with spaCy numeric entities
-            if nlp:
-                text = " ".join(tokens)
-                doc = nlp(text)
+            # Run spaCy: numeric NER enrichment + POS tagging
+            text = " ".join(tokens)
+            doc = nlp(text)
 
-                # Build character-to-token index
-                char_pos = 0
-                char_to_tok = {}
-                for ti, tok in enumerate(tokens):
-                    start = text.find(tok, char_pos)
-                    if start == -1:
-                        start = char_pos
-                    for c in range(start, start + len(tok)):
-                        char_to_tok[c] = ti
-                    char_pos = start + len(tok)
+            # Build character-to-token index for entity alignment
+            char_pos = 0
+            char_to_tok = {}
+            for ti, tok in enumerate(tokens):
+                start = text.find(tok, char_pos)
+                if start == -1:
+                    start = char_pos
+                for c in range(start, start + len(tok)):
+                    char_to_tok[c] = ti
+                char_pos = start + len(tok)
 
+            # Add numeric entities from spaCy where Few-NERD has O
+            if enrich_numeric:
                 added_numeric = False
                 for ent in doc.ents:
                     if ent.label_ not in SPACY_NUMERIC_TYPES:
                         continue
-
-                    # Find token range for this entity
                     tok_start = char_to_tok.get(ent.start_char)
                     tok_end = char_to_tok.get(ent.end_char - 1)
                     if tok_start is None or tok_end is None:
                         continue
-
-                    # Only add if ALL tokens in range are currently O
                     if all(bio_tags[t] == "O" for t in range(tok_start, tok_end + 1)):
                         bio_tags[tok_start] = f"B-{ent.label_}"
                         for t in range(tok_start + 1, tok_end + 1):
                             bio_tags[t] = f"I-{ent.label_}"
                         added_numeric = True
-
                 if added_numeric:
                     enriched_count += 1
 
-            text = " ".join(tokens)
+            # Extract POS tags from spaCy (aligned to Few-NERD tokens)
+            pos_tags = _align_spacy_pos(doc, tokens, char_to_tok)
+
             all_examples.append({
                 "words": tokens,
                 "text": text,
                 "ner_tags": bio_tags,
+                "pos_tags": pos_tags,
                 "cls_label": classify_sentence(text),
             })
 
@@ -678,39 +744,58 @@ def main():
     corpus_train_sampled = subsample_by_domain(corpus_ner["train"], SUBSAMPLE_TARGETS)
     print(f"  Corpus subsampled: {len(corpus_train_sampled)} / {len(corpus_ner['train'])}")
 
-    # Few-NERD: 131K human-annotated sentences + spaCy numeric enrichment
-    print("\nLoading Few-NERD (human-annotated + spaCy numeric enrichment)...")
+    # ── Dataset 1: NER-only (Few-NERD + kniv corpus) ────────────
+    # For Stage 2a: training NER head with frozen encoder
+    print("\nLoading Few-NERD (human NER + spaCy numeric + spaCy POS)...")
     few_nerd = load_few_nerd(enrich_numeric=True)
     print(f"  Few-NERD — Train: {len(few_nerd['train'])}, Dev: {len(few_nerd['validation'])}, Test: {len(few_nerd['test'])}")
 
-    # Combine: kniv corpus (domain-balanced) + Few-NERD
     ner_data = {
         "train": corpus_train_sampled + few_nerd["train"],
         "validation": corpus_ner["validation"] + few_nerd["validation"],
         "test": corpus_ner["test"] + few_nerd["test"],
     }
     random.shuffle(ner_data["train"])
-    print(f"  Combined — Train: {len(ner_data['train'])}, Dev: {len(ner_data['validation'])}, Test: {len(ner_data['test'])}")
-    print_cls_distribution(ner_data["train"], "NER Train")
+    print(f"  NER dataset — Train: {len(ner_data['train'])}, Dev: {len(ner_data['validation'])}, Test: {len(ner_data['test'])}")
+
+    # ── Dataset 2: POS+NER combined (UD EWT + spaCy NER) ────────
+    # For Stage 2b: joint POS+NER training with unfrozen encoder
+    print("\nEnriching UD EWT with spaCy NER...")
+    ud_train_ner = enrich_ud_with_ner(ud_train)
+    ud_dev_ner = enrich_ud_with_ner(ud_dev)
+
+    # Combined POS+NER: UD EWT (expert POS + spaCy NER) + Few-NERD (human NER + spaCy POS)
+    posner_data = {
+        "train": ud_train_ner + few_nerd["train"],
+        "validation": ud_dev_ner + few_nerd["validation"],
+    }
+    random.shuffle(posner_data["train"])
+    print(f"  POS+NER dataset — Train: {len(posner_data['train'])}, Dev: {len(posner_data['validation'])}")
 
     print("Building dep2label vocabulary...")
     dep_labels = build_dep_label_vocab()
     print(f"  {len(dep_labels)} unique dep2label tags")
 
-    # Save processed data
+    # ── Save all datasets ────────────────────────────────────────
+    def clean_examples(examples):
+        return [{k: v for k, v in ex.items() if not k.startswith("_")} for ex in examples]
+
+    # UD data (POS + DEP, no NER)
     for name, data in [("ud_train", ud_train), ("ud_dev", ud_dev), ("ud_test", ud_test)]:
         with open(OUTPUT_DIR / f"{name}.json", "w") as f:
             json.dump(data, f)
 
-    # Strip internal _sent_id before saving
-    def clean_examples(examples):
-        return [{k: v for k, v in ex.items() if not k.startswith("_")} for ex in examples]
-
+    # Dataset 1: NER-only
     for name, key in [("ner_train", "train"), ("ner_dev", "validation"), ("ner_test", "test")]:
         with open(OUTPUT_DIR / f"{name}.json", "w") as f:
             json.dump(clean_examples(ner_data[key]), f)
 
-    # Save label vocabularies
+    # Dataset 2: POS+NER combined
+    for name, key in [("posner_train", "train"), ("posner_dev", "validation")]:
+        with open(OUTPUT_DIR / f"{name}.json", "w") as f:
+            json.dump(clean_examples(posner_data[key]), f)
+
+    # Label vocabularies
     with open(OUTPUT_DIR / "label_vocabs.json", "w") as f:
         json.dump({
             "ner_labels": NER_TAGS,
@@ -720,10 +805,10 @@ def main():
         }, f, indent=2)
 
     print(f"\nData prepared in {OUTPUT_DIR}")
-    print(f"  NER labels: {len(NER_TAGS)}")
-    print(f"  POS labels: {len(UPOS_TAGS)}")
-    print(f"  Dep labels: {len(dep_labels)}")
-    print(f"  CLS labels: {len(CLS_LABELS)}")
+    print(f"  NER dataset:    {len(ner_data['train']):,} train (Few-NERD + kniv)")
+    print(f"  POS+NER dataset: {len(posner_data['train']):,} train (UD EWT + Few-NERD)")
+    print(f"  UD dataset:     {len(ud_train):,} train (POS + DEP)")
+    print(f"  Labels — NER: {len(NER_TAGS)}, POS: {len(UPOS_TAGS)}, Dep: {len(dep_labels)}, CLS: {len(CLS_LABELS)}")
 
 
 if __name__ == "__main__":
