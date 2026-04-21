@@ -298,6 +298,18 @@ dep_preds = np.argmax(dep_logits, axis=-1)
 cls_pred = np.argmax(cls_logits, axis=-1)
 ```
 
+## Important: Use This Model's Tokenizer
+
+Always load the tokenizer from this repo, **not** from `microsoft/deberta-v3-small`. The upstream HuggingFace tokenizer may omit BOS/EOS special tokens, shifting all positions and producing incorrect results.
+
+```python
+# Correct
+tokenizer = AutoTokenizer.from_pretrained("dragonscale-ai/kniv-deberta-v3-nlp-en")
+
+# WRONG — may omit special tokens
+tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v3-small")
+```
+
 ## Limitations
 
 - **English only.** No multilingual support.
