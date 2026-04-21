@@ -126,8 +126,9 @@ class MultiTaskNLPModel(nn.Module):
         with open(path / "label_maps.json") as f:
             label_maps = json.load(f)
 
-        # Create cascade model with POS only
-        model = cls(encoder_name=encoder_name, pos_labels=label_maps["pos_labels"])
+        # Create cascade model with POS only, convert to fp32 BEFORE loading
+        # teacher weights (HF downloads encoder in fp16, teacher saved in fp32)
+        model = cls(encoder_name=encoder_name, pos_labels=label_maps["pos_labels"]).float()
 
         # Load teacher weights directly — strict=False skips NER/DEP/CLS head keys
         teacher_state = torch.load(path / "model.pt", weights_only=True)
