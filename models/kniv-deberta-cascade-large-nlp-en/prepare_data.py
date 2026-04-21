@@ -378,6 +378,170 @@ def load_gmb_ner(
     }
 
 
+# ── Few-NERD ─────────────────────────────────────────────────────
+
+# Few-NERD coarse types → our 18-type spaCy scheme
+FEWNERD_TO_SPACY = {
+    "person": "PERSON",
+    "organization": "ORG",
+    "location": "GPE",          # Few-NERD "location" includes both GPE and LOC
+    "building": "FAC",
+    "product": "PRODUCT",
+    "event": "EVENT",
+    "art": "WORK_OF_ART",
+    # "other" subtypes mapped individually below
+}
+
+# Fine-grained "other-*" types that map to our scheme
+FEWNERD_OTHER_TO_SPACY = {
+    "other-language": "LANGUAGE",
+    "other-law": "LAW",
+    "other-currency": "MONEY",
+}
+
+# Numeric/temporal types that spaCy extracts (Few-NERD doesn't annotate these)
+SPACY_NUMERIC_TYPES = {"DATE", "TIME", "PERCENT", "MONEY", "QUANTITY", "ORDINAL", "CARDINAL"}
+
+
+def load_few_nerd(
+    dev_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+    seed: int = 42,
+    enrich_numeric: bool = True,
+) -> dict[str, list[dict]]:
+    """Load Few-NERD dataset, map to our 18-type scheme, enrich with spaCy numerics.
+
+    Few-NERD has excellent human annotations for contextual entities but
+    completely ignores numeric/temporal types (DATE, TIME, MONEY, etc.).
+    ~49% of sentences contain such entities tagged as O.
+
+    When enrich_numeric=True, runs spaCy on each sentence to extract
+    numeric types, merging them with Few-NERD's annotations (Few-NERD
+    takes priority on conflicts).
+    """
+    from datasets import load_dataset
+
+    print("  Loading Few-NERD from HuggingFace...")
+    dataset = load_dataset("DFKI-SLT/few-nerd", "supervised")
+
+    # Get label name lists from the dataset features
+    coarse_names = dataset["train"].features["ner_tags"].feature.names
+    fine_names = dataset["train"].features["fine_ner_tags"].feature.names
+
+    # Load spaCy for numeric enrichment
+    nlp = None
+    if enrich_numeric:
+        import spacy
+        nlp = spacy.load("en_core_web_sm", disable=["parser", "lemmatizer"])
+        print("  spaCy loaded for numeric enrichment")
+
+    all_examples = []
+    enriched_count = 0
+
+    for split_name in ["train", "validation", "test"]:
+        split_data = dataset[split_name]
+
+        for row in split_data:
+            tokens = row["tokens"]
+            coarse_ids = row["ner_tags"]       # integer IDs
+            fine_ids = row["fine_ner_tags"]     # integer IDs
+
+            if not tokens or len(tokens) < 3:
+                continue
+
+            # Convert integer IDs to string names
+            coarse_tags = [coarse_names[i] for i in coarse_ids]
+            fine_tags = [fine_names[i] for i in fine_ids]
+
+            # Map Few-NERD tags to our BIO scheme
+            bio_tags = []
+            for i, (coarse, fine) in enumerate(zip(coarse_tags, fine_tags)):
+                if coarse == "O":
+                    bio_tags.append("O")
+                    continue
+
+                # Determine prefix (B or I) — Few-NERD uses flat tags,
+                # so we add B- for the first token of each entity span
+                is_start = (i == 0 or coarse_tags[i - 1] != coarse
+                            or fine_tags[i - 1] != fine)
+                prefix = "B" if is_start else "I"
+
+                # Map coarse type
+                mapped = FEWNERD_TO_SPACY.get(coarse)
+
+                # Try fine-grained "other-*" mapping
+                if not mapped and fine:
+                    mapped = FEWNERD_OTHER_TO_SPACY.get(fine)
+
+                if mapped:
+                    bio_tags.append(f"{prefix}-{mapped}")
+                else:
+                    bio_tags.append("O")  # unmapped "other" subtypes
+
+            # Enrich with spaCy numeric entities
+            if nlp:
+                text = " ".join(tokens)
+                doc = nlp(text)
+
+                # Build character-to-token index
+                char_pos = 0
+                char_to_tok = {}
+                for ti, tok in enumerate(tokens):
+                    start = text.find(tok, char_pos)
+                    if start == -1:
+                        start = char_pos
+                    for c in range(start, start + len(tok)):
+                        char_to_tok[c] = ti
+                    char_pos = start + len(tok)
+
+                added_numeric = False
+                for ent in doc.ents:
+                    if ent.label_ not in SPACY_NUMERIC_TYPES:
+                        continue
+
+                    # Find token range for this entity
+                    tok_start = char_to_tok.get(ent.start_char)
+                    tok_end = char_to_tok.get(ent.end_char - 1)
+                    if tok_start is None or tok_end is None:
+                        continue
+
+                    # Only add if ALL tokens in range are currently O
+                    if all(bio_tags[t] == "O" for t in range(tok_start, tok_end + 1)):
+                        bio_tags[tok_start] = f"B-{ent.label_}"
+                        for t in range(tok_start + 1, tok_end + 1):
+                            bio_tags[t] = f"I-{ent.label_}"
+                        added_numeric = True
+
+                if added_numeric:
+                    enriched_count += 1
+
+            text = " ".join(tokens)
+            all_examples.append({
+                "words": tokens,
+                "text": text,
+                "ner_tags": bio_tags,
+                "cls_label": classify_sentence(text),
+            })
+
+    print(f"  Few-NERD: {len(all_examples)} sentences loaded")
+    if enrich_numeric:
+        print(f"  Numeric enrichment: {enriched_count} sentences got spaCy entities added")
+
+    # Shuffle and split
+    rng = random.Random(seed + 2)
+    rng.shuffle(all_examples)
+
+    n = len(all_examples)
+    test_end = int(n * test_ratio)
+    dev_end = test_end + int(n * dev_ratio)
+
+    return {
+        "test": all_examples[:test_end],
+        "validation": all_examples[test_end:dev_end],
+        "train": all_examples[dev_end:],
+    }
+
+
 def build_dep_label_vocab() -> list[str]:
     """Collect all dep2label tags from training data."""
     labels = set()
@@ -514,13 +678,19 @@ def main():
     corpus_train_sampled = subsample_by_domain(corpus_ner["train"], SUBSAMPLE_TARGETS)
     print(f"  Corpus subsampled: {len(corpus_train_sampled)} / {len(corpus_ner['train'])}")
 
+    # Few-NERD: 131K human-annotated sentences + spaCy numeric enrichment
+    print("\nLoading Few-NERD (human-annotated + spaCy numeric enrichment)...")
+    few_nerd = load_few_nerd(enrich_numeric=True)
+    print(f"  Few-NERD — Train: {len(few_nerd['train'])}, Dev: {len(few_nerd['validation'])}, Test: {len(few_nerd['test'])}")
+
+    # Combine: kniv corpus (domain-balanced) + Few-NERD
     ner_data = {
-        "train": corpus_train_sampled,
-        "validation": corpus_ner["validation"],
-        "test": corpus_ner["test"],
+        "train": corpus_train_sampled + few_nerd["train"],
+        "validation": corpus_ner["validation"] + few_nerd["validation"],
+        "test": corpus_ner["test"] + few_nerd["test"],
     }
     random.shuffle(ner_data["train"])
-    print(f"  Final — Train: {len(ner_data['train'])}, Dev: {len(ner_data['validation'])}, Test: {len(ner_data['test'])}")
+    print(f"  Combined — Train: {len(ner_data['train'])}, Dev: {len(ner_data['validation'])}, Test: {len(ner_data['test'])}")
     print_cls_distribution(ner_data["train"], "NER Train")
 
     print("Building dep2label vocabulary...")
