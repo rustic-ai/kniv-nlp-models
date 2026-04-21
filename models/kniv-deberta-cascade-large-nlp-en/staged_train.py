@@ -535,8 +535,13 @@ def evaluate_active(model, tokenizer, device, vocabs, ner_dev, ud_dev, cls_dev, 
         gold_cls, pred_cls = [], []
         for ex in cls_dev:
             text = ex.get("text", " ".join(ex["words"]))
-            encoding = tokenizer(text, max_length=max_length, padding="max_length",
-                                 truncation=True, return_tensors="pt")
+            prev_text = ex.get("prev_text")
+            if prev_text:
+                encoding = tokenizer(prev_text, text, max_length=max_length,
+                                     padding="max_length", truncation=True, return_tensors="pt")
+            else:
+                encoding = tokenizer(text, max_length=max_length, padding="max_length",
+                                     truncation=True, return_tensors="pt")
             with torch.no_grad():
                 out = model(encoding["input_ids"].to(device), encoding["attention_mask"].to(device))
             if "cls_logits" not in out:
