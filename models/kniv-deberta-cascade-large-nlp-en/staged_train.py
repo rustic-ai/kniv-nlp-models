@@ -55,18 +55,42 @@ STAGE_CONFIG = {
         "new_head": None,
         "epochs": 3,
         "head_lr": 1e-5,
-        "base_lr": 1e-5,   # encoder + existing heads
+        "base_lr": 1e-5,
     },
-    2: {
-        "name": "NER (frozen encoder+POS)",
-        "tasks": ["ner"],           # only NER data — POS is frozen
-        "eval_tasks": ["pos", "ner"],  # but eval both to check POS doesn't degrade
+    # Stage 2 splits into 2a/2b/2c for NER cascade training
+    "2a": {
+        "name": "NER head (frozen encoder+POS, Few-NERD 45K)",
+        "tasks": ["ner"],
+        "data_file": "fewnerd_train.json",   # 45K Few-NERD subsample
+        "eval_tasks": ["pos", "ner"],
         "new_head": "ner",
         "head_type": "mlp",
         "freeze_base": True,
         "epochs": 5,
         "head_lr": 1e-4,
         "base_lr": None,
+    },
+    "2b": {
+        "name": "POS+NER alignment (frozen encoder, UD EWT 12.5K)",
+        "tasks": ["pos", "ner"],
+        "data_file": "ud_ner_train.json",    # UD EWT with expert POS + spaCy NER
+        "eval_tasks": ["pos", "ner"],
+        "new_head": None,
+        "freeze_base": True,
+        "epochs": 1,
+        "head_lr": 1e-4,                    # both heads at same LR
+        "base_lr": None,
+    },
+    "2c": {
+        "name": "Encoder fine-tune (unfrozen, POS+NER 163K)",
+        "tasks": ["pos", "ner"],
+        "data_file": "posner_train.json",    # full UD EWT + Few-NERD
+        "eval_tasks": ["pos", "ner"],
+        "new_head": None,
+        "freeze_base": False,
+        "epochs": 1,
+        "head_lr": 1e-5,                    # heads: moderate LR
+        "base_lr": 1e-6,                    # encoder: very slow
     },
     3: {
         "name": "DEP (frozen encoder+POS+NER)",
@@ -96,16 +120,18 @@ STAGE_CONFIG = {
         "new_head": None,
         "epochs": 3,
         "head_lr": 5e-6,
-        "base_lr": 5e-6,   # uniform low LR
+        "base_lr": 5e-6,
     },
 }
 
 
 # ── Training loop ────────────────────────────────────────────────
 
-def train_stage(stage: int, checkpoint: str | None = None):
+def train_stage(stage: str | int, checkpoint: str | None = None):
     config = load_config()
-    stage_cfg = STAGE_CONFIG[stage]
+    # Support both int (1, 3, 4, 5) and string ("2a", "2b", "2c") stages
+    stage_key = int(stage) if str(stage).isdigit() else stage
+    stage_cfg = STAGE_CONFIG[stage_key]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"\n{'='*60}", flush=True)
@@ -134,7 +160,7 @@ def train_stage(stage: int, checkpoint: str | None = None):
         tokenizer = AutoTokenizer.from_pretrained(encoder_name)
 
     # ── Build or load model ──────────────────────────────────
-    if stage == 1:
+    if stage_key == 1:
         # Fresh model with POS head only
         model = MultiTaskNLPModel(
             encoder_name=encoder_name,
@@ -155,7 +181,7 @@ def train_stage(stage: int, checkpoint: str | None = None):
                 has_cascade = "pos_labels" in ckpt_labels and "ner_labels" not in ckpt_labels
                 # Old teacher has all 4, cascade stage1 has only pos
                 old_teacher = all(k in ckpt_labels for k in ["ner_labels", "pos_labels", "dep_labels", "cls_labels"])
-                if old_teacher and stage == 2:
+                if old_teacher and str(stage).startswith("2"):
                     print("  Detected old teacher checkpoint — loading encoder + POS only", flush=True)
                     model = MultiTaskNLPModel.load_from_teacher(checkpoint, encoder_name).float().to(device)
                 else:
@@ -186,10 +212,17 @@ def train_stage(stage: int, checkpoint: str | None = None):
     print(f"Parameters: {param_count:,}", flush=True)
 
     # ── Build datasets for active tasks ──────────────────────
-    with open(DATA_DIR / "ner_train.json") as f:
-        ner_train = json.load(f)
-    with open(DATA_DIR / "ud_train.json") as f:
-        ud_train = json.load(f)
+
+    # Load data — use stage-specific data_file if specified
+    data_file = stage_cfg.get("data_file")
+    if data_file:
+        print(f"Loading training data: {data_file}", flush=True)
+        with open(DATA_DIR / data_file) as f:
+            train_examples = json.load(f)
+    else:
+        # Default: load standard NER + UD files
+        train_examples = None
+
     with open(DATA_DIR / "ner_dev.json") as f:
         ner_dev = json.load(f)
     with open(DATA_DIR / "ud_dev.json") as f:
@@ -203,15 +236,41 @@ def train_stage(stage: int, checkpoint: str | None = None):
     active_tasks = stage_cfg["tasks"]
     datasets = []
 
-    if "pos" in active_tasks:
-        datasets.append(MultiTaskDataset(ud_train, "pos", tokenizer, pos_map, "pos_tags", max_length))
-    if "ner" in active_tasks:
-        datasets.append(MultiTaskDataset(ner_train, "ner", tokenizer, ner_map, "ner_tags", max_length))
-    if "dep" in active_tasks:
-        datasets.append(MultiTaskDataset(ud_train, "dep", tokenizer, dep_map, "dep_labels", max_length))
-    if "cls" in active_tasks:
-        cls_examples = [ex for ex in ud_train + ner_train if "cls_label" in ex]
-        datasets.append(MultiTaskDataset(cls_examples, "cls", tokenizer, cls_map, "cls_label", max_length))
+    if data_file and train_examples:
+        # Stage-specific data file — build datasets from single source
+        for task in active_tasks:
+            if task == "ner":
+                datasets.append(MultiTaskDataset(
+                    [ex for ex in train_examples if "ner_tags" in ex],
+                    "ner", tokenizer, ner_map, "ner_tags", max_length))
+            elif task == "pos":
+                datasets.append(MultiTaskDataset(
+                    [ex for ex in train_examples if "pos_tags" in ex],
+                    "pos", tokenizer, pos_map, "pos_tags", max_length))
+            elif task == "dep":
+                datasets.append(MultiTaskDataset(
+                    [ex for ex in train_examples if "dep_labels" in ex],
+                    "dep", tokenizer, dep_map, "dep_labels", max_length))
+            elif task == "cls":
+                datasets.append(MultiTaskDataset(
+                    [ex for ex in train_examples if "cls_label" in ex],
+                    "cls", tokenizer, cls_map, "cls_label", max_length))
+    else:
+        # Default loading from standard files
+        with open(DATA_DIR / "ner_train.json") as f:
+            ner_train = json.load(f)
+        with open(DATA_DIR / "ud_train.json") as f:
+            ud_train = json.load(f)
+
+        if "pos" in active_tasks:
+            datasets.append(MultiTaskDataset(ud_train, "pos", tokenizer, pos_map, "pos_tags", max_length))
+        if "ner" in active_tasks:
+            datasets.append(MultiTaskDataset(ner_train, "ner", tokenizer, ner_map, "ner_tags", max_length))
+        if "dep" in active_tasks:
+            datasets.append(MultiTaskDataset(ud_train, "dep", tokenizer, dep_map, "dep_labels", max_length))
+        if "cls" in active_tasks:
+            cls_examples = [ex for ex in ud_train + ner_train if "cls_label" in ex]
+            datasets.append(MultiTaskDataset(cls_examples, "cls", tokenizer, cls_map, "cls_label", max_length))
 
     train_dataset = ConcatDataset(datasets)
     batch_size = config["training"]["batch_size"]
@@ -224,12 +283,12 @@ def train_stage(stage: int, checkpoint: str | None = None):
 
     print(f"Train: {len(train_dataset):,} examples, {len(train_loader)} batches/epoch", flush=True)
 
-    # ── Optimizer: freeze base params for stages 2-4, train only new head ──
+    # ── Optimizer: configure freezing and learning rates per stage ──
     new_head_name = stage_cfg["new_head"]
     freeze_base = stage_cfg.get("freeze_base", False)
 
     if freeze_base and new_head_name:
-        # Freeze encoder + all existing heads — only train the new head
+        # Freeze encoder + existing heads — only train the NEW head (e.g. 2a: NER only)
         head_params = []
         frozen_count = 0
         for name, param in model.named_parameters():
@@ -242,25 +301,39 @@ def train_stage(stage: int, checkpoint: str | None = None):
         param_groups = [{"params": head_params, "lr": stage_cfg["head_lr"]}]
         trainable = sum(p.numel() for p in head_params)
         print(f"  Frozen: {frozen_count} params, Trainable: {trainable:,} ({new_head_name}_head only)", flush=True)
-    elif stage == 5:
-        # Stage 5 (joint): single LR for everything, all unfrozen
-        for param in model.parameters():
-            param.requires_grad = True
-        param_groups = [{"params": list(model.parameters()), "lr": stage_cfg["base_lr"]}]
-    else:
-        # Differential LR (fallback)
+
+    elif freeze_base and not new_head_name:
+        # Freeze encoder — train ALL heads (e.g. 2b: POS+NER alignment)
         head_params = []
-        base_params = []
+        frozen_count = 0
         for name, param in model.named_parameters():
-            if new_head_name and f"{new_head_name}_head" in name:
+            if "_head" in name:
+                param.requires_grad = True
                 head_params.append(param)
             else:
-                base_params.append(param)
-        param_groups = []
-        if base_params:
-            param_groups.append({"params": base_params, "lr": stage_cfg["base_lr"]})
-        if head_params:
-            param_groups.append({"params": head_params, "lr": stage_cfg["head_lr"]})
+                param.requires_grad = False
+                frozen_count += 1
+        param_groups = [{"params": head_params, "lr": stage_cfg["head_lr"]}]
+        trainable = sum(p.numel() for p in head_params)
+        print(f"  Frozen encoder: {frozen_count} params, Trainable heads: {trainable:,}", flush=True)
+
+    elif not freeze_base and stage_cfg.get("base_lr"):
+        # Differential LR — encoder at low LR, heads at higher LR (e.g. 2c, 5)
+        for param in model.parameters():
+            param.requires_grad = True
+        head_params = [p for n, p in model.named_parameters() if "_head" in n]
+        base_params = [p for n, p in model.named_parameters() if "_head" not in n]
+        param_groups = [
+            {"params": base_params, "lr": stage_cfg["base_lr"]},
+            {"params": head_params, "lr": stage_cfg["head_lr"]},
+        ]
+        print(f"  Unfrozen: encoder LR={stage_cfg['base_lr']}, heads LR={stage_cfg['head_lr']}", flush=True)
+
+    else:
+        # Uniform LR for everything
+        for param in model.parameters():
+            param.requires_grad = True
+        param_groups = [{"params": list(model.parameters()), "lr": stage_cfg["head_lr"]}]
 
     optimizer = torch.optim.AdamW(param_groups, weight_decay=config["training"]["weight_decay"])
 
@@ -279,7 +352,7 @@ def train_stage(stage: int, checkpoint: str | None = None):
     seq_loss_fn = nn.CrossEntropyLoss()
 
     # ── Output directory ─────────────────────────────────────
-    output_dir = Path(config["output"]["dir"]) / f"stage{stage}"
+    output_dir = Path(config["output"]["dir"]) / f"stage{stage_key}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Training loop ────────────────────────────────────────
@@ -503,14 +576,15 @@ def composite_score_active(results, active_tasks):
 
 
 def main():
+    valid_stages = ["1", "2a", "2b", "2c", "3", "4", "5"]
     parser = argparse.ArgumentParser(description="Staged cascade training")
-    parser.add_argument("--stage", type=int, required=True, choices=[1, 2, 3, 4, 5],
-                        help="Training stage (1=POS, 2=+NER, 3=+DEP, 4=+CLS, 5=joint)")
+    parser.add_argument("--stage", type=str, required=True, choices=valid_stages,
+                        help="Training stage (1=POS, 2a=NER, 2b=POS+NER align, 2c=encoder, 3=DEP, 4=CLS, 5=joint)")
     parser.add_argument("--checkpoint", type=str, default=None,
-                        help="Path to previous stage best checkpoint (required for stages 2-5)")
+                        help="Path to previous stage best checkpoint (required for stages 2+)")
     args = parser.parse_args()
 
-    if args.stage > 1 and not args.checkpoint:
+    if args.stage != "1" and not args.checkpoint:
         parser.error(f"Stage {args.stage} requires --checkpoint from previous stage")
 
     train_stage(args.stage, args.checkpoint)
