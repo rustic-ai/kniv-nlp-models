@@ -139,12 +139,21 @@ class MultiTaskNLPModel(nn.Module):
             _empty_encoder=True,
         )
 
-        # Load teacher weights directly — strict=False skips NER/DEP/CLS head keys
+        # Load teacher weights — filter to only keys the model expects
         teacher_state = torch.load(path / "model.pt", weights_only=True)
-        result = model.load_state_dict(teacher_state, strict=False)
-        print(f"  Loaded teacher weights. Missing: {result.missing_keys or 'none'}, "
-              f"Unexpected (dropped): {[k.split('.')[0] for k in result.unexpected_keys]}",
-              flush=True)
+        model_keys = set(model.state_dict().keys())
+        filtered = {k: v for k, v in teacher_state.items() if k in model_keys}
+        dropped = [k for k in teacher_state if k not in model_keys]
+        model.load_state_dict(filtered, strict=True)
+
+        # Verify a sample weight actually loaded
+        sample_key = "encoder.encoder.layer.0.attention.self.query_proj.weight"
+        if sample_key in filtered:
+            match = torch.equal(model.state_dict()[sample_key], filtered[sample_key])
+            print(f"  Encoder weight verification: {'OK' if match else 'FAILED'}", flush=True)
+
+        print(f"  Loaded {len(filtered)} params, dropped {len(dropped)} "
+              f"({set(k.split('.')[0] for k in dropped)})", flush=True)
         return model
 
     def gradient_checkpointing_enable(self, **kwargs):
