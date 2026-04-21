@@ -170,7 +170,12 @@ def train_stage(stage: int, checkpoint: str | None = None):
             model = model.to(device)
             print(f"Added {head_name} head ({head_type}, {len(label_list)} labels)", flush=True)
 
-    model.gradient_checkpointing_enable()
+    # Only enable gradient checkpointing when encoder is trainable.
+    # Frozen encoder + checkpointing causes incorrect forward pass outputs
+    # (PyTorch checkpoint() with use_reentrant=True + requires_grad=False).
+    freeze_base = stage_cfg.get("freeze_base", False)
+    if not freeze_base:
+        model.gradient_checkpointing_enable()
 
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Parameters: {param_count:,}", flush=True)
