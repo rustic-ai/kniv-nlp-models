@@ -237,13 +237,22 @@ class MultiTaskNLPModel(nn.Module):
         with open(path / "label_maps.json") as f:
             label_maps = json.load(f)
 
+        # Create model with POS only first
         model = cls(
             encoder_name=encoder_name,
             pos_labels=label_maps["pos_labels"],
-            ner_labels=label_maps.get("ner_labels"),
-            dep_labels=label_maps.get("dep_labels"),
-            cls_labels=label_maps.get("cls_labels"),
             _empty_encoder=True,
         )
-        model.load_state_dict(torch.load(path / "model.pt", weights_only=True))
+
+        # Detect head types from state_dict keys and add them
+        state_dict = torch.load(path / "model.pt", weights_only=True)
+        for head_name in ["ner", "dep", "cls"]:
+            labels = label_maps.get(f"{head_name}_labels")
+            if labels is None:
+                continue
+            # MLP heads have keys like "ner_head.0.weight", Linear has "ner_head.weight"
+            is_mlp = f"{head_name}_head.0.weight" in state_dict
+            model.add_head(head_name, labels, head_type="mlp" if is_mlp else "linear")
+
+        model.load_state_dict(state_dict)
         return model
