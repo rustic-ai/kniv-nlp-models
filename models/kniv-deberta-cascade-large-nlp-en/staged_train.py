@@ -38,7 +38,7 @@ from train import (
 )
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
-DATA_DIR = Path(__file__).parent.parent.parent / "data" / "prepared" / "deberta-v3-large-nlp-en"
+DATA_DIR = Path(__file__).parent.parent.parent / "data" / "prepared" / "kniv-deberta-cascade"
 
 
 def load_config():
