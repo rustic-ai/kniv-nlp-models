@@ -80,11 +80,19 @@ class SimpleSeqDataset(torch.utils.data.Dataset):
         return len(self.examples)
 
     def __getitem__(self, idx):
-        text = self.examples[idx].get("text", " ".join(self.examples[idx]["words"]))
-        encoding = self.tokenizer(
-            text, max_length=self.max_length, padding="max_length",
-            truncation=True, return_tensors="pt",
-        )
+        example = self.examples[idx]
+        text = example.get("text", " ".join(example["words"]))
+        prev_text = example.get("prev_text")
+        if prev_text:
+            encoding = self.tokenizer(
+                prev_text, text, max_length=self.max_length,
+                padding="max_length", truncation=True, return_tensors="pt",
+            )
+        else:
+            encoding = self.tokenizer(
+                text, max_length=self.max_length, padding="max_length",
+                truncation=True, return_tensors="pt",
+            )
         return {
             "input_ids": encoding["input_ids"].squeeze(0),
             "attention_mask": encoding["attention_mask"].squeeze(0),
