@@ -20,7 +20,7 @@ from dep2label import encode_sentence, collect_label_vocabulary
 
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
-OUTPUT_DIR = Path(__file__).parent.parent.parent / "data" / "prepared" / "deberta-v3-large-nlp-en"
+OUTPUT_DIR = Path(__file__).parent.parent.parent / "data" / "prepared" / "kniv-deberta-cascade"
 CORPUS_DIR = Path(__file__).parent.parent.parent / "corpus" / "output" / "annotated"
 
 # UD English EWT paths
