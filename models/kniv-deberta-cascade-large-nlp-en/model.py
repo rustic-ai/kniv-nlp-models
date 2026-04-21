@@ -129,22 +129,12 @@ class MultiTaskNLPModel(nn.Module):
         # Create cascade model with POS only
         model = cls(encoder_name=encoder_name, pos_labels=label_maps["pos_labels"])
 
-        # Load teacher state dict, keeping only matching keys
+        # Load teacher weights directly — strict=False skips NER/DEP/CLS head keys
         teacher_state = torch.load(path / "model.pt", weights_only=True)
-        model_state = model.state_dict()
-
-        loaded = []
-        skipped = []
-        for key, value in teacher_state.items():
-            if key in model_state and model_state[key].shape == value.shape:
-                model_state[key] = value
-                loaded.append(key.split(".")[0])
-            else:
-                skipped.append(key)
-
-        model.load_state_dict(model_state)
-        print(f"  Loaded {len(loaded)} params from teacher, skipped {len(skipped)} "
-              f"(dropped heads: {set(k.split('.')[0] for k in skipped)})", flush=True)
+        result = model.load_state_dict(teacher_state, strict=False)
+        print(f"  Loaded teacher weights. Missing: {result.missing_keys or 'none'}, "
+              f"Unexpected (dropped): {[k.split('.')[0] for k in result.unexpected_keys]}",
+              flush=True)
         return model
 
     def gradient_checkpointing_enable(self, **kwargs):
