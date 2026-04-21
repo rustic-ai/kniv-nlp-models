@@ -120,11 +120,18 @@ class DistillSeqDataset(Dataset):
     def __getitem__(self, idx):
         example = self.examples[idx]
         text = example.get("text", " ".join(example["words"]))
+        prev_text = example.get("prev_text")
 
-        encoding = self.tokenizer(
-            text, max_length=self.max_length, padding="max_length",
-            truncation=True, return_tensors="pt",
-        )
+        if prev_text:
+            encoding = self.tokenizer(
+                prev_text, text, max_length=self.max_length,
+                padding="max_length", truncation=True, return_tensors="pt",
+            )
+        else:
+            encoding = self.tokenizer(
+                text, max_length=self.max_length, padding="max_length",
+                truncation=True, return_tensors="pt",
+            )
 
         return {
             "input_ids": encoding["input_ids"].squeeze(0),
