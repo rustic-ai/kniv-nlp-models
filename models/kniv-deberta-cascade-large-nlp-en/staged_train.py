@@ -218,19 +218,24 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
         # Add new head if this stage introduces one
         if stage_cfg["new_head"]:
             head_name = stage_cfg["new_head"]
-            label_list = {"ner": ner_labels, "dep": dep_labels, "cls": cls_labels}[head_name]
+            label_list = {"ner": ner_labels, "dep": dep_labels, "srl": srl_labels, "cls": cls_labels}[head_name]
             # NER uses MLP head; DEP/CLS start as linear (can be changed)
             head_type = stage_cfg.get("head_type", "linear")
             model.add_head(head_name, label_list, head_type=head_type)
             model = model.to(device)
             print(f"Added {head_name} head ({head_type}, {len(label_list)} labels)", flush=True)
 
-    # Only enable gradient checkpointing when encoder is trainable.
-    # Frozen encoder + checkpointing causes incorrect forward pass outputs
-    # (PyTorch checkpoint() with use_reentrant=True + requires_grad=False).
+    # Gradient checkpointing: only when encoder is trainable AND VRAM is limited.
+    # Frozen encoder + checkpointing causes incorrect outputs (PyTorch bug).
+    # H100 80GB doesn't need checkpointing even with unfrozen encoder.
     freeze_base = stage_cfg.get("freeze_base", False)
     if not freeze_base:
-        model.gradient_checkpointing_enable()
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9 if torch.cuda.is_available() else 0
+        if gpu_mem < 50:  # A100 40GB needs checkpointing, H100 80GB doesn't
+            model.gradient_checkpointing_enable()
+            print(f"  Gradient checkpointing: ON ({gpu_mem:.0f}GB VRAM)", flush=True)
+        else:
+            print(f"  Gradient checkpointing: OFF ({gpu_mem:.0f}GB VRAM)", flush=True)
 
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Parameters: {param_count:,}", flush=True)
