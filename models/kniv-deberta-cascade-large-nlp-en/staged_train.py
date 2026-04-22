@@ -576,6 +576,7 @@ def evaluate_active(model, tokenizer, device, vocabs, ner_dev, ud_dev, srl_dev, 
     pos_labels = vocabs["pos_labels"]
     ner_labels = vocabs["ner_labels"]
     dep_labels = vocabs["dep_labels"]
+    srl_labels = vocabs.get("srl_labels", [])
     cls_labels = vocabs["cls_labels"]
 
     def predict_tokens(examples, logit_key, label_list, gold_key):
