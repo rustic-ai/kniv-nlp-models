@@ -26,6 +26,7 @@ training:
   ner_loss_weight: 1.0
   pos_loss_weight: 1.0
   dep_loss_weight: 1.0
+  srl_loss_weight: 1.0
   cls_loss_weight: 0.5
   batches_per_task: 1
 
