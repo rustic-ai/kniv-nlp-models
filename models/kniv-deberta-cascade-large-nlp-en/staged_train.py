@@ -185,6 +185,7 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
     ner_labels = vocabs["ner_labels"]
     pos_labels = vocabs["pos_labels"]
     dep_labels = vocabs["dep_labels"]
+    srl_labels = vocabs.get("srl_labels", [])
     cls_labels = vocabs["cls_labels"]
 
     encoder_name = config["model"]["encoder"]
@@ -276,7 +277,6 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
     ner_map = {l: i for i, l in enumerate(ner_labels)}
     pos_map = {l: i for i, l in enumerate(pos_labels)}
     dep_map = {l: i for i, l in enumerate(dep_labels)}
-    srl_labels = vocabs.get("srl_labels", [])
     srl_map = {l: i for i, l in enumerate(srl_labels)}
     cls_map = {l: i for i, l in enumerate(cls_labels)}
 
