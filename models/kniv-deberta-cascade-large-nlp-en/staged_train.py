@@ -82,7 +82,18 @@ STAGE_CONFIG = {
         "base_lr": None,
     },
     "2c": {
-        "name": "Encoder fine-tune (unfrozen, UD EWT 12.5K + Few-NERD 20K)",
+        "name": "Encoder fine-tune (unfrozen, POS+NER 163K) — DEPRECATED, degraded POS+NER",
+        "tasks": ["pos", "ner"],
+        "data_file": "posner_train.json",
+        "eval_tasks": ["pos", "ner"],
+        "new_head": None,
+        "freeze_base": False,
+        "epochs": 1,
+        "head_lr": 1e-5,
+        "base_lr": 1e-6,
+    },
+    "2d": {
+        "name": "Gentle encoder fine-tune (UD EWT 12.5K + Few-NERD 20K, 3 epochs)",
         "tasks": ["pos", "ner"],
         "data_file": "posner_small_train.json",  # UD EWT + 20K Few-NERD subsample
         "eval_tasks": ["pos", "ner"],
@@ -592,7 +603,7 @@ def composite_score_active(results, active_tasks):
 
 
 def main():
-    valid_stages = ["1", "2a", "2b", "2c", "3", "4", "5"]
+    valid_stages = ["1", "2a", "2b", "2c", "2d", "3", "3s", "4", "5"]
     parser = argparse.ArgumentParser(description="Staged cascade training")
     parser.add_argument("--stage", type=str, required=True, choices=valid_stages,
                         help="Training stage (1=POS, 2a=NER, 2b=POS+NER align, 2c=encoder, 3=DEP, 4=CLS, 5=joint)")
