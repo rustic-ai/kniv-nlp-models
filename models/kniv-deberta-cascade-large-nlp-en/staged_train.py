@@ -179,6 +179,21 @@ STAGE_CONFIG = {
         "head_lr": 1e-4,
         "base_lr": None,
     },
+    "3b-dep": {
+        "name": "SRL Biaffine ablation: encoder+DEP only (no POS/NER in SRL input)",
+        "tasks": ["srl"],
+        "data_file": "srl_full_train.json",
+        "eval_tasks": ["pos", "ner", "dep", "srl"],
+        "new_head": "srl",
+        "head_type": "biaffine",
+        "srl_cascade": ["dep"],
+        "freeze_base": True,
+        "epochs": 10,
+        "patience": 3,
+        "batch_size": 128,
+        "head_lr": 1e-4,
+        "base_lr": None,
+    },
     4: {
         "name": "CLS (frozen encoder+POS+NER+DEP+SRL)",
         "tasks": ["cls"],
@@ -274,7 +289,8 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
             label_list = {"ner": ner_labels, "dep": dep_labels, "srl": srl_labels, "cls": cls_labels}[head_name]
             # NER uses MLP head; DEP/CLS start as linear (can be changed)
             head_type = stage_cfg.get("head_type", "linear")
-            model.add_head(head_name, label_list, head_type=head_type)
+            srl_cascade = stage_cfg.get("srl_cascade")
+            model.add_head(head_name, label_list, head_type=head_type, srl_cascade=srl_cascade)
             model = model.to(device)
             print(f"Added {head_name} head ({head_type}, {len(label_list)} labels)", flush=True)
 
@@ -398,7 +414,9 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
                 frozen_count += 1
         param_groups = [{"params": head_params, "lr": stage_cfg["head_lr"]}]
         trainable = sum(p.numel() for p in head_params)
-        trainable_names = f"{new_head_name}_head" + (" + dep_proj" if new_head_name == "srl" else "")
+        trainable_names = f"{new_head_name}_head"
+        if new_head_name == "srl" and model.dep_proj is not None:
+            trainable_names += " + dep_proj"
         print(f"  Frozen: {frozen_count} params, Trainable: {trainable:,} ({trainable_names})", flush=True)
 
     elif freeze_base and not new_head_name:
@@ -741,7 +759,7 @@ def composite_score_active(results, active_tasks):
 
 
 def main():
-    valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "2f", "3", "3s", "3m", "3b", "4", "5"]
+    valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "2f", "3", "3s", "3m", "3b", "3b-dep", "4", "5"]
     parser = argparse.ArgumentParser(description="Staged cascade training")
     parser.add_argument("--stage", type=str, required=True, choices=valid_stages,
                         help="Training stage (1=POS, 2a=NER, 2b=POS+NER align, 2c=encoder, 3=DEP, 4=CLS, 5=joint)")

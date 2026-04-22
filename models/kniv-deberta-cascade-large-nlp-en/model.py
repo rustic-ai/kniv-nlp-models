@@ -145,10 +145,11 @@ class MultiTaskNLPModel(nn.Module):
                 hidden_size + len(pos_labels) + len(ner_labels), len(dep_labels),
             )
 
-        # SRL: optional, cascaded from POS + NER + DEP_proj
+        # SRL: optional, cascaded from configurable upstream heads
         self.dep_proj = None
         self.srl_head = None
         self.srl_labels = srl_labels
+        self.srl_cascade = {"pos", "ner", "dep"}  # which upstream heads feed SRL input
         if srl_labels is not None and dep_labels is not None and ner_labels is not None:
             self.dep_proj = nn.Linear(len(dep_labels), self.DEP_PROJ_DIM)
             srl_in = hidden_size + len(pos_labels) + len(ner_labels) + self.DEP_PROJ_DIM
@@ -173,13 +174,15 @@ class MultiTaskNLPModel(nn.Module):
             nn.Linear(hidden_size, out_dim),
         )
 
-    def add_head(self, head_name: str, labels: list[str], head_type: str = "linear"):
+    def add_head(self, head_name: str, labels: list[str], head_type: str = "linear",
+                 srl_cascade: set[str] | list[str] | None = None):
         """Add a new cascade head after loading a previous-stage checkpoint.
 
         Args:
             head_name: "ner", "dep", "srl", or "cls"
             labels: list of label strings
             head_type: "linear", "mlp", or "biaffine" (SRL only)
+            srl_cascade: which upstream heads feed SRL (subset of {"pos","ner","dep"})
         """
         hidden_size = self.config.hidden_size
         num_pos = len(self.pos_labels)
@@ -198,10 +201,18 @@ class MultiTaskNLPModel(nn.Module):
         elif head_name == "srl":
             assert self.dep_labels is not None, "SRL requires DEP head in cascade"
             self.srl_labels = labels
-            num_ner = len(self.ner_labels)
-            if self.dep_proj is None:
-                self.dep_proj = nn.Linear(len(self.dep_labels), self.DEP_PROJ_DIM)
-            in_dim = hidden_size + num_pos + num_ner + self.DEP_PROJ_DIM
+            if srl_cascade is not None:
+                self.srl_cascade = set(srl_cascade)
+            # Compute input dim based on which upstream heads feed SRL
+            in_dim = hidden_size
+            if "pos" in self.srl_cascade:
+                in_dim += num_pos
+            if "ner" in self.srl_cascade:
+                in_dim += len(self.ner_labels)
+            if "dep" in self.srl_cascade:
+                if self.dep_proj is None:
+                    self.dep_proj = nn.Linear(len(self.dep_labels), self.DEP_PROJ_DIM)
+                in_dim += self.DEP_PROJ_DIM
             if head_type == "biaffine":
                 # Find dep label indices that correspond to ROOT
                 root_indices = [
@@ -299,18 +310,19 @@ class MultiTaskNLPModel(nn.Module):
                 dep_logits = self.dep_head(torch.cat([hidden, pos_probs, ner_probs], dim=-1))
                 result["dep_logits"] = dep_logits
 
-                # 4. SRL (cascade from POS + NER + DEP_proj)
+                # 4. SRL (cascade from configurable upstream heads)
                 if self.srl_head is not None:
                     # When upstream is frozen, detach and create fresh tensors
                     # so dep_proj and srl_head can still receive gradients
                     dep_probs = F.softmax(dep_logits.detach(), dim=-1).requires_grad_(True)
-                    dep_compressed = self.dep_proj(dep_probs)
-                    srl_input = torch.cat([
-                        hidden.detach(),
-                        pos_probs.detach(),
-                        ner_probs.detach(),
-                        dep_compressed,
-                    ], dim=-1)
+                    srl_parts = [hidden.detach()]
+                    if "pos" in self.srl_cascade:
+                        srl_parts.append(pos_probs.detach())
+                    if "ner" in self.srl_cascade:
+                        srl_parts.append(ner_probs.detach())
+                    if "dep" in self.srl_cascade:
+                        srl_parts.append(self.dep_proj(dep_probs))
+                    srl_input = torch.cat(srl_parts, dim=-1)
                     if isinstance(self.srl_head, BiaffineSRLHead):
                         srl_logits = self.srl_head(srl_input, dep_probs)
                     else:
@@ -346,6 +358,7 @@ class MultiTaskNLPModel(nn.Module):
             label_maps["dep_labels"] = self.dep_labels
         if self.srl_labels is not None:
             label_maps["srl_labels"] = self.srl_labels
+            label_maps["srl_cascade"] = sorted(self.srl_cascade)
         if self.cls_labels is not None:
             label_maps["cls_labels"] = self.cls_labels
 
@@ -385,7 +398,10 @@ class MultiTaskNLPModel(nn.Module):
                 head_type = "mlp"
             else:
                 head_type = "linear"
-            model.add_head(head_name, labels, head_type=head_type)
+            kwargs = {}
+            if head_name == "srl" and "srl_cascade" in label_maps:
+                kwargs["srl_cascade"] = label_maps["srl_cascade"]
+            model.add_head(head_name, labels, head_type=head_type, **kwargs)
 
         model.load_state_dict(state_dict)
         return model
