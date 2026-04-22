@@ -535,19 +535,15 @@ def main():
     print(f"  PropBank total: train={len(propbank['train'])}, "
           f"dev={len(propbank['validation'])}, test={len(propbank['test'])}")
 
-    # Source 2: QA-SRL Bank 2.0
-    print("\nLoading QA-SRL Bank 2.0...")
-    qasrl = load_qasrl_bank(subsample=25000)
-    print(f"  QA-SRL total: {len(qasrl)}")
-
-    # Source 3: Silver SRL from Few-NERD
+    # Source 2: Silver SRL from Few-NERD
+    # (QA-SRL Bank 2.0 skipped — HF loading script deprecated, data URL broken)
     print("\nGenerating silver SRL from Few-NERD...")
-    silver = generate_silver_srl(subsample=45000)
+    silver = generate_silver_srl(subsample=70000)
     print(f"  Silver total: {len(silver)}")
 
-    # Merge: train = PropBank train + QA-SRL + silver
+    # Merge: train = PropBank gold + silver
     # Dev/test = PropBank gold only (reliable evaluation)
-    srl_train = propbank["train"] + qasrl + silver
+    srl_train = propbank["train"] + silver
     random.shuffle(srl_train)
 
     srl_dev = propbank["validation"]
@@ -555,7 +551,7 @@ def main():
 
     print(f"\nFinal SRL dataset:")
     print(f"  Train: {len(srl_train)} (PropBank {len(propbank['train'])} + "
-          f"QA-SRL {len(qasrl)} + Silver {len(silver)})")
+          f"Silver {len(silver)})")
     print(f"  Dev: {len(srl_dev)} (PropBank gold)")
     print(f"  Test: {len(srl_test)} (PropBank gold)")
 
