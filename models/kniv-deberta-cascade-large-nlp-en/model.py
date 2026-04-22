@@ -5,7 +5,8 @@ Architecture (cascaded):
       1. POS head:  Linear(H, 17)                      -- always present
       2. NER head:  Linear(H+17, 37)                   -- POS → NER cascade
       3. DEP head:  Linear(H+17+37, dep_labels)        -- POS+NER → DEP cascade
-      4. CLS head:  Linear(H+17+37, cls_labels)        -- pooled POS+NER → CLS
+      4. SRL head:  Linear(H+17+37+64, srl_labels)     -- POS+NER+DEP_proj → SRL cascade
+      5. CLS head:  Linear(H+17+37, cls_labels)        -- pooled POS+NER → CLS
 
 Heads are added progressively during staged training:
   Stage 1: POS only → train encoder + POS
@@ -32,12 +33,15 @@ from transformers import AutoModel, AutoConfig
 class MultiTaskNLPModel(nn.Module):
     """Multi-task model with progressive cascade heads."""
 
+    DEP_PROJ_DIM = 64  # compress DEP probs for SRL cascade
+
     def __init__(
         self,
         encoder_name: str,
         pos_labels: list[str],
         ner_labels: list[str] | None = None,
         dep_labels: list[str] | None = None,
+        srl_labels: list[str] | None = None,
         cls_labels: list[str] | None = None,
         dropout: float = 0.1,
         _empty_encoder: bool = False,
@@ -72,6 +76,15 @@ class MultiTaskNLPModel(nn.Module):
                 hidden_size + len(pos_labels) + len(ner_labels), len(dep_labels),
             )
 
+        # SRL: optional, cascaded from POS + NER + DEP_proj
+        self.dep_proj = None
+        self.srl_head = None
+        self.srl_labels = srl_labels
+        if srl_labels is not None and dep_labels is not None and ner_labels is not None:
+            self.dep_proj = nn.Linear(len(dep_labels), self.DEP_PROJ_DIM)
+            srl_in = hidden_size + len(pos_labels) + len(ner_labels) + self.DEP_PROJ_DIM
+            self.srl_head = nn.Linear(srl_in, len(srl_labels))
+
         # CLS: optional, cascaded from pooled POS + NER
         self.cls_head = None
         self.cls_labels = cls_labels
@@ -95,7 +108,7 @@ class MultiTaskNLPModel(nn.Module):
         """Add a new cascade head after loading a previous-stage checkpoint.
 
         Args:
-            head_name: "ner", "dep", or "cls"
+            head_name: "ner", "dep", "srl", or "cls"
             labels: list of label strings
             head_type: "linear" or "mlp"
         """
@@ -113,6 +126,14 @@ class MultiTaskNLPModel(nn.Module):
             num_ner = len(self.ner_labels)
             in_dim = hidden_size + num_pos + num_ner
             self.dep_head = make(in_dim, len(labels))
+        elif head_name == "srl":
+            assert self.dep_labels is not None, "SRL requires DEP head in cascade"
+            self.srl_labels = labels
+            num_ner = len(self.ner_labels)
+            if self.dep_proj is None:
+                self.dep_proj = nn.Linear(len(self.dep_labels), self.DEP_PROJ_DIM)
+            in_dim = hidden_size + num_pos + num_ner + self.DEP_PROJ_DIM
+            self.srl_head = make(in_dim, len(labels))
         elif head_name == "cls":
             assert self.ner_labels is not None, "CLS requires NER head in cascade"
             self.cls_labels = labels
@@ -174,6 +195,7 @@ class MultiTaskNLPModel(nn.Module):
             pos_logits: [batch, seq_len, num_pos]       (always)
             ner_logits: [batch, seq_len, num_ner]        (if ner_head exists)
             dep_logits: [batch, seq_len, num_dep]        (if dep_head exists)
+            srl_logits: [batch, seq_len, num_srl]        (if srl_head exists)
             cls_logits: [batch, num_cls]                 (if cls_head exists)
         """
         hidden = self.encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
@@ -197,7 +219,15 @@ class MultiTaskNLPModel(nn.Module):
                 dep_logits = self.dep_head(torch.cat([hidden, pos_probs, ner_probs], dim=-1))
                 result["dep_logits"] = dep_logits
 
-            # 4. CLS (cascade from pooled POS + NER)
+                # 4. SRL (cascade from POS + NER + DEP_proj)
+                if self.srl_head is not None:
+                    dep_probs = F.softmax(dep_logits, dim=-1)
+                    dep_compressed = self.dep_proj(dep_probs)
+                    srl_input = torch.cat([hidden, pos_probs, ner_probs, dep_compressed], dim=-1)
+                    srl_logits = self.srl_head(srl_input)
+                    result["srl_logits"] = srl_logits
+
+            # 5. CLS (cascade from pooled POS + NER)
             if self.cls_head is not None:
                 ner_probs = F.softmax(ner_logits, dim=-1)
                 mask = attention_mask.unsqueeze(-1).float()
@@ -224,6 +254,8 @@ class MultiTaskNLPModel(nn.Module):
             label_maps["ner_labels"] = self.ner_labels
         if self.dep_labels is not None:
             label_maps["dep_labels"] = self.dep_labels
+        if self.srl_labels is not None:
+            label_maps["srl_labels"] = self.srl_labels
         if self.cls_labels is not None:
             label_maps["cls_labels"] = self.cls_labels
 
@@ -245,8 +277,9 @@ class MultiTaskNLPModel(nn.Module):
         )
 
         # Detect head types from state_dict keys and add them
+        # Order matters: ner → dep → srl → cls (cascade dependencies)
         state_dict = torch.load(path / "model.pt", weights_only=True)
-        for head_name in ["ner", "dep", "cls"]:
+        for head_name in ["ner", "dep", "srl", "cls"]:
             labels = label_maps.get(f"{head_name}_labels")
             if labels is None:
                 continue
