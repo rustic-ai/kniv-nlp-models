@@ -154,7 +154,7 @@ STAGE_CONFIG = {
         "base_lr": None,
     },
     "3m": {
-        "name": "SRL MLP (frozen encoder+POS+NER+DEP)",
+        "name": "SRL MLP (frozen) — DEPRECATED, F1=0.337",
         "tasks": ["srl"],
         "data_file": "srl_full_train.json",
         "eval_tasks": ["pos", "ner", "dep", "srl"],
@@ -162,6 +162,20 @@ STAGE_CONFIG = {
         "head_type": "mlp",
         "freeze_base": True,
         "epochs": 5,
+        "head_lr": 1e-4,
+        "base_lr": None,
+    },
+    "3b": {
+        "name": "SRL Biaffine (frozen encoder+POS+NER+DEP)",
+        "tasks": ["srl"],
+        "data_file": "srl_full_train.json",
+        "eval_tasks": ["pos", "ner", "dep", "srl"],
+        "new_head": "srl",
+        "head_type": "biaffine",
+        "freeze_base": True,
+        "epochs": 10,
+        "patience": 3,
+        "batch_size": 128,
         "head_lr": 1e-4,
         "base_lr": None,
     },
@@ -349,7 +363,7 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
             datasets.append(MultiTaskDataset(cls_examples, "cls", tokenizer, cls_map, "cls_label", max_length))
 
     train_dataset = ConcatDataset(datasets)
-    batch_size = config["training"]["batch_size"]
+    batch_size = stage_cfg.get("batch_size", config["training"]["batch_size"])
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True,
         collate_fn=multitask_collator, num_workers=0,
@@ -457,6 +471,8 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
 
     best_composite = -1.0
     best_epoch = -1
+    patience = stage_cfg.get("patience", 0)  # 0 = no early stopping
+    no_improve = 0
     log_every = 20
 
     for epoch in range(stage_cfg["epochs"]):
@@ -566,9 +582,15 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
         if comp > best_composite:
             best_composite = comp
             best_epoch = epoch + 1
+            no_improve = 0
             model.save(str(output_dir / "best"))
             tokenizer.save_pretrained(str(output_dir / "best"))
             print(f"  * New best (composite={comp:.3f})", flush=True)
+        elif patience > 0:
+            no_improve += 1
+            if no_improve >= patience:
+                print(f"  Early stopping: no improvement for {patience} epochs", flush=True)
+                break
 
     # Save final
     model.save(str(output_dir / "final"))

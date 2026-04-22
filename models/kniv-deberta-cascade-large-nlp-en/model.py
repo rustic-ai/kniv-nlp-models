@@ -5,14 +5,15 @@ Architecture (cascaded):
       1. POS head:  Linear(H, 17)                      -- always present
       2. NER head:  Linear(H+17, 37)                   -- POS → NER cascade
       3. DEP head:  Linear(H+17+37, dep_labels)        -- POS+NER → DEP cascade
-      4. SRL head:  Linear(H+17+37+64, srl_labels)     -- POS+NER+DEP_proj → SRL cascade
+      4. SRL head:  Biaffine(H+17+37+64, srl_labels)   -- POS+NER+DEP_proj → SRL cascade
       5. CLS head:  Linear(H+17+37, cls_labels)        -- pooled POS+NER → CLS
 
 Heads are added progressively during staged training:
   Stage 1: POS only → train encoder + POS
   Stage 2: +NER    → freeze POS, train NER with POS cascade
   Stage 3: +DEP    → freeze POS+NER, train DEP
-  Stage 4: +CLS    → freeze POS+NER+DEP, train CLS
+  Stage 3b:+SRL    → freeze POS+NER+DEP, train SRL (biaffine)
+  Stage 4: +CLS    → freeze POS+NER+DEP+SRL, train CLS
   Stage 5: joint   → fine-tune everything end-to-end
 
 Soft probabilities flow between heads. forward() only computes
@@ -28,6 +29,74 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModel, AutoConfig
+
+
+class BiaffineSRLHead(nn.Module):
+    """Biaffine SRL head — scores each token's role relative to the predicate.
+
+    Uses DEP ROOT probabilities to soft-select the predicate token, then
+    applies biaffine attention between each argument token and the predicate.
+
+    Scoring: score_l(arg_i) = arg_i^T W_l pred + U_l arg_i + V_l pred + b_l
+    where pred is the soft-selected predicate vector (weighted by P(ROOT)).
+    """
+
+    BIAFFINE_DIM = 256
+
+    def __init__(
+        self,
+        in_dim: int,
+        num_labels: int,
+        dropout_p: float,
+        root_indices: list[int],
+    ):
+        super().__init__()
+        d = self.BIAFFINE_DIM
+
+        # Project tokens into argument and predicate subspaces
+        self.arg_mlp = nn.Sequential(
+            nn.Linear(in_dim, d), nn.GELU(), nn.Dropout(dropout_p),
+        )
+        self.pred_mlp = nn.Sequential(
+            nn.Linear(in_dim, d), nn.GELU(), nn.Dropout(dropout_p),
+        )
+
+        # Biaffine weight: W[l, d, d] for each label l
+        self.biaffine = nn.Parameter(torch.zeros(num_labels, d, d))
+        self.arg_linear = nn.Linear(d, num_labels)
+        self.pred_linear = nn.Linear(d, num_labels)
+
+        # Which DEP label indices correspond to ROOT (for predicate selection)
+        self.register_buffer(
+            "root_indices", torch.tensor(root_indices, dtype=torch.long),
+        )
+        nn.init.xavier_uniform_(self.biaffine)
+
+    def forward(
+        self, token_features: torch.Tensor, dep_probs: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            token_features: [B, S, in_dim] — cascaded features for each token
+            dep_probs:      [B, S, num_dep] — DEP softmax probabilities
+        Returns:
+            srl_logits:     [B, S, num_labels]
+        """
+        # Project all tokens into argument and predicate subspaces
+        arg = self.arg_mlp(token_features)    # [B, S, d]
+        pred = self.pred_mlp(token_features)  # [B, S, d]
+
+        # Soft-select predicate via ROOT probabilities from DEP head
+        # Sum P(label) for all dep labels that correspond to ROOT
+        root_prob = dep_probs.index_select(-1, self.root_indices).sum(-1)  # [B, S]
+        root_attn = root_prob / root_prob.sum(-1, keepdim=True).clamp(min=1e-8)
+        pred_vec = torch.einsum("bs,bsd->bd", root_attn, pred)  # [B, d]
+
+        # Biaffine scoring: arg^T W pred + U*arg + V*pred
+        scores = torch.einsum("bsd,lde,be->bsl", arg, self.biaffine, pred_vec)
+        scores = scores + self.arg_linear(arg) + self.pred_linear(pred_vec).unsqueeze(1)
+
+        return scores
 
 
 class MultiTaskNLPModel(nn.Module):
@@ -110,7 +179,7 @@ class MultiTaskNLPModel(nn.Module):
         Args:
             head_name: "ner", "dep", "srl", or "cls"
             labels: list of label strings
-            head_type: "linear" or "mlp"
+            head_type: "linear", "mlp", or "biaffine" (SRL only)
         """
         hidden_size = self.config.hidden_size
         num_pos = len(self.pos_labels)
@@ -133,7 +202,18 @@ class MultiTaskNLPModel(nn.Module):
             if self.dep_proj is None:
                 self.dep_proj = nn.Linear(len(self.dep_labels), self.DEP_PROJ_DIM)
             in_dim = hidden_size + num_pos + num_ner + self.DEP_PROJ_DIM
-            self.srl_head = make(in_dim, len(labels))
+            if head_type == "biaffine":
+                # Find dep label indices that correspond to ROOT
+                root_indices = [
+                    i for i, l in enumerate(self.dep_labels)
+                    if l.split("@")[1] == "root"
+                ]
+                assert root_indices, "No ROOT labels found in dep_labels"
+                self.srl_head = BiaffineSRLHead(
+                    in_dim, len(labels), self.dropout.p, root_indices,
+                )
+            else:
+                self.srl_head = make(in_dim, len(labels))
         elif head_name == "cls":
             assert self.ner_labels is not None, "CLS requires NER head in cascade"
             self.cls_labels = labels
@@ -231,7 +311,10 @@ class MultiTaskNLPModel(nn.Module):
                         ner_probs.detach(),
                         dep_compressed,
                     ], dim=-1)
-                    srl_logits = self.srl_head(srl_input)
+                    if isinstance(self.srl_head, BiaffineSRLHead):
+                        srl_logits = self.srl_head(srl_input, dep_probs)
+                    else:
+                        srl_logits = self.srl_head(srl_input)
                     result["srl_logits"] = srl_logits
 
             # 5. CLS (cascade from pooled POS + NER)
@@ -290,9 +373,19 @@ class MultiTaskNLPModel(nn.Module):
             labels = label_maps.get(f"{head_name}_labels")
             if labels is None:
                 continue
-            # MLP heads have keys like "ner_head.0.weight", Linear has "ner_head.weight"
+            # Detect head type from state_dict key patterns:
+            #   Biaffine: "srl_head.biaffine"
+            #   MLP:      "ner_head.0.weight" (nn.Sequential)
+            #   Linear:   "ner_head.weight"
+            is_biaffine = f"{head_name}_head.biaffine" in state_dict
             is_mlp = f"{head_name}_head.0.weight" in state_dict
-            model.add_head(head_name, labels, head_type="mlp" if is_mlp else "linear")
+            if is_biaffine:
+                head_type = "biaffine"
+            elif is_mlp:
+                head_type = "mlp"
+            else:
+                head_type = "linear"
+            model.add_head(head_name, labels, head_type=head_type)
 
         model.load_state_dict(state_dict)
         return model
