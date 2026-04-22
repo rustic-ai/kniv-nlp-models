@@ -74,7 +74,7 @@ class MultiTaskDataset(Dataset):
         self.label_map = label_map
         self.label_key = label_key
         self.max_length = max_length
-        self.is_token_task = task in ("ner", "pos", "dep")
+        self.is_token_task = task in ("ner", "pos", "dep", "srl")
 
     def __len__(self):
         return len(self.examples)
