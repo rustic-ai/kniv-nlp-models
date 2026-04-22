@@ -93,16 +93,29 @@ STAGE_CONFIG = {
         "base_lr": 1e-6,
     },
     "2d": {
-        "name": "Gentle encoder fine-tune (UD EWT 12.5K + Few-NERD 20K, 3 epochs)",
+        "name": "Gentle encoder fine-tune (UD EWT 12.5K + Few-NERD 20K, 3 epochs) — DEPRECATED",
         "tasks": ["pos", "ner"],
-        "data_file": "posner_small_train.json",  # UD EWT + 20K Few-NERD subsample
+        "data_file": "posner_small_train.json",
         "eval_tasks": ["pos", "ner"],
         "new_head": None,
         "freeze_base": False,
         "epochs": 3,
-        "head_lr": 1e-5,                    # NER head: can adapt
-        "pos_lr": 1e-7,                     # POS head: essentially frozen
-        "base_lr": 1e-7,                    # encoder: barely moves
+        "head_lr": 1e-5,
+        "pos_lr": 1e-7,
+        "base_lr": 1e-7,
+    },
+    "2e": {
+        "name": "NER on SpanMarker 195K (frozen encoder+POS)",
+        "tasks": ["ner"],
+        "data_file": "ner_spanmarker_train.json",   # 195K SpanMarker-annotated (91.5 F1)
+        "dev_file": "ner_spanmarker_dev.json",       # SpanMarker-annotated dev
+        "eval_tasks": ["pos", "ner"],
+        "new_head": "ner",
+        "head_type": "mlp",
+        "freeze_base": True,
+        "epochs": 5,
+        "head_lr": 1e-4,
+        "base_lr": None,
     },
     3: {
         "name": "DEP (frozen encoder+POS+NER)",
@@ -252,8 +265,11 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
         # Default: load standard NER + UD files
         train_examples = None
 
-    with open(DATA_DIR / "ner_dev.json") as f:
+    # Dev data — use stage-specific dev_file if specified
+    dev_file = stage_cfg.get("dev_file", "ner_dev.json")
+    with open(DATA_DIR / dev_file) as f:
         ner_dev = json.load(f)
+    print(f"Dev data: {dev_file} ({len(ner_dev)} examples)", flush=True)
     with open(DATA_DIR / "ud_dev.json") as f:
         ud_dev = json.load(f)
 
@@ -648,7 +664,7 @@ def composite_score_active(results, active_tasks):
 
 
 def main():
-    valid_stages = ["1", "2a", "2b", "2c", "2d", "3", "3s", "4", "5"]
+    valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "3", "3s", "4", "5"]
     parser = argparse.ArgumentParser(description="Staged cascade training")
     parser.add_argument("--stage", type=str, required=True, choices=valid_stages,
                         help="Training stage (1=POS, 2a=NER, 2b=POS+NER align, 2c=encoder, 3=DEP, 4=CLS, 5=joint)")
