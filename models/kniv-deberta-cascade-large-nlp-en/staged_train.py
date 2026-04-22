@@ -156,7 +156,7 @@ STAGE_CONFIG = {
     "3m": {
         "name": "SRL MLP (frozen encoder+POS+NER+DEP)",
         "tasks": ["srl"],
-        "data_file": "srl_train.json",
+        "data_file": "srl_full_train.json",
         "eval_tasks": ["pos", "ner", "dep", "srl"],
         "new_head": "srl",
         "head_type": "mlp",
