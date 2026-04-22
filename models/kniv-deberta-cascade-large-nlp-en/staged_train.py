@@ -82,15 +82,16 @@ STAGE_CONFIG = {
         "base_lr": None,
     },
     "2c": {
-        "name": "Encoder fine-tune (unfrozen, POS+NER 163K)",
+        "name": "Encoder fine-tune (unfrozen, UD EWT 12.5K + Few-NERD 20K)",
         "tasks": ["pos", "ner"],
-        "data_file": "posner_train.json",    # full UD EWT + Few-NERD
+        "data_file": "posner_small_train.json",  # UD EWT + 20K Few-NERD subsample
         "eval_tasks": ["pos", "ner"],
         "new_head": None,
         "freeze_base": False,
-        "epochs": 1,
-        "head_lr": 1e-5,                    # heads: moderate LR
-        "base_lr": 1e-6,                    # encoder: very slow
+        "epochs": 3,
+        "head_lr": 1e-5,                    # NER head: can adapt
+        "pos_lr": 1e-7,                     # POS head: essentially frozen
+        "base_lr": 1e-7,                    # encoder: barely moves
     },
     3: {
         "name": "DEP (frozen encoder+POS+NER)",
@@ -318,16 +319,26 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
         print(f"  Frozen encoder: {frozen_count} params, Trainable heads: {trainable:,}", flush=True)
 
     elif not freeze_base and stage_cfg.get("base_lr"):
-        # Differential LR — encoder at low LR, heads at higher LR (e.g. 2c, 5)
+        # Differential LR — encoder at low LR, heads at per-head LR (e.g. 2c, 5)
         for param in model.parameters():
             param.requires_grad = True
-        head_params = [p for n, p in model.named_parameters() if "_head" in n]
-        base_params = [p for n, p in model.named_parameters() if "_head" not in n]
-        param_groups = [
-            {"params": base_params, "lr": stage_cfg["base_lr"]},
-            {"params": head_params, "lr": stage_cfg["head_lr"]},
-        ]
-        print(f"  Unfrozen: encoder LR={stage_cfg['base_lr']}, heads LR={stage_cfg['head_lr']}", flush=True)
+        base_params = [p for n, p in model.named_parameters() if "_head" not in n and "dep_proj" not in n]
+        param_groups = [{"params": base_params, "lr": stage_cfg["base_lr"]}]
+
+        # Per-head LR: check for head-specific LR keys (e.g. pos_lr, ner_lr)
+        for head_name in ["pos", "ner", "dep", "srl", "cls"]:
+            head_params = [p for n, p in model.named_parameters() if f"{head_name}_head" in n]
+            if head_params:
+                lr = stage_cfg.get(f"{head_name}_lr", stage_cfg["head_lr"])
+                param_groups.append({"params": head_params, "lr": lr})
+
+        # dep_proj gets head_lr by default
+        dep_proj_params = [p for n, p in model.named_parameters() if "dep_proj" in n]
+        if dep_proj_params:
+            param_groups.append({"params": dep_proj_params, "lr": stage_cfg["head_lr"]})
+
+        lr_summary = {k.replace("_lr", ""): v for k, v in stage_cfg.items() if k.endswith("_lr")}
+        print(f"  Unfrozen: LRs={lr_summary}", flush=True)
 
     else:
         # Uniform LR for everything
