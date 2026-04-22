@@ -107,8 +107,8 @@ STAGE_CONFIG = {
     "2e": {
         "name": "NER on SpanMarker 195K (frozen encoder+POS)",
         "tasks": ["ner"],
-        "data_file": "ner_spanmarker_train.json",   # 195K SpanMarker-annotated (91.5 F1)
-        "dev_file": "ner_spanmarker_dev.json",       # SpanMarker-annotated dev
+        "data_file": "ner_spanmarker_train.json",
+        "dev_file": "ner_spanmarker_dev.json",
         "eval_tasks": ["pos", "ner"],
         "new_head": "ner",
         "head_type": "mlp",
@@ -116,6 +116,19 @@ STAGE_CONFIG = {
         "epochs": 5,
         "head_lr": 1e-4,
         "base_lr": None,
+    },
+    "2f": {
+        "name": "Encoder tune (UD EWT SpanMarker, POS+NER, 2 epochs)",
+        "tasks": ["pos", "ner"],
+        "data_file": "ud_spanmarker_train.json",
+        "dev_file": "ner_spanmarker_dev.json",
+        "eval_tasks": ["pos", "ner"],
+        "new_head": None,
+        "freeze_base": False,
+        "epochs": 2,
+        "head_lr": 1e-6,                    # NER head: small adjustment
+        "pos_lr": 1e-7,                     # POS head: barely moves
+        "base_lr": 1e-7,                    # encoder: barely moves
     },
     3: {
         "name": "DEP (frozen encoder+POS+NER)",
@@ -664,7 +677,7 @@ def composite_score_active(results, active_tasks):
 
 
 def main():
-    valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "3", "3s", "4", "5"]
+    valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "2f", "3", "3s", "4", "5"]
     parser = argparse.ArgumentParser(description="Staged cascade training")
     parser.add_argument("--stage", type=str, required=True, choices=valid_stages,
                         help="Training stage (1=POS, 2a=NER, 2b=POS+NER align, 2c=encoder, 3=DEP, 4=CLS, 5=joint)")
