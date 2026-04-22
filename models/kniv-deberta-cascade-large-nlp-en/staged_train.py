@@ -741,7 +741,7 @@ def composite_score_active(results, active_tasks):
 
 
 def main():
-    valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "2f", "3", "3s", "3m", "4", "5"]
+    valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "2f", "3", "3s", "3m", "3b", "4", "5"]
     parser = argparse.ArgumentParser(description="Staged cascade training")
     parser.add_argument("--stage", type=str, required=True, choices=valid_stages,
                         help="Training stage (1=POS, 2a=NER, 2b=POS+NER align, 2c=encoder, 3=DEP, 4=CLS, 5=joint)")
