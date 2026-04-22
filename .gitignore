@@ -16,6 +16,9 @@ data/ud-english-ewt/
 data/conll03/
 data/raw/
 data/prepared/
+data/masc-propbank/
+data/qasrl-bank/
+data/propbank-release
 
 # Model outputs (large files)
 outputs/

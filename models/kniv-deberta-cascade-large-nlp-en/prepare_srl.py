@@ -1,8 +1,9 @@
-"""Prepare SRL training data from three sources.
+"""Prepare SRL training data from four sources.
 
 1. PropBank EWT: gold annotations aligned to UD EWT (CC-BY-SA-4.0)
-2. QA-SRL Bank 2.0: crowdsourced, converted to BIO (MIT)
-3. Few-NERD + silver: model-generated via liaad/srl-en_xlmr-large (Apache 2.0)
+2. MASC PropBank: gold dependency-based SRL, converted to BIO (unrestricted)
+3. QA-SRL Bank 2.0: crowdsourced, converted to BIO (MIT)
+4. Few-NERD + silver: model-generated via cross-lingual-srl-v3 (MIT)
 
 Produces: srl_train.json, srl_dev.json, srl_test.json
 
@@ -12,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import gzip
 import glob
 import json
 import os
@@ -36,6 +38,8 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data"
 OUTPUT_DIR = DATA_DIR / "prepared" / "kniv-deberta-cascade"
 PROPBANK_DIR = DATA_DIR / "propbank-release"
 UD_DIR = DATA_DIR / "ud-english-ewt"
+MASC_DIR = DATA_DIR / "masc-propbank" / "masc-conll"
+QASRL_DIR = DATA_DIR / "qasrl-bank" / "qasrl-v2"
 
 
 # ── Source 1: PropBank EWT (gold) ────────────────────────────────
@@ -291,9 +295,191 @@ def load_propbank_ewt(
     return results
 
 
-# ── Source 2: QA-SRL Bank 2.0 (MIT) ─────────────────────────────
+# ── Source 2: MASC PropBank (unrestricted) ─────────────────────────
 
-# QA question patterns → PropBank roles
+# MASC CoNLL 2008 uses short labels (A0, A1, AM-TMP) → normalize to PropBank
+_MASC_LABEL_MAP = {
+    "A0": "ARG0", "A1": "ARG1", "A2": "ARG2", "A3": "ARG3", "A4": "ARG4",
+    "A5": "ARG4",  # rare, collapse into ARG4
+    "AM-TMP": "ARGM-TMP", "AM-LOC": "ARGM-LOC", "AM-MNR": "ARGM-MNR",
+    "AM-CAU": "ARGM-CAU", "AM-PRP": "ARGM-PRP", "AM-NEG": "ARGM-NEG",
+    "AM-ADV": "ARGM-ADV", "AM-DIR": "ARGM-DIR", "AM-DIS": "ARGM-DIS",
+    "AM-EXT": "ARGM-EXT", "AM-MOD": "ARGM-MOD", "AM-PRD": "ARGM-PRD",
+    "AM-GOL": "ARGM-GOL", "AM-COM": "ARGM-COM", "AM-REC": "ARGM-REC",
+}
+
+
+def _get_subtree_span(token_id: int, heads: list[int]) -> tuple[int, int]:
+    """Get contiguous span [start, end) for the dependency subtree rooted at token_id.
+
+    Collects all descendants via BFS, returns min..max+1 indices.
+    """
+    # Build children map
+    children = {i: [] for i in range(len(heads))}
+    for i, h in enumerate(heads):
+        if h >= 0 and h < len(heads) and h != i:
+            children[h].append(i)
+
+    # BFS from token_id
+    visited = {token_id}
+    queue = [token_id]
+    while queue:
+        node = queue.pop(0)
+        for child in children.get(node, []):
+            if child not in visited:
+                visited.add(child)
+                queue.append(child)
+
+    return min(visited), max(visited) + 1
+
+
+def load_masc_propbank(masc_dir: Path = MASC_DIR) -> list[dict]:
+    """Load MASC PropBank CoNLL 2008 data, convert dep-based SRL to BIO spans.
+
+    Filters to root-verb predicates only.
+    """
+    data_dir = masc_dir / "data"
+    if not data_dir.exists():
+        raise FileNotFoundError(f"MASC data not found at {data_dir}")
+
+    conll_files = sorted(glob.glob(str(data_dir / "**" / "*.conll"), recursive=True))
+    print(f"  Found {len(conll_files)} MASC CoNLL files")
+
+    all_examples = []
+    total_sents = 0
+    root_verb_found = 0
+
+    for filepath in conll_files:
+        with open(filepath) as f:
+            lines = f.readlines()
+
+        # Split into sentences (blank lines)
+        sentences = []
+        current = []
+        for line in lines:
+            stripped = line.rstrip("\n")
+            if not stripped:
+                if current:
+                    sentences.append(current)
+                    current = []
+            else:
+                current.append(stripped)
+        if current:
+            sentences.append(current)
+
+        for sent_lines in sentences:
+            total_sents += 1
+            tokens = []
+            for line in sent_lines:
+                parts = line.split("\t")
+                if len(parts) < 11:
+                    continue
+                tokens.append({
+                    "id": int(parts[0]) - 1,  # 0-based
+                    "form": parts[1],
+                    "gpos": parts[3],
+                    "head": int(parts[8]) - 1,  # 0-based (-1 = root)
+                    "deprel": parts[9],
+                    "pred": parts[10],
+                    "args": parts[11:] if len(parts) > 11 else [],
+                })
+
+            if not tokens:
+                continue
+
+            # Find ROOT token (head == -1 means HEAD was 0)
+            root_idx = None
+            for t in tokens:
+                if t["head"] == -1:
+                    root_idx = t["id"]
+                    break
+            if root_idx is None:
+                continue
+
+            # Find which predicate column corresponds to the root verb
+            # If ROOT itself is not a predicate, check its VC (verbal complement) child
+            pred_indices = [t["id"] for t in tokens if t["pred"] != "_"]
+            if not pred_indices:
+                continue
+
+            # Try ROOT first, then VC child
+            target_pred_idx = None
+            if root_idx in pred_indices:
+                target_pred_idx = root_idx
+            else:
+                # Look for verbal complement child of ROOT
+                for t in tokens:
+                    if t["head"] == root_idx and t["deprel"] in ("VC", "IM") and t["id"] in pred_indices:
+                        target_pred_idx = t["id"]
+                        break
+            if target_pred_idx is None:
+                continue
+
+            root_verb_found += 1
+
+            # Find which arg column index this predicate corresponds to
+            # Predicates are in textual order: first PRED != "_" → col 0, second → col 1, etc.
+            pred_col_idx = pred_indices.index(target_pred_idx)
+
+            # Build dependency heads for subtree computation
+            heads = [t["head"] for t in tokens]
+            words = [t["form"] for t in tokens]
+
+            # Extract argument labels and convert to BIO
+            bio_tags = ["O"] * len(tokens)
+            bio_tags[target_pred_idx] = "V"
+
+            for t in tokens:
+                if pred_col_idx >= len(t["args"]):
+                    continue
+                arg_label = t["args"][pred_col_idx]
+                if arg_label == "_" or arg_label == "V":
+                    continue
+
+                # Normalize: strip C- and R- prefixes
+                clean = arg_label
+                if clean.startswith("C-") or clean.startswith("R-"):
+                    clean = clean[2:]
+
+                role = _MASC_LABEL_MAP.get(clean)
+                if role is None:
+                    continue  # skip SU (support), AA, etc.
+
+                # Get span from dependency subtree
+                start, end = _get_subtree_span(t["id"], heads)
+
+                # Don't overwrite the V tag or existing labels
+                for k in range(start, end):
+                    if bio_tags[k] != "O":
+                        continue
+                    if k == start:
+                        bio_tags[k] = f"B-{role}"
+                    else:
+                        bio_tags[k] = f"I-{role}"
+
+            # Verify all BIO tags are in our label set
+            bio_tags = [t if t in _SRL_TAG_SET else "O" for t in bio_tags]
+
+            # Only keep if we got at least one argument
+            non_o = sum(1 for t in bio_tags if t not in ("O", "V"))
+            if non_o == 0:
+                continue
+
+            all_examples.append({
+                "words": words,
+                "text": " ".join(words),
+                "srl_tags": bio_tags,
+                "predicate_idx": target_pred_idx,
+            })
+
+    print(f"  MASC: {total_sents} sentences, {root_verb_found} root-verb, "
+          f"{len(all_examples)} valid")
+    return all_examples
+
+
+# ── Source 3: QA-SRL Bank 2.0 (MIT) ───────────────────────────────
+
+# Structured question slot mapping → PropBank roles
 QASRL_WH_ROLE = {
     "where": "ARGM-LOC",
     "when": "ARGM-TMP",
@@ -304,99 +490,150 @@ QASRL_WH_ROLE = {
 }
 
 
-def _qasrl_question_to_role(question: str, is_passive: bool) -> str | None:
-    """Map a QA-SRL question to a PropBank role."""
-    q_lower = question.lower().strip()
+def _qasrl_slots_to_role(slots: dict, is_passive: bool) -> str | None:
+    """Map QA-SRL structured question slots to a PropBank role.
 
-    # Check modifier WH-words first
-    for wh, role in QASRL_WH_ROLE.items():
-        if q_lower.startswith(wh):
-            return role
+    Uses the decomposed question structure (wh, subj, obj, prep, isPassive)
+    for more reliable role assignment than regex on the question string.
+    """
+    wh = slots.get("wh", "").lower()
+    subj = slots.get("subj", "")
+    obj = slots.get("obj", "")
+    prep = slots.get("prep", "")
+    obj2 = slots.get("obj2", "")
 
-    # Core roles: who/what — depends on position and voice
-    if q_lower.startswith("who") or q_lower.startswith("what"):
-        # If the question asks about the subject position
-        # "Who killed someone?" → ARG0 (active) or ARG1 (passive)
-        # "What was killed?" → ARG1
-        if "was " in q_lower or "were " in q_lower or "been " in q_lower:
-            return "ARG1"
-        if is_passive:
-            # "Who was [verb]ed by?" → ARG0
-            if " by " in q_lower:
-                return "ARG0"
-            return "ARG1"
-        # Active voice: subject = ARG0, object = ARG1
-        # Heuristic: if question has "someone/something" as object → ARG0
-        if "someone" in q_lower or "something" in q_lower:
-            return "ARG0"
+    # Modifier WH-words
+    if wh in QASRL_WH_ROLE:
+        return QASRL_WH_ROLE[wh]
+
+    # Core roles: who/what — use slot structure for disambiguation
+    if wh in ("who", "what"):
+        if subj == "_":
+            # WH-word IS the subject
+            if is_passive:
+                return "ARG1"   # passive subject = patient
+            return "ARG0"       # active subject = agent
+        if obj == "_":
+            # WH-word IS the direct object
+            if is_passive:
+                return "ARG0"   # passive "by whom" object = agent
+            return "ARG1"       # active object = patient
+        if prep != "_":
+            # Prepositional argument — typically ARG2 (benefactive, instrument)
+            if prep.lower() in ("to", "for"):
+                return "ARG2"
+            if prep.lower() in ("with", "from"):
+                return "ARG2"
+            if prep.lower() == "by":
+                return "ARG0"  # by-phrase = agent
+            return "ARG2"
+        if obj2 != "_":
+            # Second object slot (rare) — ARG2
+            return "ARG2"
+        # Fallback: if subj is filled and obj is filled, wh is something else
         return "ARG1"
 
     return None
 
 
 def load_qasrl_bank(
+    qasrl_dir: Path = QASRL_DIR,
     subsample: int = 25000,
     seed: int = 42,
-    data_dir: Path | None = None,
 ) -> list[dict]:
-    """Load QA-SRL Bank 2.0, convert to BIO SRL format.
+    """Load QA-SRL Bank 2.0 from local JSONL.gz files, convert to BIO SRL format.
 
-    Downloads from HuggingFace if not found locally.
-    Filters to root-verb predicates and subsamples.
+    Uses spaCy to identify root verbs, then converts QA pairs for the
+    root verb's annotations to BIO tags using structured question slots.
     """
-    from datasets import load_dataset
+    import spacy
+    nlp = spacy.load("en_core_web_sm", disable=["ner", "textcat"])
 
-    print("  Loading QA-SRL Bank 2.0...")
-    ds = load_dataset("biu-nlp/qa_srl2018", trust_remote_code=True)
+    orig_dir = qasrl_dir / "orig"
+    if not orig_dir.exists():
+        raise FileNotFoundError(f"QA-SRL orig data not found at {orig_dir}")
 
     all_examples = []
     skipped = 0
+    no_root_match = 0
 
-    for split in ["train", "validation", "test"]:
-        if split not in ds:
-            continue
-        for row in ds[split]:
-            words = row["words"]
-            if len(words) < 3:
-                continue
+    for split_file in ["train.jsonl.gz"]:
+        filepath = orig_dir / split_file
+        print(f"  Loading {filepath.name}...")
 
-            # Find root verb (simple heuristic: first verb)
-            # QA-SRL annotates specific predicates — use their index
-            predicate_idx = row.get("predicate_idx") or row.get("verb_idx")
-            if predicate_idx is None:
-                skipped += 1
-                continue
+        with gzip.open(filepath, "rt") as f:
+            for line in f:
+                sent = json.loads(line)
+                words = sent["sentenceTokens"]
+                verb_entries = sent.get("verbEntries", {})
 
-            # Get QA pairs for this predicate
-            questions = row.get("questions", [])
-            answers = row.get("answers", [])
-            if not questions:
-                skipped += 1
-                continue
-
-            # Check if passive
-            is_passive = row.get("is_passive", False)
-
-            # Convert each QA pair to a span + role
-            bio_tags = ["O"] * len(words)
-            bio_tags[predicate_idx] = "V"
-            valid = True
-
-            for q, a in zip(questions, answers):
-                role = _qasrl_question_to_role(q, is_passive)
-                if role is None:
+                if len(words) < 3 or not verb_entries:
+                    skipped += 1
                     continue
 
-                # Answer span
-                spans = a if isinstance(a, list) else [a]
-                for span in spans:
-                    if isinstance(span, dict):
-                        start = span.get("start", span.get("s", 0))
-                        end = span.get("end", span.get("e", start + 1))
-                    elif isinstance(span, (list, tuple)) and len(span) >= 2:
-                        start, end = span[0], span[1]
-                    else:
+                # Use spaCy to find root verb
+                text = " ".join(words)
+                doc = nlp(text)
+                root_token = None
+                for tok in doc:
+                    if tok.dep_ == "ROOT":
+                        root_token = tok
+                        break
+                if root_token is None:
+                    skipped += 1
+                    continue
+
+                # Match spaCy root to QA-SRL verb index (by token position)
+                # spaCy tokenization may differ — find closest verb entry
+                root_verb_idx = None
+                best_dist = float("inf")
+                for _vidx_str, ventry in verb_entries.items():
+                    vidx = ventry["verbIndex"]
+                    dist = abs(vidx - root_token.i)
+                    if dist < best_dist:
+                        best_dist = dist
+                        root_verb_idx = _vidx_str
+
+                if root_verb_idx is None or best_dist > 2:
+                    no_root_match += 1
+                    skipped += 1
+                    continue
+
+                ventry = verb_entries[root_verb_idx]
+                predicate_idx = ventry["verbIndex"]
+                q_labels = ventry.get("questionLabels", {})
+                if not q_labels:
+                    skipped += 1
+                    continue
+
+                # Convert each QA pair to BIO
+                bio_tags = ["O"] * len(words)
+                bio_tags[predicate_idx] = "V"
+
+                for _q_str, qlabel in q_labels.items():
+                    slots = qlabel.get("questionSlots", {})
+                    is_passive = qlabel.get("isPassive", False)
+
+                    role = _qasrl_slots_to_role(slots, is_passive)
+                    if role is None:
                         continue
+
+                    # Use majority-voted valid spans
+                    judgments = qlabel.get("answerJudgments", [])
+                    valid_spans = []
+                    for j in judgments:
+                        if j.get("isValid", False):
+                            for span in j.get("spans", []):
+                                valid_spans.append(tuple(span))
+
+                    if not valid_spans:
+                        continue
+
+                    # Take the most common span (majority vote)
+                    from collections import Counter
+                    span_counts = Counter(valid_spans)
+                    best_span = span_counts.most_common(1)[0][0]
+                    start, end = best_span  # [start_inclusive, end_exclusive]
 
                     # Only assign if all tokens in range are currently O
                     if start < len(words) and end <= len(words):
@@ -405,20 +642,24 @@ def load_qasrl_bank(
                             for t in range(start + 1, end):
                                 bio_tags[t] = f"I-{role}"
 
-            # Only keep if we got at least one argument
-            non_o = sum(1 for t in bio_tags if t not in ("O", "V"))
-            if non_o == 0:
-                skipped += 1
-                continue
+                # Verify all BIO tags are in our label set
+                bio_tags = [t if t in _SRL_TAG_SET else "O" for t in bio_tags]
 
-            all_examples.append({
-                "words": words,
-                "text": " ".join(words),
-                "srl_tags": bio_tags,
-                "predicate_idx": predicate_idx,
-            })
+                # Only keep if we got at least one argument
+                non_o = sum(1 for t in bio_tags if t not in ("O", "V"))
+                if non_o == 0:
+                    skipped += 1
+                    continue
 
-    print(f"  QA-SRL: {len(all_examples)} converted, {skipped} skipped")
+                all_examples.append({
+                    "words": words,
+                    "text": text,
+                    "srl_tags": bio_tags,
+                    "predicate_idx": predicate_idx,
+                })
+
+    print(f"  QA-SRL: {len(all_examples)} converted, {skipped} skipped "
+          f"({no_root_match} no root match)")
 
     # Subsample
     rng = random.Random(seed)
@@ -557,6 +798,16 @@ def generate_silver_srl(
 # ── Main ─────────────────────────────────────────────────────────
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Prepare SRL training data")
+    parser.add_argument("--skip-silver", action="store_true",
+                        help="Skip silver SRL generation (slow, requires GPU)")
+    parser.add_argument("--qasrl-subsample", type=int, default=25000,
+                        help="Max QA-SRL examples to include")
+    parser.add_argument("--silver-subsample", type=int, default=70000,
+                        help="Max Few-NERD examples for silver labeling")
+    args = parser.parse_args()
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Load UD EWT for PropBank alignment
@@ -567,33 +818,52 @@ def main():
 
     ud_splits = {"train": ud_train, "validation": ud_dev, "test": ud_test}
 
-    # Source 1: PropBank gold
+    # Source 1: PropBank EWT gold
     propbank = load_propbank_ewt(ud_splits)
-    print(f"  PropBank total: train={len(propbank['train'])}, "
+    print(f"  PropBank EWT: train={len(propbank['train'])}, "
           f"dev={len(propbank['validation'])}, test={len(propbank['test'])}")
 
-    # Source 2: Silver SRL from Few-NERD
-    # (QA-SRL Bank 2.0 skipped — HF loading script deprecated, data URL broken)
-    print("\nGenerating silver SRL from Few-NERD...")
-    silver = generate_silver_srl(subsample=70000)
-    print(f"  Silver total: {len(silver)}")
+    # Source 2: MASC PropBank gold
+    print("\nLoading MASC PropBank...")
+    masc = load_masc_propbank()
+    print(f"  MASC total: {len(masc)}")
 
-    # Merge: train = PropBank gold + silver
-    # Dev/test = PropBank gold only (reliable evaluation)
-    srl_train = propbank["train"] + silver
+    # Source 3: QA-SRL Bank 2.0
+    print("\nLoading QA-SRL Bank 2.0...")
+    qasrl = load_qasrl_bank(subsample=args.qasrl_subsample)
+    print(f"  QA-SRL total: {len(qasrl)}")
+
+    # Source 4: Silver SRL from Few-NERD
+    silver = []
+    if not args.skip_silver:
+        print("\nGenerating silver SRL from Few-NERD...")
+        silver = generate_silver_srl(subsample=args.silver_subsample)
+        print(f"  Silver total: {len(silver)}")
+    else:
+        # Load existing silver if available
+        silver_path = OUTPUT_DIR / "srl_silver_cache.json"
+        if silver_path.exists():
+            with open(silver_path) as f:
+                silver = json.load(f)
+            print(f"\n  Loaded cached silver SRL: {len(silver)}")
+
+    # Merge: train = PropBank gold + MASC gold + QA-SRL + silver
+    # Dev/test = PropBank EWT gold only (reliable evaluation)
+    srl_train = propbank["train"] + masc + qasrl + silver
     random.shuffle(srl_train)
 
     srl_dev = propbank["validation"]
     srl_test = propbank["test"]
 
     print(f"\nFinal SRL dataset:")
-    print(f"  Train: {len(srl_train)} (PropBank {len(propbank['train'])} + "
-          f"Silver {len(silver)})")
+    print(f"  Train: {len(srl_train)} "
+          f"(PropBank {len(propbank['train'])} + MASC {len(masc)} + "
+          f"QA-SRL {len(qasrl)} + Silver {len(silver)})")
     print(f"  Dev: {len(srl_dev)} (PropBank gold)")
     print(f"  Test: {len(srl_test)} (PropBank gold)")
 
     # Save
-    for name, data in [("srl_train", srl_train), ("srl_dev", srl_dev), ("srl_test", srl_test)]:
+    for name, data in [("srl_full_train", srl_train), ("srl_dev", srl_dev), ("srl_test", srl_test)]:
         with open(OUTPUT_DIR / f"{name}.json", "w") as f:
             json.dump(data, f)
         print(f"  Saved {name}.json ({len(data)} examples)")
