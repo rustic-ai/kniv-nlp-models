@@ -461,7 +461,7 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
 
             outputs = model(input_ids, attention_mask)
 
-            loss = torch.tensor(0.0, device=device)
+            loss = torch.tensor(0.0, device=device, requires_grad=True)
             step_tasks = {}
 
             for task_idx, (task_name, logit_key) in enumerate(zip(task_names, logit_keys)):
