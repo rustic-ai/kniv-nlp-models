@@ -221,9 +221,16 @@ class MultiTaskNLPModel(nn.Module):
 
                 # 4. SRL (cascade from POS + NER + DEP_proj)
                 if self.srl_head is not None:
-                    dep_probs = F.softmax(dep_logits, dim=-1)
+                    # When upstream is frozen, detach and create fresh tensors
+                    # so dep_proj and srl_head can still receive gradients
+                    dep_probs = F.softmax(dep_logits.detach(), dim=-1).requires_grad_(True)
                     dep_compressed = self.dep_proj(dep_probs)
-                    srl_input = torch.cat([hidden, pos_probs, ner_probs, dep_compressed], dim=-1)
+                    srl_input = torch.cat([
+                        hidden.detach(),
+                        pos_probs.detach(),
+                        ner_probs.detach(),
+                        dep_compressed,
+                    ], dim=-1)
                     srl_logits = self.srl_head(srl_input)
                     result["srl_logits"] = srl_logits
 
