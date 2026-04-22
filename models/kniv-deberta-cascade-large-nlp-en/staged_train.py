@@ -115,10 +115,22 @@ STAGE_CONFIG = {
         "head_lr": 1e-4,
         "base_lr": None,
     },
+    "3s": {
+        "name": "SRL (frozen encoder+POS+NER+DEP)",
+        "tasks": ["srl"],
+        "data_file": "srl_train.json",
+        "eval_tasks": ["pos", "ner", "dep", "srl"],
+        "new_head": "srl",
+        "head_type": "linear",
+        "freeze_base": True,
+        "epochs": 5,
+        "head_lr": 1e-4,
+        "base_lr": None,
+    },
     4: {
-        "name": "CLS (frozen encoder+POS+NER+DEP)",
+        "name": "CLS (frozen encoder+POS+NER+DEP+SRL)",
         "tasks": ["cls"],
-        "eval_tasks": ["pos", "ner", "dep", "cls"],
+        "eval_tasks": ["pos", "ner", "dep", "srl", "cls"],
         "new_head": "cls",
         "head_type": "linear",
         "freeze_base": True,
@@ -128,7 +140,7 @@ STAGE_CONFIG = {
     },
     5: {
         "name": "Joint fine-tune",
-        "tasks": ["pos", "ner", "dep", "cls"],
+        "tasks": ["pos", "ner", "dep", "srl", "cls"],
         "new_head": None,
         "epochs": 3,
         "head_lr": 5e-6,
@@ -243,6 +255,8 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
     ner_map = {l: i for i, l in enumerate(ner_labels)}
     pos_map = {l: i for i, l in enumerate(pos_labels)}
     dep_map = {l: i for i, l in enumerate(dep_labels)}
+    srl_labels = vocabs.get("srl_labels", [])
+    srl_map = {l: i for i, l in enumerate(srl_labels)}
     cls_map = {l: i for i, l in enumerate(cls_labels)}
 
     active_tasks = stage_cfg["tasks"]
@@ -263,6 +277,10 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
                 datasets.append(MultiTaskDataset(
                     [ex for ex in train_examples if "dep_labels" in ex],
                     "dep", tokenizer, dep_map, "dep_labels", max_length))
+            elif task == "srl":
+                datasets.append(MultiTaskDataset(
+                    [ex for ex in train_examples if "srl_tags" in ex],
+                    "srl", tokenizer, srl_map, "srl_tags", max_length))
             elif task == "cls":
                 datasets.append(MultiTaskDataset(
                     [ex for ex in train_examples if "cls_label" in ex],
@@ -293,6 +311,13 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
 
     cls_dev = [ex for ex in ud_dev + ner_dev if "cls_label" in ex]
 
+    # SRL dev (may not exist yet)
+    srl_dev_path = DATA_DIR / "srl_dev.json"
+    srl_dev = []
+    if srl_dev_path.exists():
+        with open(srl_dev_path) as f:
+            srl_dev = json.load(f)
+
     print(f"Train: {len(train_dataset):,} examples, {len(train_loader)} batches/epoch", flush=True)
 
     # ── Optimizer: configure freezing and learning rates per stage ──
@@ -300,11 +325,12 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
     freeze_base = stage_cfg.get("freeze_base", False)
 
     if freeze_base and new_head_name:
-        # Freeze encoder + existing heads — only train the NEW head (e.g. 2a: NER only)
+        # Freeze encoder + existing heads — only train the NEW head
+        # For SRL: also train dep_proj (compresses DEP probs for SRL cascade)
         head_params = []
         frozen_count = 0
         for name, param in model.named_parameters():
-            if f"{new_head_name}_head" in name:
+            if f"{new_head_name}_head" in name or (new_head_name == "srl" and "dep_proj" in name):
                 param.requires_grad = True
                 head_params.append(param)
             else:
@@ -312,7 +338,8 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
                 frozen_count += 1
         param_groups = [{"params": head_params, "lr": stage_cfg["head_lr"]}]
         trainable = sum(p.numel() for p in head_params)
-        print(f"  Frozen: {frozen_count} params, Trainable: {trainable:,} ({new_head_name}_head only)", flush=True)
+        trainable_names = f"{new_head_name}_head" + (" + dep_proj" if new_head_name == "srl" else "")
+        print(f"  Frozen: {frozen_count} params, Trainable: {trainable:,} ({trainable_names})", flush=True)
 
     elif freeze_base and not new_head_name:
         # Freeze encoder — train ALL heads (e.g. 2b: POS+NER alignment)
@@ -367,6 +394,7 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
         "ner": config["training"]["ner_loss_weight"],
         "pos": config["training"]["pos_loss_weight"],
         "dep": config["training"]["dep_loss_weight"],
+        "srl": config["training"].get("srl_loss_weight", 1.0),
         "cls": config["training"]["cls_loss_weight"],
     }
 
@@ -378,8 +406,8 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Training loop ────────────────────────────────────────
-    task_names = ["ner", "pos", "dep", "cls"]
-    logit_keys = ["ner_logits", "pos_logits", "dep_logits", "cls_logits"]
+    task_names = ["ner", "pos", "dep", "srl", "cls"]
+    logit_keys = ["ner_logits", "pos_logits", "dep_logits", "srl_logits", "cls_logits"]
 
     best_composite = -1.0
     best_epoch = -1
@@ -466,6 +494,7 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
             model, tokenizer, device, vocabs,
             ner_dev[:500] if "ner" in eval_tasks else [],
             ud_dev[:500],
+            srl_dev[:500] if "srl" in eval_tasks else [],
             cls_dev[:500] if "cls" in eval_tasks else [],
             max_length, eval_tasks,
         )
@@ -478,6 +507,8 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
             parts.append(f"NER F1={dev_results['ner'].get('f1', 0):.3f}")
         if "dep" in dev_results:
             parts.append(f"DEP UAS={dev_results['dep'].get('uas', 0):.3f}")
+        if "srl" in dev_results:
+            parts.append(f"SRL F1={dev_results['srl'].get('f1', 0):.3f}")
         if "cls" in dev_results:
             parts.append(f"CLS F1={dev_results['cls'].get('macro_f1', 0):.3f}")
 
@@ -502,7 +533,7 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
     print(f"  Final model: {output_dir / 'final'}", flush=True)
 
 
-def evaluate_active(model, tokenizer, device, vocabs, ner_dev, ud_dev, cls_dev, max_length, active_tasks):
+def evaluate_active(model, tokenizer, device, vocabs, ner_dev, ud_dev, srl_dev, cls_dev, max_length, active_tasks):
     """Evaluate only active heads."""
     model.eval()
     results = {}
@@ -553,6 +584,12 @@ def evaluate_active(model, tokenizer, device, vocabs, ner_dev, ud_dev, cls_dev, 
         if gold:
             results["dep"] = evaluate_dep(gold, pred, ud_dev)
 
+    if "srl" in active_tasks and srl_dev:
+        gold, pred = predict_tokens(srl_dev, "srl_logits", srl_labels, "srl_tags")
+        if gold:
+            # SRL uses BIO encoding — evaluate like NER (span-level F1)
+            results["srl"] = evaluate_ner(gold, pred)
+
     if "cls" in active_tasks and cls_dev:
         gold_cls, pred_cls = [], []
         for ex in cls_dev:
@@ -591,6 +628,9 @@ def composite_score_active(results, active_tasks):
     if "dep" in active_tasks and "dep" in results:
         scores.append(results["dep"].get("uas", 0))
         weights.append(0.3)
+    if "srl" in active_tasks and "srl" in results:
+        scores.append(results["srl"].get("f1", 0))
+        weights.append(0.2)
     if "cls" in active_tasks and "cls" in results:
         scores.append(results["cls"].get("macro_f1", 0))
         weights.append(0.1)

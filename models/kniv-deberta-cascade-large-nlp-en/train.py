@@ -63,7 +63,7 @@ class MultiTaskDataset(Dataset):
     The custom loss function in MultiTaskTrainer routes to the correct head.
     """
 
-    TASK_IDS = {"ner": 0, "pos": 1, "dep": 2, "cls": 3}
+    TASK_IDS = {"ner": 0, "pos": 1, "dep": 2, "cls": 3, "srl": 4}
 
     def __init__(self, examples, task: str, tokenizer, label_map,
                  label_key: str = "labels", max_length: int = 128):
