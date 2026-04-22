@@ -431,6 +431,41 @@ def load_qasrl_bank(
 
 # ── Source 3: Silver SRL from Few-NERD ───────────────────────────
 
+_SRL_TAG_SET = set(SRL_TAGS)
+
+
+def _map_srl_label(label: str) -> str:
+    """Map model's 85 labels to our 42-tag set."""
+    if label == "O":
+        return "O"
+
+    # B-V / I-V → V (predicate marker)
+    if label in ("B-V", "I-V"):
+        return "V"
+
+    # Direct match (B-ARG0, I-ARGM-TMP, etc.)
+    if label in _SRL_TAG_SET:
+        return label
+
+    # Continuations: C-ARG0 → ARG0, C-ARGM-TMP → ARGM-TMP
+    # References: R-ARG0 → ARG0, R-ARGM-LOC → ARGM-LOC
+    if label.startswith(("B-C-", "I-C-", "B-R-", "I-R-")):
+        prefix = label[:2]  # B- or I-
+        role = label[4:]     # strip C- or R-
+        mapped = f"{prefix}{role}"
+        if mapped in _SRL_TAG_SET:
+            return mapped
+
+    # ARG5 → ARG4, ARG1-DSP → ARG1
+    if "ARG5" in label:
+        return label.replace("ARG5", "ARG4")
+    if "ARG1-DSP" in label:
+        return label.replace("ARG1-DSP", "ARG1")
+
+    # Drop unknown modifier types (ARGM-ADJ, ARGM-CXN, ARGM-LVB, ARGM-PRR)
+    return "O"
+
+
 def generate_silver_srl(
     few_nerd_file: Path = OUTPUT_DIR / "fewnerd_train.json",
     subsample: int = 45000,
@@ -453,8 +488,8 @@ def generate_silver_srl(
     if len(few_nerd) > subsample:
         few_nerd = rng.sample(few_nerd, subsample)
 
-    print(f"  Loading liaad/srl-en_xlmr-large...")
-    model_name = "liaad/srl-en_xlmr-large"
+    print(f"  Loading cheralathan-m/cross-lingual-srl-v3 (MIT, F1=0.872)...")
+    model_name = "cheralathan-m/cross-lingual-srl-v3"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForTokenClassification.from_pretrained(model_name)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -472,10 +507,11 @@ def generate_silver_srl(
             texts, padding=True, truncation=True,
             max_length=128, return_tensors="pt",
         )
-        encoding = {k: v.to(device) for k, v in encoding.items()}
+        # Keep BatchEncoding for word_ids(), send tensors to device separately
+        model_input = {k: v.to(device) for k, v in encoding.items()}
 
         with torch.no_grad():
-            outputs = model(**encoding)
+            outputs = model(**model_input)
         preds = outputs.logits.argmax(dim=-1).cpu()
 
         for j, ex in enumerate(batch):
@@ -489,8 +525,9 @@ def generate_silver_srl(
             for k, wid in enumerate(word_ids):
                 if wid is not None and wid != prev_word and wid < len(words):
                     label = pred_labels[k]
-                    if label in SRL_TAGS:
-                        bio_tags[wid] = label
+                    # Map model labels to our 42-tag set
+                    mapped = _map_srl_label(label)
+                    bio_tags[wid] = mapped
                 prev_word = wid
 
             # Find predicate (V tag)
