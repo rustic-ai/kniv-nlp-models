@@ -464,13 +464,14 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
             loss = torch.tensor(0.0, device=device, requires_grad=True)
             step_tasks = {}
 
-            for task_idx, (task_name, logit_key) in enumerate(zip(task_names, logit_keys)):
+            task_id_map = {"ner": 0, "pos": 1, "dep": 2, "cls": 3, "srl": 4}
+            for task_name, logit_key in zip(task_names, logit_keys):
                 if task_name not in active_tasks:
                     continue
                 if logit_key not in outputs:
                     continue
 
-                mask = task_ids == task_idx
+                mask = task_ids == task_id_map[task_name]
                 if not mask.any():
                     continue
 
