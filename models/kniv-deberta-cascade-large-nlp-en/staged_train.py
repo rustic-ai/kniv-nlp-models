@@ -614,9 +614,37 @@ def evaluate_active(model, tokenizer, device, vocabs, ner_dev, ud_dev, srl_dev, 
             results["ner"] = evaluate_ner(gold, pred)
 
     if "dep" in active_tasks and ud_dev:
-        gold, pred = predict_tokens(ud_dev, "dep_logits", dep_labels, "dep_labels")
-        if gold:
-            results["dep"] = evaluate_dep(gold, pred, ud_dev)
+        # DEP eval requires decoding dep2label → heads + rels
+        gold_h, pred_h, gold_r, pred_r = [], [], [], []
+        for ex in ud_dev:
+            encoding = tokenizer(
+                ex["words"], is_split_into_words=True,
+                max_length=max_length, padding="max_length",
+                truncation=True, return_tensors="pt",
+            )
+            with torch.no_grad():
+                out = model(encoding["input_ids"].to(device), encoding["attention_mask"].to(device))
+            if "dep_logits" not in out:
+                break
+            preds = out["dep_logits"][0].cpu().argmax(dim=-1).tolist()
+            word_ids = encoding.word_ids()
+            wp, prev = [], None
+            for i, wid in enumerate(word_ids):
+                if wid is not None and wid != prev:
+                    idx = preds[i]
+                    wp.append(dep_labels[idx] if idx < len(dep_labels) else "0@root@ROOT")
+                prev = wid
+            try:
+                ph, pr = decode_sentence(wp[:len(ex["words"])], ex["pos_tags"])
+            except Exception:
+                ph = [-1] * len(ex["words"])
+                pr = ["_"] * len(ex["words"])
+            gold_h.append(ex["heads"])
+            pred_h.append(ph)
+            gold_r.append(ex["deprels"])
+            pred_r.append(pr)
+        if gold_h:
+            results["dep"] = evaluate_dep(gold_h, pred_h, gold_r, pred_r)
 
     if "srl" in active_tasks and srl_dev:
         gold, pred = predict_tokens(srl_dev, "srl_logits", srl_labels, "srl_tags")
