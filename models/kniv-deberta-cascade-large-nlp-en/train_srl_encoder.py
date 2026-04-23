@@ -238,7 +238,7 @@ def train(args):
     # Tokenizer + model
     print(f"Loading {args.encoder}", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(args.encoder)
-    model = SRLEncoderModel(args.encoder, len(SRL_TAGS), dropout=args.dropout).to(device)
+    model = SRLEncoderModel(args.encoder, len(SRL_TAGS), dropout=args.dropout).float().to(device)
 
     param_count = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
