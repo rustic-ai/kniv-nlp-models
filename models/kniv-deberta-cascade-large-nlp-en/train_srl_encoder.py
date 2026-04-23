@@ -173,8 +173,56 @@ def collate_fn(features):
 
 # ── Evaluation ─────────────────────────────────────────────────
 
-def evaluate(model, dataloader, device):
-    """Evaluate SRL F1 using seqeval."""
+def viterbi_decode(logits: torch.Tensor, tag2id: dict[str, int]) -> list[int]:
+    """Constrained Viterbi decoding for valid BIO sequences.
+
+    Enforces: I-X can only follow B-X or I-X (same role).
+    Uses log-probabilities from logits with hard constraints (-inf for
+    invalid transitions).
+    """
+    num_tags = logits.size(-1)
+    seq_len = logits.size(0)
+    log_probs = torch.log_softmax(logits, dim=-1)
+
+    # Build transition mask: allowed[i][j] = True if tag j can follow tag i
+    allowed = torch.ones(num_tags, num_tags, dtype=torch.bool)
+    tag_names = {v: k for k, v in tag2id.items()}
+    for j in range(num_tags):
+        j_name = tag_names.get(j, "O")
+        if j_name.startswith("I-"):
+            role = j_name[2:]
+            b_tag = tag2id.get(f"B-{role}", -1)
+            # I-X can only follow B-X or I-X
+            for i in range(num_tags):
+                if i != b_tag and i != j:
+                    allowed[i][j] = False
+
+    NEG_INF = -1e9
+
+    # Viterbi forward
+    viterbi = torch.full((seq_len, num_tags), NEG_INF)
+    backptr = torch.zeros(seq_len, num_tags, dtype=torch.long)
+    viterbi[0] = log_probs[0]
+
+    for t in range(1, seq_len):
+        for j in range(num_tags):
+            scores = viterbi[t - 1].clone()
+            scores[~allowed[:, j]] = NEG_INF
+            best_i = scores.argmax()
+            viterbi[t, j] = scores[best_i] + log_probs[t, j]
+            backptr[t, j] = best_i
+
+    # Backtrack
+    path = [0] * seq_len
+    path[-1] = viterbi[-1].argmax().item()
+    for t in range(seq_len - 2, -1, -1):
+        path[t] = backptr[t + 1, path[t + 1]].item()
+
+    return path
+
+
+def evaluate(model, dataloader, device, use_viterbi: bool = True):
+    """Evaluate SRL F1 using seqeval, optionally with Viterbi decoding."""
     from seqeval.metrics import f1_score as seq_f1, classification_report
     model.eval()
     all_gold, all_pred = [], []
@@ -186,18 +234,31 @@ def evaluate(model, dataloader, device):
                 batch["attention_mask"].to(device),
                 batch["predicate_idx"].to(device),
             )
-            preds = logits.argmax(dim=-1).cpu()
+            logits_cpu = logits.cpu()
             labels = batch["labels"]
 
             for j in range(labels.size(0)):
+                # Collect valid (non-padding) positions
+                valid_mask = labels[j] != -100
+                valid_indices = valid_mask.nonzero(as_tuple=True)[0]
+
+                if len(valid_indices) == 0:
+                    continue
+
+                valid_logits = logits_cpu[j, valid_indices]  # [valid_len, num_tags]
+
+                if use_viterbi:
+                    pred_ids = viterbi_decode(valid_logits, TAG2ID)
+                else:
+                    pred_ids = valid_logits.argmax(dim=-1).tolist()
+
                 gold_seq, pred_seq = [], []
-                for k in range(labels.size(1)):
-                    if labels[j, k] != -100:
-                        g = SRL_TAGS[labels[j, k]]
-                        p = SRL_TAGS[preds[j, k].item()] if preds[j, k].item() < len(SRL_TAGS) else "O"
-                        # V is the predicate marker, not an argument — treat as O for eval
-                        gold_seq.append("O" if g == "V" else g)
-                        pred_seq.append("O" if p == "V" else p)
+                for k_idx, k in enumerate(valid_indices.tolist()):
+                    g = SRL_TAGS[labels[j, k]]
+                    p = SRL_TAGS[pred_ids[k_idx]] if pred_ids[k_idx] < len(SRL_TAGS) else "O"
+                    # V is the predicate marker, not an argument — treat as O for eval
+                    gold_seq.append("O" if g == "V" else g)
+                    pred_seq.append("O" if p == "V" else p)
                 all_gold.append(gold_seq)
                 all_pred.append(pred_seq)
 
