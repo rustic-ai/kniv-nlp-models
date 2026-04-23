@@ -264,6 +264,7 @@ STAGE_CONFIG = {
     4: {
         "name": "CLS (frozen encoder+POS+NER+DEP+SRL)",
         "tasks": ["cls"],
+        "data_file": "cls_swda_mrda_train.json",
         "eval_tasks": ["pos", "ner", "dep", "srl", "cls"],
         "new_head": "cls",
         "head_type": "linear",
