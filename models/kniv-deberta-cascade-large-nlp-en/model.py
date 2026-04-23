@@ -184,6 +184,11 @@ class MultiTaskNLPModel(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
+        # Predicate embedding: injected at embedding level for SRL-aware encoding.
+        # Initialized to zeros (no-op) and loaded from Phase 1 SRL encoder.
+        self.pred_embedding = nn.Embedding(2, hidden_size)
+        nn.init.zeros_(self.pred_embedding.weight)
+
         # POS: always present (anchor of cascade)
         self.pos_head = nn.Linear(hidden_size, len(pos_labels))
         self.pos_labels = pos_labels
@@ -305,6 +310,32 @@ class MultiTaskNLPModel(nn.Module):
             raise ValueError(f"Unknown head: {head_name}")
 
     @classmethod
+    def load_from_srl_encoder(cls, srl_encoder_dir: str, encoder_name: str, pos_labels: list[str]) -> "MultiTaskNLPModel":
+        """Load encoder + predicate embedding from Phase 1 SRL encoder.
+
+        Creates a fresh cascade model with the SRL-tuned encoder weights
+        and predicate embedding.  All heads start untrained (POS head is
+        randomly initialized).  This is the starting point for Phase 2
+        staged head training.
+        """
+        path = Path(srl_encoder_dir)
+        model = cls(
+            encoder_name=encoder_name,
+            pos_labels=pos_labels,
+            _empty_encoder=True,
+        )
+
+        srl_encoder_state = torch.load(path / "srl_encoder.pt", weights_only=True)
+        # Load DeBERTa encoder weights
+        model.encoder.load_state_dict(srl_encoder_state["deberta"])
+        # Load predicate embedding
+        model.pred_embedding.load_state_dict(srl_encoder_state["pred_embedding"])
+
+        print(f"  Loaded SRL encoder from {path}", flush=True)
+        print(f"  Predicate embedding norm: {model.pred_embedding.weight.norm():.4f}", flush=True)
+        return model
+
+    @classmethod
     def load_from_teacher(cls, teacher_dir: str, encoder_name: str) -> "MultiTaskNLPModel":
         """Load encoder + POS head from an existing (non-cascade) teacher.
 
@@ -364,7 +395,19 @@ class MultiTaskNLPModel(nn.Module):
             srl_logits: [batch, seq_len, num_srl]        (if srl_head exists)
             cls_logits: [batch, num_cls]                 (if cls_head exists)
         """
-        hidden = self.encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+        # Encode with predicate embedding when SRL needs it.
+        # The predicate signal is injected at the embedding level so all
+        # attention layers see which token is the predicate.
+        if self.srl_head is not None and predicate_idx is not None:
+            # Predicate-aware encoding: inject predicate embedding before encoder
+            emb = self.encoder.embeddings(input_ids)
+            B, S = input_ids.size()
+            indicator = torch.zeros(B, S, dtype=torch.long, device=input_ids.device)
+            indicator[torch.arange(B, device=input_ids.device), predicate_idx] = 1
+            emb = emb + self.pred_embedding(indicator)
+            hidden = self.encoder.encoder(emb, attention_mask).last_hidden_state
+        else:
+            hidden = self.encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
         hidden = self.dropout(hidden)
 
         result = {}
@@ -387,35 +430,18 @@ class MultiTaskNLPModel(nn.Module):
 
                 # 4. SRL (cascade from configurable upstream heads)
                 if self.srl_head is not None:
-                    # Detach upstream when frozen, keep grads when unfrozen
-                    frozen_upstream = not hidden.requires_grad
-                    h = hidden.detach() if frozen_upstream else hidden
-                    dep_probs = F.softmax(dep_logits.detach(), dim=-1).requires_grad_(True)
+                    dep_probs = F.softmax(dep_logits.detach(), dim=-1)
 
-                    # Resolve predicate index (from data or DEP ROOT)
-                    srl_head_type = getattr(self, "srl_head_type", None)
-                    if srl_head_type in ("pred_mlp", "adapter") and predicate_idx is None:
+                    # Resolve predicate index from DEP ROOT if not provided
+                    srl_pred_idx = predicate_idx
+                    if srl_pred_idx is None:
                         root_prob = dep_probs.index_select(-1, self.root_indices).sum(-1)
-                        predicate_idx = root_prob.argmax(dim=-1)
+                        srl_pred_idx = root_prob.argmax(dim=-1)
 
-                    # Adapter: predicate-conditioned self-attention layer
-                    srl_adapter = getattr(self, "srl_adapter", None)
-                    if srl_adapter is not None:
-                        h = srl_adapter(h, predicate_idx, attention_mask)
-
-                    srl_parts = [h]
-                    # Predicate broadcast for pred_mlp head type
-                    if srl_head_type == "pred_mlp":
-                        B = h.size(0)
-                        pred_h = h[torch.arange(B, device=h.device), predicate_idx]
-                        srl_parts.append(pred_h.unsqueeze(1).expand_as(h))
-
-                    if "pos" in self.srl_cascade:
-                        srl_parts.append(pos_probs.detach() if frozen_upstream else pos_probs)
-                    if "ner" in self.srl_cascade:
-                        srl_parts.append(ner_probs.detach() if frozen_upstream else ner_probs)
+                    srl_parts = [hidden]
                     if "dep" in self.srl_cascade:
-                        srl_parts.append(self.dep_proj(dep_probs))
+                        dep_probs_grad = dep_probs.requires_grad_(True)
+                        srl_parts.append(self.dep_proj(dep_probs_grad))
                     srl_input = torch.cat(srl_parts, dim=-1)
                     if isinstance(self.srl_head, BiaffineSRLHead):
                         srl_logits = self.srl_head(srl_input, dep_probs)
