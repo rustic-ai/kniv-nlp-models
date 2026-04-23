@@ -57,6 +57,15 @@ STAGE_CONFIG = {
         "head_lr": 1e-5,
         "base_lr": 1e-5,
     },
+    "1f": {
+        "name": "POS (frozen encoder, SRL-tuned)",
+        "tasks": ["pos"],
+        "new_head": None,
+        "freeze_base": True,
+        "epochs": 5,
+        "head_lr": 1e-4,
+        "base_lr": None,
+    },
     # Stage 2 splits into 2a/2b/2c for NER cascade training
     "2a": {
         "name": "NER head (frozen encoder+POS, Few-NERD 45K)",
@@ -906,7 +915,7 @@ def composite_score_active(results, active_tasks):
 
 
 def main():
-    valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "2f", "3", "3s", "3m", "3b", "3b-dep", "3b-512",
+    valid_stages = ["1", "1f", "2a", "2b", "2c", "2d", "2e", "2f", "3", "3s", "3m", "3b", "3b-dep", "3b-512",
                      "3c", "3c-mt", "3c-adapt", "3c-lora", "4", "5"]
     parser = argparse.ArgumentParser(description="Staged cascade training")
     parser.add_argument("--stage", type=str, required=True, choices=valid_stages,
