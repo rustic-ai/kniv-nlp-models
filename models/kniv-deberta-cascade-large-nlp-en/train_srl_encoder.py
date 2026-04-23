@@ -193,9 +193,11 @@ def evaluate(model, dataloader, device):
                 gold_seq, pred_seq = [], []
                 for k in range(labels.size(1)):
                     if labels[j, k] != -100:
-                        gold_seq.append(SRL_TAGS[labels[j, k]])
-                        pred_idx = preds[j, k].item()
-                        pred_seq.append(SRL_TAGS[pred_idx] if pred_idx < len(SRL_TAGS) else "O")
+                        g = SRL_TAGS[labels[j, k]]
+                        p = SRL_TAGS[preds[j, k].item()] if preds[j, k].item() < len(SRL_TAGS) else "O"
+                        # V is the predicate marker, not an argument — treat as O for eval
+                        gold_seq.append("O" if g == "V" else g)
+                        pred_seq.append("O" if p == "V" else p)
                 all_gold.append(gold_seq)
                 all_pred.append(pred_seq)
 
