@@ -42,25 +42,52 @@ SRL_TAGS = [
 SRL_TAG_SET = set(SRL_TAGS)
 
 
+def roles_to_bio(role_labels: list[str]) -> list[str]:
+    """Convert flat role labels from the dannashao model to BIO tags.
+
+    The model outputs labels like ARG0, ARG1, ARGM-TMP, _ (outside),
+    C-ARG0 (continuation), R-ARG0 (reference).  We convert to standard
+    BIO: first token of a contiguous span → B-ROLE, rest → I-ROLE.
+    """
+    bio = []
+    prev_role = None
+    for role in role_labels:
+        if role == "_":
+            bio.append("O")
+            prev_role = None
+        elif role.startswith("C-"):
+            # Continuation of a prior span (discontinuous) — new B- span
+            base = role[2:]
+            bio.append("V" if base == "V" else f"B-{base}")
+            prev_role = base
+        elif role.startswith("R-"):
+            # Reference (e.g. relative clause) — new B- span
+            base = role[2:]
+            bio.append(f"B-{base}")
+            prev_role = base
+        elif role == prev_role:
+            bio.append(f"I-{role}")
+        else:
+            bio.append(f"B-{role}")
+            prev_role = role
+    return bio
+
+
 def map_label(label: str) -> str:
-    """Map model output label to our 42-tag set."""
+    """Map BIO label to our 42-tag set."""
     if label == "O":
         return "O"
     if label in ("B-V", "I-V", "V"):
         return "V"
     if label in SRL_TAG_SET:
         return label
-    # Strip continuation/reference prefixes: B-C-ARG0 → B-ARG0
-    for prefix in ("B-C-", "I-C-", "B-R-", "I-R-"):
-        if label.startswith(prefix):
-            rest = label[len(prefix):]
-            mapped = f"{label[0]}-{rest}"
-            if mapped in SRL_TAG_SET:
-                return mapped
-    # ARG5 → ARG4
-    label = label.replace("ARG5", "ARG4")
-    if label in SRL_TAG_SET:
-        return label
+    # Normalize sub-types: ARG1-DSP → ARG1, ARG5 → ARG4, ARGA → O
+    normalized = label
+    for src, dst in [("ARG1-DSP", "ARG1"), ("ARG5", "ARG4")]:
+        normalized = normalized.replace(src, dst)
+    if normalized in SRL_TAG_SET:
+        return normalized
+    # Unknown modifiers (ARGM-ADJ, ARGM-CXN, ARGM-LVB, ARGM-PRR, ARGA) → O
     return "O"
 
 
@@ -216,8 +243,9 @@ def run_silver_labeling(
             labels = labels[: len(orig_words)]
             confs = confs[: len(orig_words)]
 
-            # Map to our 42-tag set and force predicate token to V
-            mapped = [map_label(l) for l in labels]
+            # Convert flat role labels → BIO, then map to our 42-tag set
+            bio_labels = roles_to_bio(labels)
+            mapped = [map_label(l) for l in bio_labels]
             mapped[pred_idx] = "V"
 
             # Must have at least one argument span
