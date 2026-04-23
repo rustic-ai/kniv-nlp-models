@@ -210,6 +210,21 @@ STAGE_CONFIG = {
         "head_lr": 1e-4,
         "base_lr": None,
     },
+    "3c": {
+        "name": "SRL pred-aware MLP + encoder tune (998K silver)",
+        "tasks": ["srl"],
+        "data_file": "srl_silver_dannashao.json",
+        "eval_tasks": ["pos", "ner", "dep", "srl"],
+        "new_head": "srl",
+        "head_type": "pred_mlp",
+        "srl_cascade": ["dep"],
+        "freeze_base": False,
+        "epochs": 3,
+        "patience": 2,
+        "batch_size": 32,
+        "head_lr": 1e-4,
+        "base_lr": 1e-6,
+    },
     4: {
         "name": "CLS (frozen encoder+POS+NER+DEP+SRL)",
         "tasks": ["cls"],
@@ -523,7 +538,10 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
             labels = batch["labels"].to(device)
             task_ids = batch["task_id"].to(device)
 
-            outputs = model(input_ids, attention_mask)
+            predicate_idx = batch.get("predicate_idx")
+            if predicate_idx is not None:
+                predicate_idx = predicate_idx.to(device)
+            outputs = model(input_ids, attention_mask, predicate_idx=predicate_idx)
 
             loss = torch.tensor(0.0, device=device, requires_grad=True)
             step_tasks = {}
@@ -777,7 +795,7 @@ def composite_score_active(results, active_tasks):
 
 
 def main():
-    valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "2f", "3", "3s", "3m", "3b", "3b-dep", "3b-512", "4", "5"]
+    valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "2f", "3", "3s", "3m", "3b", "3b-dep", "3b-512", "3c", "4", "5"]
     parser = argparse.ArgumentParser(description="Staged cascade training")
     parser.add_argument("--stage", type=str, required=True, choices=valid_stages,
                         help="Training stage (1=POS, 2a=NER, 2b=POS+NER align, 2c=encoder, 3=DEP, 4=CLS, 5=joint)")
