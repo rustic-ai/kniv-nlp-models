@@ -225,6 +225,42 @@ STAGE_CONFIG = {
         "head_lr": 1e-4,
         "base_lr": 1e-6,
     },
+    "3c-mt": {
+        "name": "SRL pred-aware MLP + encoder tune + DEP/POS regularization",
+        "tasks": ["srl", "dep", "pos"],
+        "data_file": "srl_silver_dannashao.json",
+        "max_primary_examples": 200000,
+        "eval_tasks": ["pos", "ner", "dep", "srl"],
+        "new_head": "srl",
+        "head_type": "pred_mlp",
+        "srl_cascade": ["dep"],
+        "freeze_base": False,
+        "epochs": 3,
+        "patience": 2,
+        "batch_size": 32,
+        "head_lr": 1e-4,
+        "dep_lr": 1e-5,
+        "pos_lr": 1e-6,
+        "base_lr": 1e-6,
+    },
+    "3c-lora": {
+        "name": "SRL pred-aware MLP + LoRA encoder (998K silver)",
+        "tasks": ["srl"],
+        "data_file": "srl_silver_dannashao.json",
+        "eval_tasks": ["pos", "ner", "dep", "srl"],
+        "new_head": "srl",
+        "head_type": "pred_mlp",
+        "srl_cascade": ["dep"],
+        "freeze_base": True,
+        "use_lora": True,
+        "lora_r": 16,
+        "lora_alpha": 32,
+        "epochs": 3,
+        "patience": 2,
+        "batch_size": 32,
+        "head_lr": 1e-4,
+        "base_lr": None,
+    },
     4: {
         "name": "CLS (frozen encoder+POS+NER+DEP+SRL)",
         "tasks": ["cls"],
@@ -327,6 +363,23 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
             model = model.to(device)
             print(f"Added {head_name} head ({head_type}, {len(label_list)} labels)", flush=True)
 
+    # LoRA: wrap encoder with low-rank adapters (original weights frozen)
+    if stage_cfg.get("use_lora"):
+        from peft import get_peft_model, LoraConfig
+        lora_r = stage_cfg.get("lora_r", 16)
+        lora_alpha = stage_cfg.get("lora_alpha", 32)
+        lora_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            target_modules=["query_proj", "key_proj", "value_proj"],
+            lora_dropout=0.1,
+            bias="none",
+        )
+        model.encoder = get_peft_model(model.encoder, lora_config)
+        lora_params = sum(p.numel() for p in model.encoder.parameters() if p.requires_grad)
+        print(f"  LoRA applied: r={lora_r}, alpha={lora_alpha}, "
+              f"trainable encoder params={lora_params:,}", flush=True)
+
     # Gradient checkpointing: only when encoder is trainable AND VRAM is limited.
     # Frozen encoder + checkpointing causes incorrect outputs (PyTorch bug).
     # H100 80GB doesn't need checkpointing even with unfrozen encoder.
@@ -371,29 +424,54 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
     active_tasks = stage_cfg["tasks"]
     datasets = []
 
+    # Optional cap on primary data file examples
+    max_primary = stage_cfg.get("max_primary_examples")
+    if max_primary and train_examples and len(train_examples) > max_primary:
+        import random
+        random.seed(42)
+        train_examples = random.sample(train_examples, max_primary)
+        print(f"  Subsampled primary data to {max_primary:,} examples", flush=True)
+
     if data_file and train_examples:
         # Stage-specific data file — build datasets from single source
         for task in active_tasks:
             if task == "ner":
-                datasets.append(MultiTaskDataset(
-                    [ex for ex in train_examples if "ner_tags" in ex],
-                    "ner", tokenizer, ner_map, "ner_tags", max_length))
+                task_exs = [ex for ex in train_examples if "ner_tags" in ex]
+                if task_exs:
+                    datasets.append(MultiTaskDataset(task_exs, "ner", tokenizer, ner_map, "ner_tags", max_length))
             elif task == "pos":
-                datasets.append(MultiTaskDataset(
-                    [ex for ex in train_examples if "pos_tags" in ex],
-                    "pos", tokenizer, pos_map, "pos_tags", max_length))
+                task_exs = [ex for ex in train_examples if "pos_tags" in ex]
+                if task_exs:
+                    datasets.append(MultiTaskDataset(task_exs, "pos", tokenizer, pos_map, "pos_tags", max_length))
             elif task == "dep":
-                datasets.append(MultiTaskDataset(
-                    [ex for ex in train_examples if "dep_labels" in ex],
-                    "dep", tokenizer, dep_map, "dep_labels", max_length))
+                task_exs = [ex for ex in train_examples if "dep_labels" in ex]
+                if task_exs:
+                    datasets.append(MultiTaskDataset(task_exs, "dep", tokenizer, dep_map, "dep_labels", max_length))
             elif task == "srl":
-                datasets.append(MultiTaskDataset(
-                    [ex for ex in train_examples if "srl_tags" in ex],
-                    "srl", tokenizer, srl_map, "srl_tags", max_length))
+                task_exs = [ex for ex in train_examples if "srl_tags" in ex]
+                if task_exs:
+                    datasets.append(MultiTaskDataset(task_exs, "srl", tokenizer, srl_map, "srl_tags", max_length))
             elif task == "cls":
-                datasets.append(MultiTaskDataset(
-                    [ex for ex in train_examples if "cls_label" in ex],
-                    "cls", tokenizer, cls_map, "cls_label", max_length))
+                task_exs = [ex for ex in train_examples if "cls_label" in ex]
+                if task_exs:
+                    datasets.append(MultiTaskDataset(task_exs, "cls", tokenizer, cls_map, "cls_label", max_length))
+
+        # Fallback: load standard files for tasks missing from data_file
+        loaded_tasks = {ds.task for ds in datasets}
+        missing = set(active_tasks) - loaded_tasks
+        if missing:
+            print(f"  Loading standard data for regularization tasks: {missing}", flush=True)
+            if "dep" in missing or "pos" in missing:
+                with open(DATA_DIR / "ud_train.json") as f:
+                    ud_train = json.load(f)
+                if "dep" in missing:
+                    datasets.append(MultiTaskDataset(ud_train, "dep", tokenizer, dep_map, "dep_labels", max_length))
+                if "pos" in missing:
+                    datasets.append(MultiTaskDataset(ud_train, "pos", tokenizer, pos_map, "pos_tags", max_length))
+            if "ner" in missing:
+                with open(DATA_DIR / "ner_train.json") as f:
+                    ner_train = json.load(f)
+                datasets.append(MultiTaskDataset(ner_train, "ner", tokenizer, ner_map, "ner_tags", max_length))
     else:
         # Default loading from standard files
         with open(DATA_DIR / "ner_train.json") as f:
@@ -433,23 +511,34 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
     new_head_name = stage_cfg["new_head"]
     freeze_base = stage_cfg.get("freeze_base", False)
 
+    use_lora = stage_cfg.get("use_lora", False)
+
     if freeze_base and new_head_name:
         # Freeze encoder + existing heads — only train the NEW head
         # For SRL: also train dep_proj (compresses DEP probs for SRL cascade)
+        # For LoRA: also train LoRA adapter params in the encoder
         head_params = []
+        lora_params = []
         frozen_count = 0
         for name, param in model.named_parameters():
             if f"{new_head_name}_head" in name or (new_head_name == "srl" and "dep_proj" in name):
                 param.requires_grad = True
                 head_params.append(param)
+            elif use_lora and "lora_" in name:
+                param.requires_grad = True
+                lora_params.append(param)
             else:
                 param.requires_grad = False
                 frozen_count += 1
         param_groups = [{"params": head_params, "lr": stage_cfg["head_lr"]}]
-        trainable = sum(p.numel() for p in head_params)
+        if lora_params:
+            param_groups.append({"params": lora_params, "lr": stage_cfg["head_lr"] * 0.1})
+        trainable = sum(p.numel() for p in head_params) + sum(p.numel() for p in lora_params)
         trainable_names = f"{new_head_name}_head"
         if new_head_name == "srl" and model.dep_proj is not None:
             trainable_names += " + dep_proj"
+        if lora_params:
+            trainable_names += f" + LoRA({sum(p.numel() for p in lora_params):,})"
         print(f"  Frozen: {frozen_count} params, Trainable: {trainable:,} ({trainable_names})", flush=True)
 
     elif freeze_base and not new_head_name:
@@ -795,7 +884,8 @@ def composite_score_active(results, active_tasks):
 
 
 def main():
-    valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "2f", "3", "3s", "3m", "3b", "3b-dep", "3b-512", "3c", "4", "5"]
+    valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "2f", "3", "3s", "3m", "3b", "3b-dep", "3b-512",
+                     "3c", "3c-mt", "3c-lora", "4", "5"]
     parser = argparse.ArgumentParser(description="Staged cascade training")
     parser.add_argument("--stage", type=str, required=True, choices=valid_stages,
                         help="Training stage (1=POS, 2a=NER, 2b=POS+NER align, 2c=encoder, 3=DEP, 4=CLS, 5=joint)")
