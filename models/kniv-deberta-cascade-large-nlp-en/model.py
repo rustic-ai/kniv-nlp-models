@@ -31,6 +31,64 @@ import torch.nn.functional as F
 from transformers import AutoModel, AutoConfig
 
 
+class SRLAdapter(nn.Module):
+    """Predicate-conditioned transformer layer for SRL.
+
+    Adds a learned predicate indicator embedding, then runs one layer of
+    self-attention so all tokens can re-contextualize with awareness of
+    which token is the predicate.  Only the SRL path uses this — POS/NER/DEP
+    read frozen encoder hidden states directly.
+
+    ~8M trainable params for hidden_size=1024.
+    """
+
+    def __init__(self, hidden_size: int, num_heads: int = 8, dropout: float = 0.1):
+        super().__init__()
+        self.pred_embedding = nn.Embedding(2, hidden_size)  # 0=token, 1=predicate
+        self.self_attn = nn.MultiheadAttention(
+            hidden_size, num_heads, dropout=dropout, batch_first=True,
+        )
+        self.norm1 = nn.LayerNorm(hidden_size)
+        self.ff = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size * 2, hidden_size),
+        )
+        self.norm2 = nn.LayerNorm(hidden_size)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        predicate_idx: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            hidden:        [B, S, H] frozen encoder output
+            predicate_idx: [B] token index of the predicate per example
+            attention_mask: [B, S] padding mask (1=real, 0=pad)
+        Returns:
+            adapted:       [B, S, H] predicate-aware hidden states
+        """
+        B, S, H = hidden.size()
+
+        # Mark the predicate token with a learned embedding
+        pred_indicator = torch.zeros(B, S, dtype=torch.long, device=hidden.device)
+        pred_indicator[torch.arange(B, device=hidden.device), predicate_idx] = 1
+        h = hidden + self.pred_embedding(pred_indicator)
+
+        # Self-attention: tokens re-contextualize with predicate awareness
+        key_padding_mask = ~attention_mask.bool()
+        attn_out, _ = self.self_attn(h, h, h, key_padding_mask=key_padding_mask)
+        h = self.norm1(hidden + self.dropout(attn_out))  # residual from original
+
+        # Feed-forward
+        h = self.norm2(h + self.dropout(self.ff(h)))
+        return h
+
+
 class BiaffineSRLHead(nn.Module):
     """Biaffine SRL head — scores each token's role relative to the predicate.
 
@@ -181,13 +239,13 @@ class MultiTaskNLPModel(nn.Module):
         Args:
             head_name: "ner", "dep", "srl", or "cls"
             labels: list of label strings
-            head_type: "linear", "mlp", "biaffine", or "pred_mlp" (SRL only)
+            head_type: "linear", "mlp", "biaffine", "pred_mlp", or "adapter" (SRL only)
             srl_cascade: which upstream heads feed SRL (subset of {"pos","ner","dep"})
             biaffine_dim: hidden dim for biaffine head (default 256)
         """
         hidden_size = self.config.hidden_size
         num_pos = len(self.pos_labels)
-        make = self._make_mlp_head if head_type in ("mlp", "pred_mlp") else nn.Linear
+        make = self._make_mlp_head if head_type in ("mlp", "pred_mlp", "adapter") else nn.Linear
 
         if head_name == "ner":
             self.ner_labels = labels
@@ -205,6 +263,10 @@ class MultiTaskNLPModel(nn.Module):
             self.srl_head_type = head_type
             if srl_cascade is not None:
                 self.srl_cascade = set(srl_cascade)
+            # Create adapter layer if using adapter head type
+            self.srl_adapter = None
+            if head_type == "adapter":
+                self.srl_adapter = SRLAdapter(hidden_size, num_heads=8, dropout=0.1)
             # Compute input dim based on which upstream heads feed SRL
             in_dim = hidden_size
             if head_type == "pred_mlp":
@@ -330,18 +392,22 @@ class MultiTaskNLPModel(nn.Module):
                     h = hidden.detach() if frozen_upstream else hidden
                     dep_probs = F.softmax(dep_logits.detach(), dim=-1).requires_grad_(True)
 
+                    # Resolve predicate index (from data or DEP ROOT)
+                    srl_head_type = getattr(self, "srl_head_type", None)
+                    if srl_head_type in ("pred_mlp", "adapter") and predicate_idx is None:
+                        root_prob = dep_probs.index_select(-1, self.root_indices).sum(-1)
+                        predicate_idx = root_prob.argmax(dim=-1)
+
+                    # Adapter: predicate-conditioned self-attention layer
+                    srl_adapter = getattr(self, "srl_adapter", None)
+                    if srl_adapter is not None:
+                        h = srl_adapter(h, predicate_idx, attention_mask)
+
                     srl_parts = [h]
                     # Predicate broadcast for pred_mlp head type
-                    if getattr(self, "srl_head_type", None) == "pred_mlp":
-                        if predicate_idx is not None:
-                            B = h.size(0)
-                            pred_h = h[torch.arange(B, device=h.device), predicate_idx]
-                        else:
-                            # Infer predicate from DEP ROOT probabilities
-                            root_prob = dep_probs.index_select(-1, self.root_indices).sum(-1)
-                            pred_idx = root_prob.argmax(dim=-1)
-                            B = h.size(0)
-                            pred_h = h[torch.arange(B, device=h.device), pred_idx]
+                    if srl_head_type == "pred_mlp":
+                        B = h.size(0)
+                        pred_h = h[torch.arange(B, device=h.device), predicate_idx]
                         srl_parts.append(pred_h.unsqueeze(1).expand_as(h))
 
                     if "pos" in self.srl_cascade:
@@ -433,9 +499,11 @@ class MultiTaskNLPModel(nn.Module):
                     kwargs["srl_cascade"] = label_maps["srl_cascade"]
                 if is_biaffine and "srl_head.biaffine" in state_dict:
                     kwargs["biaffine_dim"] = state_dict["srl_head.biaffine"].shape[1]
-                # Use saved head_type if available (pred_mlp vs mlp have same state_dict shape)
+                # Use saved head_type (adapter/pred_mlp/mlp have same state_dict shape)
                 if "srl_head_type" in label_maps:
                     head_type = label_maps["srl_head_type"]
+                elif "srl_adapter.self_attn.in_proj_weight" in state_dict:
+                    head_type = "adapter"
             model.add_head(head_name, labels, head_type=head_type, **kwargs)
 
         model.load_state_dict(state_dict)
