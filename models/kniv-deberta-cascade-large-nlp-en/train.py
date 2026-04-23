@@ -105,12 +105,23 @@ class MultiTaskDataset(Dataset):
                     aligned.append(-100)
                 prev = wid
 
-            return {
+            item = {
                 "input_ids": encoding["input_ids"].squeeze(0),
                 "attention_mask": encoding["attention_mask"].squeeze(0),
                 "labels": torch.tensor(aligned, dtype=torch.long),
                 "task_id": torch.tensor(self.task_id, dtype=torch.long),
             }
+            # Pass predicate_idx for SRL pred_mlp head
+            if self.task == "srl" and "predicate_idx" in example:
+                # Map word-level predicate_idx to subword token position
+                pred_word_idx = example["predicate_idx"]
+                pred_token_idx = 0
+                for k, wid in enumerate(word_ids):
+                    if wid == pred_word_idx:
+                        pred_token_idx = k
+                        break
+                item["predicate_idx"] = torch.tensor(pred_token_idx, dtype=torch.long)
+            return item
         else:
             # CLS task
             text = example.get("text", " ".join(example["words"]))
@@ -160,6 +171,13 @@ def multitask_collator(features: list[dict]) -> dict:
         else:
             padded_labels.append(lbl)
     batch["labels"] = torch.stack(padded_labels)
+
+    # predicate_idx: present for SRL examples, 0 for others
+    if any("predicate_idx" in f for f in features):
+        batch["predicate_idx"] = torch.stack([
+            f.get("predicate_idx", torch.tensor(0, dtype=torch.long))
+            for f in features
+        ])
 
     return batch
 

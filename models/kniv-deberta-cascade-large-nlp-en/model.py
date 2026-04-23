@@ -181,13 +181,13 @@ class MultiTaskNLPModel(nn.Module):
         Args:
             head_name: "ner", "dep", "srl", or "cls"
             labels: list of label strings
-            head_type: "linear", "mlp", or "biaffine" (SRL only)
+            head_type: "linear", "mlp", "biaffine", or "pred_mlp" (SRL only)
             srl_cascade: which upstream heads feed SRL (subset of {"pos","ner","dep"})
             biaffine_dim: hidden dim for biaffine head (default 256)
         """
         hidden_size = self.config.hidden_size
         num_pos = len(self.pos_labels)
-        make = self._make_mlp_head if head_type == "mlp" else nn.Linear
+        make = self._make_mlp_head if head_type in ("mlp", "pred_mlp") else nn.Linear
 
         if head_name == "ner":
             self.ner_labels = labels
@@ -202,10 +202,13 @@ class MultiTaskNLPModel(nn.Module):
         elif head_name == "srl":
             assert self.dep_labels is not None, "SRL requires DEP head in cascade"
             self.srl_labels = labels
+            self.srl_head_type = head_type
             if srl_cascade is not None:
                 self.srl_cascade = set(srl_cascade)
             # Compute input dim based on which upstream heads feed SRL
             in_dim = hidden_size
+            if head_type == "pred_mlp":
+                in_dim += hidden_size  # predicate hidden broadcast
             if "pos" in self.srl_cascade:
                 in_dim += num_pos
             if "ner" in self.srl_cascade:
@@ -214,13 +217,16 @@ class MultiTaskNLPModel(nn.Module):
                 if self.dep_proj is None:
                     self.dep_proj = nn.Linear(len(self.dep_labels), self.DEP_PROJ_DIM)
                 in_dim += self.DEP_PROJ_DIM
+            # Find ROOT indices (needed for biaffine and pred_mlp predicate detection)
+            root_indices = [
+                i for i, l in enumerate(self.dep_labels)
+                if l.split("@")[1] == "root"
+            ]
+            assert root_indices, "No ROOT labels found in dep_labels"
+            self.register_buffer(
+                "root_indices", torch.tensor(root_indices, dtype=torch.long),
+            )
             if head_type == "biaffine":
-                # Find dep label indices that correspond to ROOT
-                root_indices = [
-                    i for i, l in enumerate(self.dep_labels)
-                    if l.split("@")[1] == "root"
-                ]
-                assert root_indices, "No ROOT labels found in dep_labels"
                 self.srl_head = BiaffineSRLHead(
                     in_dim, len(labels), self.dropout.p, root_indices,
                     biaffine_dim=biaffine_dim or 256,
@@ -280,9 +286,14 @@ class MultiTaskNLPModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
+        predicate_idx: torch.Tensor | None = None,
         **kwargs,
     ) -> dict[str, torch.Tensor]:
         """Cascaded forward pass — only computes active heads.
+
+        Args:
+            predicate_idx: [batch] int tensor of predicate token positions.
+                Used by pred_mlp SRL head. If None, inferred from DEP ROOT.
 
         Returns dict with keys for each active head:
             pos_logits: [batch, seq_len, num_pos]       (always)
@@ -314,14 +325,29 @@ class MultiTaskNLPModel(nn.Module):
 
                 # 4. SRL (cascade from configurable upstream heads)
                 if self.srl_head is not None:
-                    # When upstream is frozen, detach and create fresh tensors
-                    # so dep_proj and srl_head can still receive gradients
+                    # Detach upstream when frozen, keep grads when unfrozen
+                    frozen_upstream = not hidden.requires_grad
+                    h = hidden.detach() if frozen_upstream else hidden
                     dep_probs = F.softmax(dep_logits.detach(), dim=-1).requires_grad_(True)
-                    srl_parts = [hidden.detach()]
+
+                    srl_parts = [h]
+                    # Predicate broadcast for pred_mlp head type
+                    if getattr(self, "srl_head_type", None) == "pred_mlp":
+                        if predicate_idx is not None:
+                            B = h.size(0)
+                            pred_h = h[torch.arange(B, device=h.device), predicate_idx]
+                        else:
+                            # Infer predicate from DEP ROOT probabilities
+                            root_prob = dep_probs.index_select(-1, self.root_indices).sum(-1)
+                            pred_idx = root_prob.argmax(dim=-1)
+                            B = h.size(0)
+                            pred_h = h[torch.arange(B, device=h.device), pred_idx]
+                        srl_parts.append(pred_h.unsqueeze(1).expand_as(h))
+
                     if "pos" in self.srl_cascade:
-                        srl_parts.append(pos_probs.detach())
+                        srl_parts.append(pos_probs.detach() if frozen_upstream else pos_probs)
                     if "ner" in self.srl_cascade:
-                        srl_parts.append(ner_probs.detach())
+                        srl_parts.append(ner_probs.detach() if frozen_upstream else ner_probs)
                     if "dep" in self.srl_cascade:
                         srl_parts.append(self.dep_proj(dep_probs))
                     srl_input = torch.cat(srl_parts, dim=-1)
@@ -361,6 +387,7 @@ class MultiTaskNLPModel(nn.Module):
         if self.srl_labels is not None:
             label_maps["srl_labels"] = self.srl_labels
             label_maps["srl_cascade"] = sorted(self.srl_cascade)
+            label_maps["srl_head_type"] = getattr(self, "srl_head_type", "linear")
         if self.cls_labels is not None:
             label_maps["cls_labels"] = self.cls_labels
 
@@ -406,6 +433,9 @@ class MultiTaskNLPModel(nn.Module):
                     kwargs["srl_cascade"] = label_maps["srl_cascade"]
                 if is_biaffine and "srl_head.biaffine" in state_dict:
                     kwargs["biaffine_dim"] = state_dict["srl_head.biaffine"].shape[1]
+                # Use saved head_type if available (pred_mlp vs mlp have same state_dict shape)
+                if "srl_head_type" in label_maps:
+                    head_type = label_maps["srl_head_type"]
             model.add_head(head_name, labels, head_type=head_type, **kwargs)
 
         model.load_state_dict(state_dict)
