@@ -41,17 +41,16 @@ class BiaffineSRLHead(nn.Module):
     where pred is the soft-selected predicate vector (weighted by P(ROOT)).
     """
 
-    BIAFFINE_DIM = 256
-
     def __init__(
         self,
         in_dim: int,
         num_labels: int,
         dropout_p: float,
         root_indices: list[int],
+        biaffine_dim: int = 256,
     ):
         super().__init__()
-        d = self.BIAFFINE_DIM
+        d = biaffine_dim
 
         # Project tokens into argument and predicate subspaces
         self.arg_mlp = nn.Sequential(
@@ -175,7 +174,8 @@ class MultiTaskNLPModel(nn.Module):
         )
 
     def add_head(self, head_name: str, labels: list[str], head_type: str = "linear",
-                 srl_cascade: set[str] | list[str] | None = None):
+                 srl_cascade: set[str] | list[str] | None = None,
+                 biaffine_dim: int | None = None):
         """Add a new cascade head after loading a previous-stage checkpoint.
 
         Args:
@@ -183,6 +183,7 @@ class MultiTaskNLPModel(nn.Module):
             labels: list of label strings
             head_type: "linear", "mlp", or "biaffine" (SRL only)
             srl_cascade: which upstream heads feed SRL (subset of {"pos","ner","dep"})
+            biaffine_dim: hidden dim for biaffine head (default 256)
         """
         hidden_size = self.config.hidden_size
         num_pos = len(self.pos_labels)
@@ -222,6 +223,7 @@ class MultiTaskNLPModel(nn.Module):
                 assert root_indices, "No ROOT labels found in dep_labels"
                 self.srl_head = BiaffineSRLHead(
                     in_dim, len(labels), self.dropout.p, root_indices,
+                    biaffine_dim=biaffine_dim or 256,
                 )
             else:
                 self.srl_head = make(in_dim, len(labels))
@@ -399,8 +401,11 @@ class MultiTaskNLPModel(nn.Module):
             else:
                 head_type = "linear"
             kwargs = {}
-            if head_name == "srl" and "srl_cascade" in label_maps:
-                kwargs["srl_cascade"] = label_maps["srl_cascade"]
+            if head_name == "srl":
+                if "srl_cascade" in label_maps:
+                    kwargs["srl_cascade"] = label_maps["srl_cascade"]
+                if is_biaffine and "srl_head.biaffine" in state_dict:
+                    kwargs["biaffine_dim"] = state_dict["srl_head.biaffine"].shape[1]
             model.add_head(head_name, labels, head_type=head_type, **kwargs)
 
         model.load_state_dict(state_dict)
