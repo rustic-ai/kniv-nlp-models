@@ -179,6 +179,22 @@ STAGE_CONFIG = {
         "head_lr": 1e-4,
         "base_lr": None,
     },
+    "3b-512": {
+        "name": "SRL Biaffine 512d: encoder+DEP only",
+        "tasks": ["srl"],
+        "data_file": "srl_full_train.json",
+        "eval_tasks": ["pos", "ner", "dep", "srl"],
+        "new_head": "srl",
+        "head_type": "biaffine",
+        "srl_cascade": ["dep"],
+        "biaffine_dim": 512,
+        "freeze_base": True,
+        "epochs": 10,
+        "patience": 3,
+        "batch_size": 128,
+        "head_lr": 1e-4,
+        "base_lr": None,
+    },
     "3b-dep": {
         "name": "SRL Biaffine: encoder+DEP only, 20 epochs",
         "tasks": ["srl"],
@@ -290,7 +306,9 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
             # NER uses MLP head; DEP/CLS start as linear (can be changed)
             head_type = stage_cfg.get("head_type", "linear")
             srl_cascade = stage_cfg.get("srl_cascade")
-            model.add_head(head_name, label_list, head_type=head_type, srl_cascade=srl_cascade)
+            biaffine_dim = stage_cfg.get("biaffine_dim")
+            model.add_head(head_name, label_list, head_type=head_type,
+                           srl_cascade=srl_cascade, biaffine_dim=biaffine_dim)
             model = model.to(device)
             print(f"Added {head_name} head ({head_type}, {len(label_list)} labels)", flush=True)
 
@@ -759,7 +777,7 @@ def composite_score_active(results, active_tasks):
 
 
 def main():
-    valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "2f", "3", "3s", "3m", "3b", "3b-dep", "4", "5"]
+    valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "2f", "3", "3s", "3m", "3b", "3b-dep", "3b-512", "4", "5"]
     parser = argparse.ArgumentParser(description="Staged cascade training")
     parser.add_argument("--stage", type=str, required=True, choices=valid_stages,
                         help="Training stage (1=POS, 2a=NER, 2b=POS+NER align, 2c=encoder, 3=DEP, 4=CLS, 5=joint)")
