@@ -243,6 +243,22 @@ STAGE_CONFIG = {
         "pos_lr": 1e-6,
         "base_lr": 1e-6,
     },
+    "3c-adapt": {
+        "name": "SRL adapter (predicate-conditioned attention) + MLP",
+        "tasks": ["srl"],
+        "data_file": "srl_silver_dannashao.json",
+        "max_primary_examples": 200000,
+        "eval_tasks": ["pos", "ner", "dep", "srl"],
+        "new_head": "srl",
+        "head_type": "adapter",
+        "srl_cascade": ["dep"],
+        "freeze_base": True,
+        "epochs": 10,
+        "patience": 3,
+        "batch_size": 128,
+        "head_lr": 1e-4,
+        "base_lr": None,
+    },
     "3c-lora": {
         "name": "SRL pred-aware MLP + LoRA encoder (200K silver)",
         "tasks": ["srl"],
@@ -523,7 +539,9 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
         lora_params = []
         frozen_count = 0
         for name, param in model.named_parameters():
-            if f"{new_head_name}_head" in name or (new_head_name == "srl" and "dep_proj" in name):
+            if (f"{new_head_name}_head" in name
+                    or (new_head_name == "srl" and "dep_proj" in name)
+                    or (new_head_name == "srl" and "srl_adapter" in name)):
                 param.requires_grad = True
                 head_params.append(param)
             elif use_lora and "lora_" in name:
@@ -539,6 +557,8 @@ def train_stage(stage: str | int, checkpoint: str | None = None):
         trainable_names = f"{new_head_name}_head"
         if new_head_name == "srl" and model.dep_proj is not None:
             trainable_names += " + dep_proj"
+        if new_head_name == "srl" and getattr(model, "srl_adapter", None) is not None:
+            trainable_names += " + srl_adapter"
         if lora_params:
             trainable_names += f" + LoRA({sum(p.numel() for p in lora_params):,})"
         print(f"  Frozen: {frozen_count} params, Trainable: {trainable:,} ({trainable_names})", flush=True)
@@ -887,7 +907,7 @@ def composite_score_active(results, active_tasks):
 
 def main():
     valid_stages = ["1", "2a", "2b", "2c", "2d", "2e", "2f", "3", "3s", "3m", "3b", "3b-dep", "3b-512",
-                     "3c", "3c-mt", "3c-lora", "4", "5"]
+                     "3c", "3c-mt", "3c-adapt", "3c-lora", "4", "5"]
     parser = argparse.ArgumentParser(description="Staged cascade training")
     parser.add_argument("--stage", type=str, required=True, choices=valid_stages,
                         help="Training stage (1=POS, 2a=NER, 2b=POS+NER align, 2c=encoder, 3=DEP, 4=CLS, 5=joint)")
