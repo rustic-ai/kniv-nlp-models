@@ -107,33 +107,41 @@ Part of the [Rustic](https://rustic.ai) initiative by
 
 ## Quick Start
 
-```bash
-pip install torch transformers==5.6.2 seqeval
+### ONNX (recommended for production)
 
-# Run the demo
-python examples/cascade_demo.py --model models/kniv-deberta-nlp-base-en-large
+```bash
+# Export to ONNX
+pip install torch transformers==5.6.2 onnxruntime
+python models/kniv-deberta-nlp-base-en-large/export_onnx.py
 ```
 
 ```python
-# Or load programmatically
-import torch
-from transformers import AutoModel, AutoTokenizer
+import onnxruntime as ort
+import numpy as np
 
-tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v3-large")
-encoder = AutoModel.from_pretrained("microsoft/deberta-v3-large").float()
+session = ort.InferenceSession("onnx/cascade.onnx")
 
-state = torch.load("model.pt", map_location="cpu", weights_only=True)
-encoder.load_state_dict(state["deberta"])
-encoder.eval()
+# One call — all 5 heads
+pos, ner, arc, label, srl, cls = session.run(None, {
+    "input_ids": input_ids,           # int64 [batch, seq]
+    "attention_mask": attention_mask,  # int64 [batch, seq]
+    "predicate_idx": predicate_idx,   # int64 [batch] — verb token index (0 if not needed)
+})
+```
 
-# Run encoder once, all heads read from the same hidden states
-enc = tokenizer("Steve Jobs founded Apple.", return_tensors="pt")
-out = encoder(**enc, output_hidden_states=True)
-# → out.hidden_states: 25 tensors, one per encoder layer
+### PyTorch
+
+```bash
+pip install torch transformers==5.6.2 seqeval
+
+# Run the interactive demo
+python examples/cascade_demo.py --model models/kniv-deberta-nlp-base-en-large
 ```
 
 See [`examples/cascade_demo.py`](https://github.com/rustic-ai/kniv-nlp-models/blob/main/examples/cascade_demo.py)
-for a complete working example with all 5 heads.
+for a complete working example that loads the model, runs all 5 heads,
+and prints formatted output including POS tags, NER entities, dependency
+tree, SRL frames, and dialog act classification.
 
 ## Model Details
 
