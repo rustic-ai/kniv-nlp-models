@@ -386,6 +386,73 @@ caused by later phases modifying shared encoder layers.
 | SRL (all layers) | 3e-6 | 3e-5 | 3 | 32 |
 | CLS (frozen) | — | 1e-3 | 5 | 64 |
 
+## ONNX Export
+
+The model can be exported to ONNX for deployment in Rust, C++, or other
+runtimes via ONNX Runtime.
+
+### Exporting
+
+```bash
+python models/kniv-deberta-nlp-base-en-large/export_onnx.py
+```
+
+This produces three ONNX models:
+
+| File | Size | Inputs | Outputs |
+|------|------|--------|---------|
+| `encoder.onnx` | 1,738 MB | input_ids, attention_mask | stacked_hidden [25, B, S, 1024] |
+| `heads.onnx` | 34 MB | attention_mask, stacked_hidden | pos_logits, ner_logits, arc_scores, label_scores, cls_logits |
+| `srl.onnx` | 1,742 MB | input_ids, attention_mask, predicate_idx | srl_logits |
+
+The encoder runs once and produces all 25 hidden state layers as a
+stacked tensor. The heads model reads this tensor and outputs all
+non-SRL predictions. SRL has its own model because it uses a different
+forward path (predicate embedding injected at the embedding level).
+
+### Inference Pipeline
+
+```python
+import onnxruntime as ort
+import numpy as np
+
+# Load sessions
+encoder = ort.InferenceSession("onnx/encoder.onnx")
+heads = ort.InferenceSession("onnx/heads.onnx")
+srl = ort.InferenceSession("onnx/srl.onnx")
+
+# Step 1: Encode (shared, runs once)
+stacked = encoder.run(None, {
+    "input_ids": input_ids,
+    "attention_mask": attention_mask,
+})[0]  # [25, batch, seq, 1024]
+
+# Step 2: Run POS + NER + DEP + CLS heads
+pos, ner, arc, label, cls = heads.run(None, {
+    "attention_mask": attention_mask,
+    "stacked_hidden": stacked,
+})
+
+# Step 3: Run SRL (separate, per predicate)
+srl_logits = srl.run(None, {
+    "input_ids": input_ids,
+    "attention_mask": attention_mask,
+    "predicate_idx": np.array([predicate_token_index]),
+})[0]
+```
+
+### Validation
+
+All ONNX outputs validated against PyTorch (max diff < 0.001):
+
+| Output | Max Diff |
+|--------|----------|
+| Encoder hidden states | 0.000013 |
+| POS logits | 0.000008 |
+| NER logits | 0.000069 |
+| CLS logits | 0.000014 |
+| SRL logits | 0.000118 |
+
 ## Checkpoint Format
 
 Single `model.pt` file containing a dict of state dicts:
