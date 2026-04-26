@@ -1,0 +1,49 @@
+{
+  "version": "v5",
+  "encoder": "DeBERTa-v3-large",
+  "transformers": "5.6.2",
+  "heads": {
+    "pos": {
+      "score": 0.977,
+      "metric": "accuracy",
+      "benchmark": "UD English EWT test",
+      "n": 2077
+    },
+    "ner": {
+      "score": 0.889,
+      "metric": "F1",
+      "benchmark": "OntoNotes 5.0 test",
+      "n": 8262,
+      "conll2003_score": 0.794
+    },
+    "dep": {
+      "score": 0.944,
+      "las": 0.923,
+      "metric": "UAS",
+      "benchmark": "UD English EWT test",
+      "n": 2077
+    },
+    "srl": {
+      "score": 0.843,
+      "metric": "F1",
+      "benchmark": "PropBank EWT test",
+      "n": 1269
+    },
+    "cls": {
+      "score": 0.951,
+      "metric": "macro_f1",
+      "benchmark": "SGD+GPT dev",
+      "n": 4000,
+      "labels": [
+        "inform",
+        "request",
+        "question",
+        "confirm",
+        "reject",
+        "offer",
+        "social",
+        "status"
+      ]
+    }
+  }
+}
