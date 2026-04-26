@@ -388,8 +388,8 @@ caused by later phases modifying shared encoder layers.
 
 ## ONNX Export
 
-The model can be exported to ONNX for deployment in Rust, C++, or other
-runtimes via ONNX Runtime.
+The entire cascade exports as a single ONNX model — one encoder pass,
+all 5 heads, all 6 outputs.
 
 ### Exporting
 
@@ -397,61 +397,46 @@ runtimes via ONNX Runtime.
 python models/kniv-deberta-nlp-base-en-large/export_onnx.py
 ```
 
-This produces three ONNX models:
+Produces `cascade.onnx` (1.78 GB):
 
-| File | Size | Inputs | Outputs |
-|------|------|--------|---------|
-| `encoder.onnx` | 1,738 MB | input_ids, attention_mask | stacked_hidden [25, B, S, 1024] |
-| `heads.onnx` | 34 MB | attention_mask, stacked_hidden | pos_logits, ner_logits, arc_scores, label_scores, cls_logits |
-| `srl.onnx` | 1,742 MB | input_ids, attention_mask, predicate_idx | srl_logits |
+| | |
+|---|---|
+| **Inputs** | `input_ids` [B, S], `attention_mask` [B, S], `predicate_idx` [B] |
+| **Outputs** | `pos_logits` [B, S, 17], `ner_logits` [B, S, 37], `arc_scores` [B, S, S], `label_scores` [B, S, S, 53], `srl_logits` [B, S, 42], `cls_logits` [B, 8] |
 
-The encoder runs once and produces all 25 hidden state layers as a
-stacked tensor. The heads model reads this tensor and outputs all
-non-SRL predictions. SRL has its own model because it uses a different
-forward path (predicate embedding injected at the embedding level).
+The predicate embedding is injected at the encoder's embedding level,
+so SRL runs through the same encoder pass as all other heads. Set
+`predicate_idx=0` when SRL is not needed — the predicate embedding adds
+zero for non-predicate tokens.
 
-### Inference Pipeline
+### Inference
 
 ```python
 import onnxruntime as ort
 import numpy as np
 
-# Load sessions
-encoder = ort.InferenceSession("onnx/encoder.onnx")
-heads = ort.InferenceSession("onnx/heads.onnx")
-srl = ort.InferenceSession("onnx/srl.onnx")
+session = ort.InferenceSession("cascade.onnx")
 
-# Step 1: Encode (shared, runs once)
-stacked = encoder.run(None, {
-    "input_ids": input_ids,
-    "attention_mask": attention_mask,
-})[0]  # [25, batch, seq, 1024]
-
-# Step 2: Run POS + NER + DEP + CLS heads
-pos, ner, arc, label, cls = heads.run(None, {
-    "attention_mask": attention_mask,
-    "stacked_hidden": stacked,
+# One call, all heads
+pos, ner, arc, label, srl, cls = session.run(None, {
+    "input_ids": input_ids,           # int64 [batch, seq]
+    "attention_mask": attention_mask,  # int64 [batch, seq]
+    "predicate_idx": predicate_idx,   # int64 [batch] — token index of verb
 })
-
-# Step 3: Run SRL (separate, per predicate)
-srl_logits = srl.run(None, {
-    "input_ids": input_ids,
-    "attention_mask": attention_mask,
-    "predicate_idx": np.array([predicate_token_index]),
-})[0]
 ```
 
 ### Validation
 
-All ONNX outputs validated against PyTorch (max diff < 0.001):
+All outputs validated against PyTorch (max diff < 0.001):
 
 | Output | Max Diff |
 |--------|----------|
-| Encoder hidden states | 0.000013 |
-| POS logits | 0.000008 |
-| NER logits | 0.000069 |
-| CLS logits | 0.000014 |
+| POS logits | 0.000032 |
+| NER logits | 0.000298 |
+| DEP arc scores | 0.000198 |
+| DEP label scores | 0.000115 |
 | SRL logits | 0.000118 |
+| CLS logits | 0.000015 |
 
 ## Checkpoint Format
 
