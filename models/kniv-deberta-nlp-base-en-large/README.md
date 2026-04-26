@@ -32,7 +32,6 @@ model-index:
         metrics:
           - type: accuracy
             value: 0.977
-            name: Accuracy
       - task:
           type: token-classification
           name: Named Entity Recognition
@@ -54,7 +53,7 @@ model-index:
         metrics:
           - type: f1
             value: 0.794
-            name: F1 (mapped 18→4 types)
+            name: F1 (mapped 18 to 4 types)
       - task:
           type: token-classification
           name: Dependency Parsing
@@ -78,7 +77,6 @@ model-index:
         metrics:
           - type: f1
             value: 0.843
-            name: F1
       - task:
           type: text-classification
           name: Dialog Act Classification
@@ -93,39 +91,40 @@ model-index:
 
 # kniv-deberta-nlp-base-en-large v5
 
-A multi-task NLP model that performs 5 language analysis tasks from a single
-[DeBERTa-v3-large](https://huggingface.co/microsoft/deberta-v3-large)
+A multi-task NLP model that performs 5 language analysis tasks from a
+single [DeBERTa-v3-large](https://huggingface.co/microsoft/deberta-v3-large)
 encoder pass: POS tagging, Named Entity Recognition, Dependency Parsing,
 Semantic Role Labeling, and Dialog Act Classification.
 
 Part of the [Rustic](https://rustic.ai) initiative by
 [Dragonscale Industries Inc.](https://dragonscale.ai)
 
-- **Source code**: [GitHub](https://github.com/rustic-ai/kniv-nlp-models)
-- **Training data**: [dragonscale-ai/kniv-corpus-en](https://huggingface.co/datasets/dragonscale-ai/kniv-corpus-en)
-- **Demo script**: [`examples/cascade_demo.py`](https://github.com/rustic-ai/kniv-nlp-models/blob/main/examples/cascade_demo.py)
+| | |
+|---|---|
+| Source code | [GitHub](https://github.com/rustic-ai/kniv-nlp-models) |
+| Training data | [dragonscale-ai/kniv-corpus-en](https://huggingface.co/datasets/dragonscale-ai/kniv-corpus-en) |
+| Demo | [`examples/cascade_demo.py`](https://github.com/rustic-ai/kniv-nlp-models/blob/main/examples/cascade_demo.py) |
+| Parameters | 443M (434M encoder + 9.5M heads) |
+| Download | 1.74 GB (PyTorch) / 1.78 GB (ONNX) |
+| License | CC-BY-SA-4.0 |
 
 ## Quick Start
 
-### ONNX (recommended for production)
+### ONNX
 
 ```bash
-# Export to ONNX
 pip install torch transformers==5.6.2 onnxruntime
 python models/kniv-deberta-nlp-base-en-large/export_onnx.py
 ```
 
 ```python
 import onnxruntime as ort
-import numpy as np
 
 session = ort.InferenceSession("onnx/cascade.onnx")
-
-# One call — all 5 heads
 pos, ner, arc, label, srl, cls = session.run(None, {
     "input_ids": input_ids,           # int64 [batch, seq]
     "attention_mask": attention_mask,  # int64 [batch, seq]
-    "predicate_idx": predicate_idx,   # int64 [batch] — verb token index (0 if not needed)
+    "predicate_idx": predicate_idx,   # int64 [batch] — verb token index (0 if unused)
 })
 ```
 
@@ -133,35 +132,18 @@ pos, ner, arc, label, srl, cls = session.run(None, {
 
 ```bash
 pip install torch transformers==5.6.2 seqeval
-
-# Run the interactive demo
 python examples/cascade_demo.py --model models/kniv-deberta-nlp-base-en-large
 ```
 
-See [`examples/cascade_demo.py`](https://github.com/rustic-ai/kniv-nlp-models/blob/main/examples/cascade_demo.py)
-for a complete working example that loads the model, runs all 5 heads,
-and prints formatted output including POS tags, NER entities, dependency
-tree, SRL frames, and dialog act classification.
+The [demo script](https://github.com/rustic-ai/kniv-nlp-models/blob/main/examples/cascade_demo.py)
+is self-contained — it loads the model, runs all 5 heads, and prints
+POS tags, NER entities, dependency tree, SRL frames, and dialog acts.
 
-## Model Details
+## Benchmark Results
 
-| Property | Value |
-|----------|-------|
-| Base encoder | [microsoft/deberta-v3-large](https://huggingface.co/microsoft/deberta-v3-large) |
-| Encoder parameters | 434M |
-| Head parameters | ~9.5M (2.2% of encoder) |
-| Total parameters | ~443.5M |
-| Download size | 1.74 GB |
-| Transformers version | 5.6.2 (required) |
-| Language | English |
-| License | CC-BY-SA-4.0 |
-
-## Standard Benchmark Results
-
-Evaluated on standard public test sets. All numbers are reproducible
-using the included [benchmark scripts](https://github.com/rustic-ai/kniv-nlp-models/tree/main/models/kniv-deberta-nlp-base-en-large).
-
-### Primary Benchmarks
+All benchmarks use standard public test sets. No benchmark data was used
+during training. Results are reproducible via the included
+[benchmark scripts](https://github.com/rustic-ai/kniv-nlp-models/tree/main/models/kniv-deberta-nlp-base-en-large).
 
 | Head | Score | Metric | Benchmark | Split |
 |------|-------|--------|-----------|-------|
@@ -171,377 +153,117 @@ using the included [benchmark scripts](https://github.com/rustic-ai/kniv-nlp-mod
 | SRL | 0.843 | F1 | PropBank EWT | test |
 | CLS | 0.951 | Macro F1 | SGD + GPT (8 labels) | dev |
 
-### Cross-Benchmark NER
+NER was also evaluated on [CoNLL-2003](https://huggingface.co/datasets/eriktks/conll2003)
+(F1 = 0.794) with entity type mapping (18 OntoNotes types mapped to 4
+CoNLL types; numeric entities like DATE and CARDINAL have no CoNLL
+equivalent and are mapped to O).
 
-The NER head outputs 18 OntoNotes entity types. When evaluated on
-[CoNLL-2003](https://huggingface.co/datasets/eriktks/conll2003) (4 entity
-types), OntoNotes types are mapped: PERSON→PER, ORG→ORG, GPE/LOC/FAC→LOC,
-NORP/PRODUCT/EVENT/WORK_OF_ART/LAW/LANGUAGE→MISC. Numeric types (DATE,
-CARDINAL, MONEY, etc.) have no CoNLL equivalent and are mapped to O.
+CLS was cross-evaluated on [DailyDialog](https://huggingface.co/datasets/daily_dialog)
+(accuracy = 0.613) with lossy 8-to-4 label mapping.
 
-| Benchmark | Score | Metric | Mapping |
-|-----------|-------|--------|---------|
-| OntoNotes 5.0 test | 0.889 | F1 | Direct (same 18 types) |
-| CoNLL-2003 test | 0.794 | F1 | 18→4 types (numeric entities dropped) |
-
-### NER Per-Entity Performance (OntoNotes 5.0)
-
-| Entity Type | Precision | Recall | F1 | Support |
-|-------------|-----------|--------|-----|---------|
-| PERSON | 0.952 | 0.948 | 0.950 | 1,988 |
-| GPE | 0.965 | 0.946 | 0.955 | 2,240 |
-| ORG | 0.900 | 0.896 | 0.898 | 1,795 |
-| NORP | 0.910 | 0.930 | 0.920 | 841 |
-| DATE | 0.823 | 0.869 | 0.846 | 1,601 |
-| CARDINAL | 0.840 | 0.843 | 0.841 | 935 |
-| MONEY | 0.883 | 0.892 | 0.887 | 314 |
-| PERCENT | 0.863 | 0.865 | 0.864 | 349 |
-| LOC | 0.776 | 0.793 | 0.785 | 179 |
-| FAC | 0.773 | 0.807 | 0.790 | 135 |
-| ORDINAL | 0.833 | 0.918 | 0.873 | 195 |
-| PRODUCT | 0.760 | 0.750 | 0.755 | 76 |
-| QUANTITY | 0.750 | 0.714 | 0.732 | 105 |
-| EVENT | 0.657 | 0.698 | 0.677 | 63 |
-| TIME | 0.654 | 0.660 | 0.657 | 212 |
-| WORK_OF_ART | 0.636 | 0.620 | 0.628 | 166 |
-| LAW | 0.733 | 0.550 | 0.629 | 40 |
-| LANGUAGE | 0.867 | 0.542 | 0.667 | 24 |
-
-### Cross-Benchmark CLS
-
-The CLS head uses 8 dialog act labels. When mapped to
-[DailyDialog](https://huggingface.co/datasets/daily_dialog)'s 4-label
-scheme (inform→inform, request/reject→directive, question→question,
-confirm/offer→commissive, social/status→inform):
-
-| Benchmark | Score | Metric | Mapping |
-|-----------|-------|--------|---------|
-| SGD + GPT dev (internal) | 0.951 | Macro F1 | Direct (8 labels) |
-| DailyDialog test | 0.613 | Accuracy | 8→4 labels (lossy) |
+```bash
+# Reproduce benchmarks
+python models/kniv-deberta-nlp-base-en-large/download_benchmarks.py
+python models/kniv-deberta-nlp-base-en-large/benchmark_standard.py
+```
 
 ## Architecture
 
-### Encoder
-
-[DeBERTa-v3-large](https://huggingface.co/microsoft/deberta-v3-large)
-(434M parameters, 24 transformer layers, 1024 hidden dimension). All
-tasks share this encoder. A single forward pass with
-`output_hidden_states=True` produces 25 hidden state tensors (embedding
-layer + 24 transformer layers) that the task heads read from.
-
-### ScalarMix (Per-Task Layer Selection)
-
-Each task head has a learned ScalarMix module — a softmax-weighted
-combination of all 25 encoder hidden states. This allows each task to
-discover its optimal encoder depth without manual layer assignment:
-
-```python
-class ScalarMix(nn.Module):
-    """Weighted average of encoder layers (ELMo-style)."""
-    def __init__(self, n_layers):
-        self.weights = nn.Parameter(torch.zeros(n_layers))  # learned
-        self.scale = nn.Parameter(torch.ones(1))
-    def forward(self, hidden_states):
-        w = torch.softmax(self.weights, dim=0)
-        return self.scale * sum(wi * hi for wi, hi in zip(w, hidden_states))
-```
-
-In practice, POS converges to reading layers 0-8 (morphosyntax), NER
-reads layers 5-10 (entity-level), DEP reads layers 12-18 (structural),
-and SRL reads the top layers (semantic). CLS learns a free mixture across
-all layers.
-
-### Task Cascade
-
-Simpler tasks feed soft predictions into more complex tasks:
-
-- **NER** receives POS probabilities (17-dim) concatenated to its hidden state
-- **DEP** receives both POS (17-dim) and NER (37-dim) probabilities
-
-Upstream probabilities are detached (no gradient flow back through the
-cascade), so each head trains independently while benefiting from
-upstream predictions at inference.
-
-### Head Architectures
-
-**POS — Part-of-Speech Tagging**
+One encoder, five task heads. The encoder runs once and produces 25
+hidden state tensors (embedding layer + 24 transformer layers). Each
+head selects its optimal layers via a learned ScalarMix and applies a
+task-specific classifier. A predicate embedding is added at the
+embedding level for SRL, so all heads — including SRL — share the
+same encoder pass.
 
 ```
-ScalarMix(25 layers, biased toward 0-8)
-    → Linear(1024, 17)
-    → argmax
+DeBERTa-v3-large + pred_embedding
+│
+├─ ScalarMix(0-8)  → Linear(17)                              → POS
+├─ ScalarMix(5-10) → BiLSTM(256) → +POS probs → MLP(37)     → NER  [Viterbi]
+├─ ScalarMix(12-18)→ +POS/NER probs → Biaffine(arc+label)    → DEP
+├─ last_hidden     → MLP(42)                                  → SRL  [Viterbi]
+└─ ScalarMix(all)  → AttentionPool → MLP(8)                   → CLS
 ```
 
-17 UPOS tags. Simplest head — a linear probe on the ScalarMix output.
+**ScalarMix**: Learned softmax-weighted average of all 25 encoder layers.
+Each head discovers which layers are most useful — POS reads lower layers
+(morphosyntax), DEP reads mid-high layers (structure), SRL reads the top
+(semantics).
 
-**NER — Named Entity Recognition**
+**Cascade**: POS probabilities feed into NER; POS + NER probabilities
+feed into DEP. Upstream outputs are detached (no gradient flow), so heads
+train independently but benefit from upstream predictions at inference.
 
-```
-ScalarMix(25 layers, biased toward 5-10)
-    → BiLSTM(1024, 256, bidirectional)
-    → Linear(512, 1024) + residual connection
-    → concat with POS probs (17-dim)
-    → LayerNorm(1041) → Linear(1041, 1024) → GELU → Dropout(0.1) → Linear(1024, 37)
-    → Viterbi decoding (constrained BIO transitions)
-```
+**Predicate embedding**: `Embedding(2, 1024)` added at the encoder
+embedding level. Marks one token as the SRL predicate before all 24
+attention layers, so the encoder produces predicate-aware representations
+for SRL without a separate forward pass.
 
-37 BIO tags covering 18 OntoNotes entity types (PERSON, ORG, GPE, DATE,
-etc.). The BiLSTM adapter captures local sequential patterns. Viterbi
-decoding enforces valid BIO sequences at inference (+0.5-1.0 F1).
-
-**DEP — Dependency Parsing (Biaffine)**
-
-```
-ScalarMix(25 layers, biased toward 12-18)
-    → concat with POS probs (17-dim) + NER probs (37-dim)
-    → LayerNorm(1078) → Linear(1078, 1024) → GELU  [projection]
-    → BiaffineDEPHead:
-        arc_dep/arc_head:     Linear(1024, 512) + LN + GELU → Biaffine(512, 1)
-        label_dep/label_head: Linear(1024, 128) + LN + GELU → Biaffine(128, 53)
-    → arc scores: [batch, seq, seq]         (head selection)
-    → label scores: [batch, seq, seq, 53]   (relation classification)
-    → argmax
-```
-
-Dozat & Manning (2017) biaffine attention. The arc scorer selects which
-token is the head of each token. The label scorer classifies the
-dependency relation (53 UD relation types). POS and NER cascade features
-provide syntactic and entity type information to the parser.
-
-**SRL — Semantic Role Labeling**
-
-```
-Embedding layer:
-    word_embeddings(input_ids)
-    + pred_embedding(indicator)         [Embedding(2, 1024), marks predicate]
-    → encoder.encoder(emb, mask)        [direct encoder call, not model.forward]
-    → last_hidden_state
-
-Head:
-    → Dropout(0.1) → Linear(1024, 1024) → GELU → Dropout(0.1) → Linear(1024, 42)
-    → Viterbi decoding (constrained BIO transitions, V excluded from scoring)
-```
-
-42 BIO tags (ARG0-4, 16 ARGM modifier types). The predicate is marked
-by adding a learned embedding at the encoder's embedding level — before
-all 24 attention layers — so every layer can condition on which token is
-the predicate. SRL uses `encoder.encoder()` directly (not `model.forward()`)
-because the predicate embedding is injected before the encoder call.
-
-**CLS — Dialog Act Classification**
-
-```
-ScalarMix(25 layers, free initialization)
-    → AttentionPool:
-        Linear(1024, 1) → masked softmax → weighted sum over tokens
-    → LayerNorm(1024) → Linear(1024, 512) → GELU → Dropout(0.1) → Linear(512, 8)
-    → argmax
-```
-
-8 dialog act labels: inform, request, question, confirm, reject, offer,
-social, status. AttentionPool learns per-token importance weights,
-outperforming mean pooling (+1.7 F1) and [CLS] token. Supports optional
-previous utterance context via pair encoding: `tokenizer(prev_text, text)`.
+**Decoding**: POS, DEP, and CLS use argmax. NER and SRL use Viterbi
+decoding with constrained BIO transitions (I-X can only follow B-X or
+I-X of the same type).
 
 ## Training
 
 ### Bottom-Up Layer-Selective Training
 
-Rather than fine-tuning the entire encoder for one task and then freezing
-it, the encoder is shaped progressively from lower to upper layers:
+The encoder is shaped progressively from lower to upper layers:
 
-**Phase 1 — POS**: All 24 encoder layers unfrozen at LR=2e-5 alongside the
-POS head (LR=1e-3). This serves as a syntactic warm-up for the full
-encoder. 10 epochs on UD EWT (12.5K sentences).
+| Phase | Task | Layers Unfrozen | Encoder LR | Epochs | Data |
+|-------|------|----------------|------------|--------|------|
+| 1 | POS | All (warm-up) | 2e-5 | 10 | 12.5K [UD EWT](https://universaldependencies.org/treebanks/en_ewt/) gold |
+| 2 | NER | 5-12 | 2e-5 / 5e-5 | 15 | 195K SpanMarker silver |
+| 3 | DEP | 12-18 | 2e-5 | 20 | 12.5K UD EWT gold |
+| 4 | SRL | All | 3e-6 | 3 | 200K AllenNLP silver + 41K [PropBank](https://github.com/propbank/propbank-release) gold |
+| 5 | CLS | Frozen | — | 5 | 60K [SGD](https://github.com/google-research-datasets/dstc8-schema-guided-dialogue) + GPT |
 
-**Phase 2 — NER**: Layers 5-12 unfrozen. Layers 5-8 (overlap with POS) use
-a reduced LR of 2e-5; layers 9-12 (fresh for NER) use 5e-5. NER head at
-1e-3. 15 epochs on 195K SpanMarker silver labels with confidence weighting.
-
-**Phase 3 — DEP**: Layers 12-18 unfrozen at LR=2e-5. DEP head at 1e-3.
-20 epochs on UD EWT gold (12.5K sentences). POS and NER cascade features
-are detached — DEP training does not affect POS or NER layers.
-
-**Phase 4 — SRL**: Initially layers 18-24 unfrozen at LR=2e-5 (5 epochs).
-Then all layers at ultra-low LR=3e-6 for 3 additional epochs to allow
-semantic adaptation across the full encoder. Data: 200K AllenNLP silver +
-41K PropBank EWT gold (4x upsampled).
-
-**Phase 5 — CLS**: Fully frozen encoder. Only ScalarMix + AttentionPool +
-MLP trained at LR=1e-3. 5 epochs on 60K SGD + GPT dialog act data.
-
-**Recovery**: After all phases, POS, NER, and DEP heads are retrained for
-3 epochs each on the frozen final encoder to recover from minor degradation
-caused by later phases modifying shared encoder layers.
-
-### Training Data
-
-| Data | Size | License | Used For |
-|------|------|---------|----------|
-| [UD English EWT](https://universaldependencies.org/treebanks/en_ewt/) | 12.5K sentences | CC-BY-SA-4.0 | POS, DEP |
-| SpanMarker NER silver | 195K sentences | Generated (Apache-2.0 model) | NER |
-| AllenNLP SRL silver | 200K pairs | Generated (Apache-2.0 model) | SRL |
-| [PropBank EWT](https://github.com/propbank/propbank-release) | 41K pairs | CC-BY-SA-4.0 | SRL |
-| [SGD](https://github.com/google-research-datasets/dstc8-schema-guided-dialogue) + GPT labels | 60K utterances | CC-BY-SA-4.0 | CLS |
-
-### Hyperparameters
-
-| Phase | Encoder LR | Head LR | Epochs | Batch Size |
-|-------|-----------|---------|--------|------------|
-| POS (all layers) | 2e-5 | 1e-3 | 10 | 64 |
-| NER (layers 5-12) | 2e-5 / 5e-5 | 1e-3 | 15 | 64 |
-| DEP (layers 12-18) | 2e-5 | 1e-3 | 20 | 32 |
-| SRL (all layers) | 3e-6 | 3e-5 | 3 | 32 |
-| CLS (frozen) | — | 1e-3 | 5 | 64 |
+After all phases, POS/NER/DEP heads are retrained for 3 epochs on the
+frozen final encoder to recover from minor forgetting.
 
 ## ONNX Export
-
-The entire cascade exports as a single ONNX model — one encoder pass,
-all 5 heads, all 6 outputs.
-
-### Exporting
 
 ```bash
 python models/kniv-deberta-nlp-base-en-large/export_onnx.py
 ```
 
-Produces `cascade.onnx` (1.78 GB):
+Exports a single `cascade.onnx` (1.78 GB) with all 5 heads. One call
+returns all 6 output tensors. Validated against PyTorch (max diff < 0.001
+across all outputs).
 
-| | |
-|---|---|
-| **Inputs** | `input_ids` [B, S], `attention_mask` [B, S], `predicate_idx` [B] |
-| **Outputs** | `pos_logits` [B, S, 17], `ner_logits` [B, S, 37], `arc_scores` [B, S, S], `label_scores` [B, S, S, 53], `srl_logits` [B, S, 42], `cls_logits` [B, 8] |
+| Input | Shape | Description |
+|-------|-------|-------------|
+| `input_ids` | [B, S] | Tokenized input (int64) |
+| `attention_mask` | [B, S] | Padding mask (int64) |
+| `predicate_idx` | [B] | SRL predicate token index (int64, 0 if unused) |
 
-The predicate embedding is injected at the encoder's embedding level,
-so SRL runs through the same encoder pass as all other heads. Set
-`predicate_idx=0` when SRL is not needed — the predicate embedding adds
-zero for non-predicate tokens.
-
-### Inference
-
-```python
-import onnxruntime as ort
-import numpy as np
-
-session = ort.InferenceSession("cascade.onnx")
-
-# One call, all heads
-pos, ner, arc, label, srl, cls = session.run(None, {
-    "input_ids": input_ids,           # int64 [batch, seq]
-    "attention_mask": attention_mask,  # int64 [batch, seq]
-    "predicate_idx": predicate_idx,   # int64 [batch] — token index of verb
-})
-```
-
-### Validation
-
-All outputs validated against PyTorch (max diff < 0.001):
-
-| Output | Max Diff |
-|--------|----------|
-| POS logits | 0.000032 |
-| NER logits | 0.000298 |
-| DEP arc scores | 0.000198 |
-| DEP label scores | 0.000115 |
-| SRL logits | 0.000118 |
-| CLS logits | 0.000015 |
-
-## Checkpoint Format
-
-Single `model.pt` file containing a dict of state dicts:
-
-```python
-{
-    "deberta":        ...,  # 434M params (shared encoder)
-    "pred_embedding": ...,  # 2K params (SRL predicate marker)
-    "pos_scalar_mix": ..., "pos_head": ...,
-    "ner_scalar_mix": ..., "ner_lstm": ..., "ner_proj": ..., "ner_head": ...,
-    "dep_scalar_mix": ..., "dep_proj": ..., "dep_biaffine": ...,
-    "classifier": ...,     # SRL MLP classifier
-    "cls_scalar_mix": ..., "cls_pool": ..., "cls_head": ...,
-}
-```
-
-## Requirements
-
-```
-transformers==5.6.2
-torch>=2.0
-seqeval
-```
-
-The model requires `transformers==5.6.2`. DeBERTa's internal computation
-differs across library versions, producing incorrect outputs if the
-version does not match.
+| Output | Shape | Description |
+|--------|-------|-------------|
+| `pos_logits` | [B, S, 17] | POS tag scores |
+| `ner_logits` | [B, S, 37] | NER BIO tag scores |
+| `arc_scores` | [B, S, S] | DEP head selection scores |
+| `label_scores` | [B, S, S, 53] | DEP relation label scores |
+| `srl_logits` | [B, S, 42] | SRL BIO tag scores |
+| `cls_logits` | [B, 8] | Dialog act scores |
 
 ## Labels
 
-**POS**: ADJ, ADP, ADV, AUX, CCONJ, DET, INTJ, NOUN, NUM, PART, PRON, PROPN, PUNCT, SCONJ, SYM, VERB, X
-
-**NER**: BIO tags for PERSON, NORP, FAC, ORG, GPE, LOC, PRODUCT, EVENT, WORK_OF_ART, LAW, LANGUAGE, DATE, TIME, PERCENT, MONEY, QUANTITY, ORDINAL, CARDINAL
-
-**DEP**: 53 UD relations (root, nsubj, obj, obl, amod, det, case, conj, cc, advmod, aux, mark, xcomp, ccomp, acl, advcl, etc.)
-
-**SRL**: BIO tags for V, ARG0-4, ARGM-TMP, ARGM-LOC, ARGM-MNR, ARGM-CAU, ARGM-PRP, ARGM-NEG, ARGM-ADV, ARGM-DIR, ARGM-DIS, ARGM-EXT, ARGM-MOD, ARGM-PRD, ARGM-GOL, ARGM-COM, ARGM-REC
-
-**CLS**: inform, request, question, confirm, reject, offer, social, status
-
-## Benchmark Methodology
-
-### Evaluation Protocol
-
-All benchmarks use the standard test splits of public datasets. No
-training data from these benchmarks was used during model training.
-The model was trained on separate data sources (UD EWT for POS/DEP,
-SpanMarker silver for NER, AllenNLP silver + PropBank gold for SRL,
-SGD + GPT for CLS).
-
-- **POS/DEP**: Evaluated on [UD English EWT](https://universaldependencies.org/treebanks/en_ewt/) test set (2,077 sentences).
-- **NER**: Evaluated on [OntoNotes 5.0](https://huggingface.co/datasets/tner/ontonotes5) test set (8,262 sentences). Also on [CoNLL-2003](https://huggingface.co/datasets/eriktks/conll2003) (3,453 sentences) with entity type mapping.
-- **SRL**: Evaluated on PropBank EWT test set (1,269 examples). V tags excluded from F1 scoring.
-- **CLS**: Internal evaluation on SGD+GPT dev split (4,000 utterances). Cross-benchmark on [DailyDialog](https://huggingface.co/datasets/daily_dialog) test (7,740 utterances).
-
-### Decoding
-
-- **POS, DEP, CLS**: argmax decoding
-- **NER, SRL**: Viterbi decoding with constrained BIO transitions (I-X can only follow B-X or I-X of the same type)
-- **DEP**: Biaffine arc scoring (greedy argmax, no MST decoding)
-
-### Reproducing Benchmarks
-
-```bash
-# Step 1: Download benchmark datasets
-python models/kniv-deberta-nlp-base-en-large/download_benchmarks.py
-
-# Step 2: Run full benchmark suite
-python models/kniv-deberta-nlp-base-en-large/benchmark_standard.py
-
-# Step 3: Run internal evaluation
-python models/kniv-deberta-nlp-base-en-large/evaluate_v5.py
-```
-
-The benchmark scripts are self-contained — they load the model, build all
-head architectures, and run evaluation. Dependencies: `transformers==5.6.2`,
-`torch`, `seqeval`, `scikit-learn`, `datasets`.
-
-### Data Licensing for Benchmarks
-
-| Benchmark | License | Usage |
-|-----------|---------|-------|
-| [UD English EWT](https://universaldependencies.org/treebanks/en_ewt/) | CC-BY-SA-4.0 | Training + evaluation |
-| [OntoNotes 5.0](https://huggingface.co/datasets/tner/ontonotes5) | LDC | Evaluation only |
-| [CoNLL-2003](https://huggingface.co/datasets/eriktks/conll2003) | Reuters | Evaluation only |
-| PropBank EWT | CC-BY-SA-4.0 | Training + evaluation |
-| [DailyDialog](https://huggingface.co/datasets/daily_dialog) | CC-BY-NC-SA-4.0 | Evaluation only |
+| Head | Count | Tags |
+|------|-------|------|
+| POS | 17 | ADJ, ADP, ADV, AUX, CCONJ, DET, INTJ, NOUN, NUM, PART, PRON, PROPN, PUNCT, SCONJ, SYM, VERB, X |
+| NER | 37 | BIO tags for: PERSON, NORP, FAC, ORG, GPE, LOC, PRODUCT, EVENT, WORK_OF_ART, LAW, LANGUAGE, DATE, TIME, PERCENT, MONEY, QUANTITY, ORDINAL, CARDINAL |
+| DEP | 53 | UD relations: root, nsubj, obj, obl, amod, det, case, conj, cc, advmod, aux, mark, xcomp, ccomp, acl, advcl, ... |
+| SRL | 42 | BIO tags for: V, ARG0-4, ARGM-TMP, ARGM-LOC, ARGM-MNR, ARGM-CAU, ARGM-PRP, ARGM-NEG, ARGM-ADV, ARGM-DIR, ARGM-DIS, ARGM-EXT, ARGM-MOD, ARGM-PRD, ARGM-GOL, ARGM-COM, ARGM-REC |
+| CLS | 8 | inform, request, question, confirm, reject, offer, social, status |
 
 ## Limitations
 
-- **English only**. The encoder (DeBERTa-v3-large) and all training data are English.
-- **NER trained on silver labels**. The NER head was trained on SpanMarker-generated annotations, not human-annotated gold data. Performance on domains far from the training corpus may degrade.
-- **CLS trained on dialog data**. The CLS head classifies dialog acts (inform, request, question, etc.) and is optimized for conversational text. It may misclassify non-dialog text (news articles, documents).
-- **SRL requires predicate identification**. The SRL head requires a predicate token index as input. The demo uses POS=VERB to identify predicates, which misses nominal predicates and auxiliary constructions.
-- **DEP uses greedy argmax**. No MST (minimum spanning tree) decoding is applied — the output may not form a valid tree in all cases.
-- **transformers version pinned**. The model requires exactly `transformers==5.6.2`. Other versions produce incorrect outputs due to changes in DeBERTa's attention implementation.
+- **English only.** Encoder and training data are English.
+- **NER trained on silver labels.** Performance may degrade on domains far from the training corpus.
+- **CLS trained on dialog.** Optimized for conversational text; may misclassify news or documents.
+- **SRL requires predicate index.** The demo identifies predicates via POS=VERB, which misses nominal predicates.
+- **DEP uses greedy decoding.** No MST constraint — output may not form a valid tree in all cases.
+- **Requires transformers==5.6.2.** Other versions produce incorrect outputs.
 
 ## Model Family
 
@@ -551,7 +273,7 @@ head architectures, and run evaluation. Dependencies: `transformers==5.6.2`,
 | kniv-deberta-nlp-tier1-en-large | +Lemma, Morph, Keyword | Planned |
 | kniv-deberta-nlp-tier2-en-large | +Sentiment, Intent, Punct, Truecase | Planned |
 | kniv-deberta-nlp-tier3-en-large | +QA, NLI, RelEx, Events, STS | Planned |
-| kniv-deberta-nlp-base-en-base | Distilled student (DeBERTa-base) | Planned |
+| kniv-deberta-nlp-base-en-base | Distilled student | Planned |
 
 ## Citation
 
