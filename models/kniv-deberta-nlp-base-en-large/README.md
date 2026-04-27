@@ -72,6 +72,7 @@ model-index:
           type: token-classification
           name: Semantic Role Labeling
         dataset:
+          type: conll2012_ontonotesv5
           name: PropBank EWT
           split: test
         metrics:
@@ -81,6 +82,7 @@ model-index:
           type: text-classification
           name: Dialog Act Classification
         dataset:
+          type: schema_guided_dstc8
           name: SGD + GPT
           split: dev
         metrics:
