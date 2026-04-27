@@ -16,8 +16,6 @@ tags:
   - rustic
 datasets:
   - universal-dependencies/universal_dependencies
-  - tner/ontonotes5
-  - eriktks/conll2003
 pipeline_tag: token-classification
 model-index:
   - name: kniv-deberta-nlp-base-en-large
