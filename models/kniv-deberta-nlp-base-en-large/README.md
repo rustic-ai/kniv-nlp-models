@@ -121,7 +121,9 @@ python models/kniv-deberta-nlp-base-en-large/export_onnx.py
 
 ```python
 import onnxruntime as ort
+from transformers import AutoTokenizer
 
+tokenizer = AutoTokenizer.from_pretrained("dragonscale-ai/kniv-deberta-nlp-base-en-large")
 session = ort.InferenceSession("onnx/cascade.onnx")
 pos, ner, arc, label, srl, cls = session.run(None, {
     "input_ids": input_ids,           # int64 [batch, seq]

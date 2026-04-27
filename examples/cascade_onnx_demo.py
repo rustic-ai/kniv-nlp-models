@@ -191,7 +191,7 @@ def main():
 
     print(f"Loading ONNX model from {args.onnx}...")
     session = ort.InferenceSession(args.onnx)
-    tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v3-large")
+    tokenizer = AutoTokenizer.from_pretrained("dragonscale-ai/kniv-deberta-nlp-base-en-large")
     print(f"Loaded. Providers: {session.get_providers()}")
 
     texts = [args.text] if args.text else SAMPLES

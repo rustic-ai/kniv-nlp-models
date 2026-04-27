@@ -174,7 +174,7 @@ def load_model(model_dir: str, device: str = "cpu"):
     model_dir = Path(model_dir)
     print(f"Loading model from {model_dir}...")
 
-    tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v3-large")
+    tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
     encoder = AutoModel.from_pretrained("microsoft/deberta-v3-large")
     H = encoder.config.hidden_size
     NL = encoder.config.num_hidden_layers + 1
