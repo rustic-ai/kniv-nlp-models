@@ -16,6 +16,8 @@ tags:
   - rustic
 datasets:
   - universal-dependencies/universal_dependencies
+  - dragonscale-ai/kniv-corpus-en
+  - google-research-datasets/dstc8-schema-guided-dialogue
 pipeline_tag: token-classification
 model-index:
   - name: kniv-deberta-nlp-base-en-large
