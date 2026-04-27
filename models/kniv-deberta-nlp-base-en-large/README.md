@@ -107,7 +107,7 @@ Part of the [Rustic](https://rustic.ai) initiative by
 | Training data | [dragonscale-ai/kniv-corpus-en](https://huggingface.co/datasets/dragonscale-ai/kniv-corpus-en) |
 | Demo | [`examples/cascade_demo.py`](https://github.com/rustic-ai/kniv-nlp-models/blob/main/examples/cascade_demo.py) |
 | Parameters | 443M (434M encoder + 9.5M heads) |
-| Download | 1.74 GB (PyTorch) / 1.78 GB (ONNX) |
+| Download | 1.74 GB (PyTorch) / 1.78 GB (ONNX FP32) / 654 MB (ONNX INT8) |
 | License | CC-BY-SA-4.0 |
 
 ## Quick Start
@@ -231,9 +231,13 @@ frozen final encoder to recover from minor forgetting.
 python models/kniv-deberta-nlp-base-en-large/export_onnx.py
 ```
 
-Exports a single `cascade.onnx` (1.78 GB) with all 5 heads. One call
-returns all 6 output tensors. Validated against PyTorch (max diff < 0.001
-across all outputs).
+Exports `cascade.onnx` (FP32) and `cascade-int8.onnx` (INT8 quantized)
+with all 5 heads. One call returns all 6 output tensors.
+
+| Variant | Size | Speed | Quality |
+|---------|------|-------|---------|
+| `cascade.onnx` (FP32) | 1,776 MB | baseline | reference |
+| `cascade-int8.onnx` (INT8) | 654 MB | ~2x faster | -0.2% POS accuracy |
 
 | Input | Shape | Description |
 |-------|-------|-------------|
