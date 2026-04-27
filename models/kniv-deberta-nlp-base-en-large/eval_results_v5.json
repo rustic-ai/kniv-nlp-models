@@ -1,0 +1,33 @@
+{
+  "pos": {
+    "score": 0.9765,
+    "metric": "accuracy",
+    "benchmark": "UD EWT test",
+    "n": 2077
+  },
+  "ner": {
+    "score": 0.8061,
+    "metric": "F1",
+    "benchmark": "SpanMarker silver test",
+    "n": 5000
+  },
+  "srl": {
+    "score": 0.8429,
+    "metric": "F1",
+    "benchmark": "PropBank EWT test",
+    "n": 1269
+  },
+  "dep": {
+    "score": 0.9436,
+    "metric": "UAS",
+    "las": 0.9231,
+    "benchmark": "UD EWT test",
+    "n": 2077
+  },
+  "cls": {
+    "score": 0.9509,
+    "metric": "macro_f1",
+    "benchmark": "SGD+GPT dev",
+    "n": 4000
+  }
+}
