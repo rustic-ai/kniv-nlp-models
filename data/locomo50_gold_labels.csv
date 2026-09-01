@@ -1,0 +1,51 @@
+dia_id,gold_cls,rationale
+D1:1,social,opening greeting + phatic "how have you been"
+D1:2,question,brief self-state then prompts for friend's news (the questions drive the turn)
+D1:3,inform,sharing personal news ("guess what I did yesterday")
+D1:4,question,reaction then info-seeking question
+D1:5,inform,telling friend about the experience
+D1:6,question,reactions then "What's it done for you?"
+D1:7,inform,answering the question with self-impact
+D1:8,question,reaction + compliment + question
+D1:9,inform,sharing future plans
+D1:10,question,reaction + question
+D1:11,inform,sharing what she's interested in pursuing
+D1:12,social,compliment dominates; "take a look" is a transitional appendix
+D1:13,question,thanks + new question about the painting
+D1:14,confirm,"Yeah" yes-answer with elaboration
+D1:15,social,compliment + appreciative observation
+D1:16,inform,sharing what painting means to her
+D1:17,social,closing turn with agreement + farewell announcement
+D1:18,social,closing turn (farewell + "talk to you soon")
+D10:1,social,pure greeting
+D10:2,question,opener + prompts for update
+D10:3,inform,extended personal news update
+D10:4,question,"Want to tell me a bit more about it?" — info-seeking via polite frame
+D10:5,inform,describing the activist group
+D10:6,question,reaction + "Have you been part of any events?"
+D10:7,inform,describing the parade event (third-party event she missed)
+D10:8,inform,reaction + sharing own beach trip news
+D10:9,question,reaction + two questions
+D10:10,inform,answering the question with anecdotes
+D10:11,question,reaction + question about traditions
+D10:12,inform,sharing family tradition
+D10:13,question,"What's your best camping memory?"
+D10:14,inform,sharing memory
+D10:15,question,"What did it look like?"
+D10:16,inform,descriptive answer
+D10:17,social,empathic exclamation
+D10:18,inform,sharing reflection on the experience
+D10:19,question,reaction + question
+D10:20,inform,sharing memory of daughter's first steps
+D10:21,social,sweet empathic reaction
+D10:22,confirm,"Yeah they sure are" — explicit agreement with elaboration
+D10:23,social,exclamation + compliment to family
+D10:24,social,thanks + warm acknowledgement
+D11:1,inform,greeting + sharing own news (concert + birthday)
+D11:2,question,reaction + compliment + "What concert was it?"
+D11:3,inform,answers the concert question with detail (questions at end are follow-up)
+D11:4,inform,reaction + transition + sharing pride parade news
+D11:5,question,reaction + "How did it feel being part of that community?"
+D11:6,inform,answering with feelings and describing the scene
+D11:7,question,multiple acts but the directional move is the question at end
+D11:8,inform,sharing artistic values + showing painting

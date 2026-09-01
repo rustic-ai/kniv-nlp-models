@@ -1,0 +1,101 @@
+dia_id,mode,gold,per_sentence_sets,union_set,set_size,gold_in_union
+D10:1,sent_nopunct,social,sent1: social | sent2: question+social,question+social,2,1
+D10:1,sent_punct,social,sent1: question+social | sent2: social,question+social,2,1
+D10:10,sent_nopunct,inform,sent1: inform | sent2: inform | sent3: inform+social,inform+social,2,1
+D10:10,sent_punct,inform,sent1: inform+social | sent2: inform | sent3: inform+social,inform+social,2,1
+D10:11,sent_nopunct,question,sent1: confirm | sent2: question | sent3: social+status,confirm+question+social+status,4,1
+D10:11,sent_punct,question,sent1: confirm+social | sent2: question | sent3: status,confirm+question+social+status,4,1
+D10:12,sent_nopunct,inform,sent1: question+social | sent2: inform+social | sent3: social,inform+question+social,3,1
+D10:12,sent_punct,inform,sent1: question | sent2: inform+social | sent3: social,inform+question+social,3,1
+D10:13,sent_nopunct,question,sent1: social | sent2: question,question+social,2,1
+D10:13,sent_punct,question,sent1: social | sent2: question,question+social,2,1
+D10:14,sent_nopunct,inform,sent1: inform | sent2: inform | sent3: inform+social | sent4: inform,inform+social,2,1
+D10:14,sent_punct,inform,sent1: inform | sent2: inform | sent3: inform+social | sent4: inform+social,inform+social,2,1
+D10:15,sent_nopunct,question,sent1: confirm | sent2: question,confirm+question,2,1
+D10:15,sent_punct,question,sent1: confirm+social | sent2: question,confirm+question+social,3,1
+D10:16,sent_nopunct,inform,sent1: inform,inform,1,1
+D10:16,sent_punct,inform,sent1: inform,inform,1,1
+D10:17,sent_nopunct,social,sent1: social | sent2: social,social,1,1
+D10:17,sent_punct,social,sent1: social | sent2: social,social,1,1
+D10:18,sent_nopunct,inform,sent1: inform+social | sent2: inform,inform+social,2,1
+D10:18,sent_punct,inform,sent1: inform+social | sent2: inform,inform+social,2,1
+D10:19,sent_nopunct,question,sent1: confirm+social | sent2: question,confirm+question+social,3,1
+D10:19,sent_punct,question,sent1: social | sent2: question,question+social,2,1
+D10:2,sent_nopunct,question,sent1: question+social | sent2: social | sent3: question | sent4: question+social,question+social,2,1
+D10:2,sent_punct,question,sent1: question+social | sent2: social | sent3: request+question+reject | sent4: question+social,question+reject+request+social,4,1
+D10:20,sent_nopunct,inform,sent1: inform | sent2: inform,inform,1,1
+D10:20,sent_punct,inform,sent1: inform+social | sent2: inform+social,inform+social,2,1
+D10:21,sent_nopunct,social,sent1: social | sent2: inform,inform+social,2,1
+D10:21,sent_punct,social,sent1: social | sent2: inform,inform+social,2,1
+D10:22,sent_nopunct,confirm,sent1: inform+status | sent2: inform+social,inform+social+status,3,0
+D10:22,sent_punct,confirm,sent1: confirm+social+status | sent2: inform+social,confirm+inform+social+status,4,1
+D10:23,sent_nopunct,social,sent1: social | sent2: social,social,1,1
+D10:23,sent_punct,social,sent1: social | sent2: social,social,1,1
+D10:24,sent_nopunct,social,sent1: question+social | sent2: social,question+social,2,1
+D10:24,sent_punct,social,sent1: social | sent2: social,social,1,1
+D10:3,sent_nopunct,inform,sent1: social | sent2: inform | sent3: inform+social | sent4: inform+social | sent5: social,inform+social,2,1
+D10:3,sent_punct,inform,sent1: social | sent2: inform | sent3: inform+social | sent4: social | sent5: confirm,confirm+inform+social,3,1
+D10:4,sent_nopunct,question,sent1: question+confirm+social | sent2: social | sent3: inform+question | sent4: question+social,confirm+inform+question+social,4,1
+D10:4,sent_punct,question,sent1: confirm+social | sent2: social | sent3: inform+question | sent4: question,confirm+inform+question+social,4,1
+D10:5,sent_nopunct,inform,sent1: social | sent2: inform+social | sent3: inform | sent4: inform+question,inform+question+social,3,1
+D10:5,sent_punct,inform,sent1: social | sent2: inform+social | sent3: inform | sent4: inform,inform+social,2,1
+D10:6,sent_nopunct,question,sent1: social | sent2: inform+social | sent3: question,inform+question+social,3,1
+D10:6,sent_punct,question,sent1: social | sent2: inform+social | sent3: question,inform+question+social,3,1
+D10:7,sent_nopunct,inform,sent1: social | sent2: inform+question+social | sent3: inform | sent4: request,inform+question+request+social,4,1
+D10:7,sent_punct,inform,sent1: social | sent2: inform+question+social | sent3: inform | sent4: request,inform+question+request+social,4,1
+D10:8,sent_nopunct,inform,sent1: question+social | sent2: inform+social | sent3: inform+social | sent4: confirm+social | sent5: social,confirm+inform+question+social,4,1
+D10:8,sent_punct,inform,sent1: question+social | sent2: inform+social | sent3: inform+social | sent4: confirm+social | sent5: social,confirm+inform+question+social,4,1
+D10:9,sent_nopunct,question,sent1: confirm | sent2: question | sent3: question,confirm+question,2,1
+D10:9,sent_punct,question,sent1: confirm+social | sent2: question | sent3: question,confirm+question+social,3,1
+D11:1,sent_nopunct,inform,sent1: question+social | sent2: inform+social | sent3: inform+social | sent4: inform+social,inform+question+social,3,1
+D11:1,sent_punct,inform,sent1: question+social | sent2: social | sent3: inform+social | sent4: inform+social,inform+question+social,3,1
+D11:2,sent_nopunct,question,sent1: confirm | sent2: social | sent3: inform+request | sent4: social,confirm+inform+request+social,4,0
+D11:2,sent_punct,question,sent1: confirm | sent2: social | sent3: request | sent4: social,confirm+request+social,3,0
+D11:3,sent_nopunct,inform,sent1: question+social | sent2: question+social | sent3: inform+social | sent4: question | sent5: request+question,inform+question+request+social,4,1
+D11:3,sent_punct,inform,sent1: social | sent2: question+social | sent3: inform+social | sent4: question | sent5: request,inform+question+request+social,4,1
+D11:4,sent_nopunct,inform,sent1: social | sent2: inform | sent3: inform+social | sent4: inform,inform+social,2,1
+D11:4,sent_punct,inform,sent1: social | sent2: inform+social | sent3: inform+social | sent4: inform,inform+social,2,1
+D11:5,sent_nopunct,question,sent1: social | sent2: question,question+social,2,1
+D11:5,sent_punct,question,sent1: social | sent2: question,question+social,2,1
+D11:6,sent_nopunct,inform,sent1: social | sent2: request | sent3: inform,inform+request+social,3,1
+D11:6,sent_punct,inform,sent1: social | sent2: request | sent3: inform,inform+request+social,3,1
+D11:7,sent_nopunct,question,sent1: question+social | sent2: confirm | sent3: question+social | sent4: inform | sent5: question,confirm+inform+question+social,4,1
+D11:7,sent_punct,question,sent1: question+social | sent2: confirm | sent3: social | sent4: inform | sent5: question,confirm+inform+question+social,4,1
+D11:8,sent_nopunct,inform,sent1: confirm+social | sent2: inform | sent3: inform | sent4: inform+request+social,confirm+inform+request+social,4,1
+D11:8,sent_punct,inform,sent1: social | sent2: inform | sent3: inform | sent4: social,inform+social,2,1
+D1:1,sent_nopunct,social,sent1: social | sent2: social | sent3: question,question+social,2,1
+D1:1,sent_punct,social,sent1: social | sent2: social | sent3: question,question+social,2,1
+D1:10,sent_nopunct,question,sent1: question+social | sent2: question | sent3: question+social,question+social,2,1
+D1:10,sent_punct,question,sent1: question+social | sent2: request+question | sent3: question,question+request+social,3,1
+D1:11,sent_nopunct,inform,sent1: inform+request+social,inform+request+social,3,1
+D1:11,sent_punct,inform,sent1: request+question+social,question+request+social,3,0
+D1:12,sent_nopunct,social,sent1: social | sent2: inform+question+social | sent3: social,inform+question+social,3,1
+D1:12,sent_punct,social,sent1: social | sent2: question+social | sent3: social,question+social,2,1
+D1:13,sent_nopunct,question,sent1: social | sent2: confirm+social | sent3: question,confirm+question+social,3,1
+D1:13,sent_punct,question,sent1: social | sent2: confirm+social | sent3: question,confirm+question+social,3,1
+D1:14,sent_nopunct,confirm,sent1: inform | sent2: inform+social,inform+social,2,0
+D1:14,sent_punct,confirm,sent1: inform+social | sent2: social,inform+social,2,0
+D1:15,sent_nopunct,social,sent1: social | sent2: inform | sent3: inform,inform+social,2,1
+D1:15,sent_punct,social,sent1: social | sent2: inform+social | sent3: inform,inform+social,2,1
+D1:16,sent_nopunct,inform,sent1: question+social | sent2: inform+social | sent3: social,inform+question+social,3,1
+D1:16,sent_punct,inform,sent1: social | sent2: inform+social | sent3: social,inform+social,2,1
+D1:17,sent_nopunct,social,sent1: question+social | sent2: inform | sent3: question+social,inform+question+social,3,1
+D1:17,sent_punct,social,sent1: question+social | sent2: inform+request+social | sent3: question+social,inform+question+request+social,4,1
+D1:18,sent_nopunct,social,sent1: question+confirm | sent2: social | sent3: inform+request | sent4: social,confirm+inform+question+request+social,5,1
+D1:18,sent_punct,social,sent1: question+confirm | sent2: social | sent3: inform+request | sent4: social,confirm+inform+question+request+social,5,1
+D1:2,sent_nopunct,question,sent1: question+social | sent2: social | sent3: inform | sent4: question | sent5: social,inform+question+social,3,1
+D1:2,sent_punct,question,sent1: question+social | sent2: social | sent3: inform+social | sent4: question | sent5: request+social,inform+question+request+social,4,1
+D1:3,sent_nopunct,inform,sent1: inform,inform,1,1
+D1:3,sent_punct,inform,sent1: inform+social,inform+social,2,1
+D1:4,sent_nopunct,question,sent1: question+confirm+social | sent2: question | sent3: question,confirm+question+social,3,1
+D1:4,sent_punct,question,sent1: confirm+social | sent2: question | sent3: question,confirm+question+social,3,1
+D1:5,sent_nopunct,inform,sent1: social | sent2: social,social,1,0
+D1:5,sent_punct,inform,sent1: social | sent2: social,social,1,0
+D1:6,sent_nopunct,question,sent1: social | sent2: social | sent3: question+social,question+social,2,1
+D1:6,sent_punct,question,sent1: social | sent2: social | sent3: question,question+social,2,1
+D1:7,sent_nopunct,inform,sent1: inform,inform,1,1
+D1:7,sent_punct,inform,sent1: inform+social,inform+social,2,1
+D1:8,sent_nopunct,question,sent1: social | sent2: social | sent3: question+social,question+social,2,1
+D1:8,sent_punct,question,sent1: confirm+social | sent2: social | sent3: request,confirm+request+social,3,0
+D1:9,sent_nopunct,inform,sent1: social,social,1,0
+D1:9,sent_punct,inform,sent1: social,social,1,0

@@ -1,0 +1,25 @@
+{
+  "model": "DeBERTa-v3-base",
+  "device": "cpu",
+  "input": "/home/rohit/work/dragonscale/uniko2/data/longmemeval_s_cleaned.json",
+  "n_sentences": 500,
+  "elapsed_sec": 13.99,
+  "sentences_per_sec": 35.7,
+  "tokens_per_sec": 1071.0,
+  "avg_tokens_per_sentence": 30.0,
+  "truncation_rate": 0.028,
+  "cls_distribution": {
+    "inform": 199,
+    "question": 148,
+    "social": 106,
+    "request": 19,
+    "confirm": 18,
+    "status": 8,
+    "reject": 1,
+    "offer": 1
+  },
+  "verbs_per_sentence_mean": 4.49,
+  "entities_per_sentence_mean": 2.44,
+  "batch_size": 16,
+  "max_length": 128
+}
