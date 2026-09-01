@@ -58,3 +58,19 @@ Thumbs.db
 # Archives
 *.tar.gz
 *.zip
+
+# Backup / intermediate checkpoints
+*.pt.*
+*.bak
+
+# ONNX external-data blobs written to repo root
+*.data
+
+# Downloaded eval benchmarks (see models/download_benchmarks.py)
+data/benchmarks/
+
+# Third-party clone (PropBank frame files)
+data/propbank-frames/
+
+# Training console logs
+train_output.txt
