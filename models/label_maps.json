@@ -1,0 +1,65 @@
+{
+  "version": "v5",
+  "description": "Canonical label sets for the kniv cascade family. List position is the model's class index; clients derive label-to-id maps by enumeration.",
+  "pos": [
+    "ADJ", "ADP", "ADV", "AUX", "CCONJ", "DET", "INTJ", "NOUN", "NUM",
+    "PART", "PRON", "PROPN", "PUNCT", "SCONJ", "SYM", "VERB", "X"
+  ],
+  "ner": [
+    "O",
+    "B-PERSON", "I-PERSON",
+    "B-NORP", "I-NORP",
+    "B-FAC", "I-FAC",
+    "B-ORG", "I-ORG",
+    "B-GPE", "I-GPE",
+    "B-LOC", "I-LOC",
+    "B-PRODUCT", "I-PRODUCT",
+    "B-EVENT", "I-EVENT",
+    "B-WORK_OF_ART", "I-WORK_OF_ART",
+    "B-LAW", "I-LAW",
+    "B-LANGUAGE", "I-LANGUAGE",
+    "B-DATE", "I-DATE",
+    "B-TIME", "I-TIME",
+    "B-PERCENT", "I-PERCENT",
+    "B-MONEY", "I-MONEY",
+    "B-QUANTITY", "I-QUANTITY",
+    "B-ORDINAL", "I-ORDINAL",
+    "B-CARDINAL", "I-CARDINAL"
+  ],
+  "srl": [
+    "O", "V",
+    "B-ARG0", "I-ARG0",
+    "B-ARG1", "I-ARG1",
+    "B-ARG2", "I-ARG2",
+    "B-ARG3", "I-ARG3",
+    "B-ARG4", "I-ARG4",
+    "B-ARGM-TMP", "I-ARGM-TMP",
+    "B-ARGM-LOC", "I-ARGM-LOC",
+    "B-ARGM-MNR", "I-ARGM-MNR",
+    "B-ARGM-CAU", "I-ARGM-CAU",
+    "B-ARGM-PRP", "I-ARGM-PRP",
+    "B-ARGM-NEG", "I-ARGM-NEG",
+    "B-ARGM-ADV", "I-ARGM-ADV",
+    "B-ARGM-DIR", "I-ARGM-DIR",
+    "B-ARGM-DIS", "I-ARGM-DIS",
+    "B-ARGM-EXT", "I-ARGM-EXT",
+    "B-ARGM-MOD", "I-ARGM-MOD",
+    "B-ARGM-PRD", "I-ARGM-PRD",
+    "B-ARGM-GOL", "I-ARGM-GOL",
+    "B-ARGM-COM", "I-ARGM-COM",
+    "B-ARGM-REC", "I-ARGM-REC"
+  ],
+  "cls": [
+    "inform", "request", "question", "confirm",
+    "reject", "offer", "social", "status"
+  ],
+  "deprel": [
+    "root", "acl", "acl:relcl", "advcl", "advcl:relcl", "advmod", "amod", "appos",
+    "aux", "aux:pass", "case", "cc", "cc:preconj", "ccomp", "compound", "compound:prt",
+    "conj", "cop", "csubj", "csubj:outer", "csubj:pass", "dep", "det", "det:predet",
+    "discourse", "dislocated", "expl", "fixed", "flat", "goeswith", "iobj", "list", "mark",
+    "nmod", "nmod:desc", "nmod:npmod", "nmod:poss", "nmod:tmod", "nsubj", "nsubj:outer",
+    "nsubj:pass", "nummod", "obj", "obl", "obl:agent", "obl:npmod", "obl:tmod",
+    "orphan", "parataxis", "punct", "reparandum", "vocative", "xcomp"
+  ]
+}
