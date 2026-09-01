@@ -1,0 +1,52 @@
+{
+  "encoder": "DeBERTa-v3-base",
+  "hidden_dim": 768,
+  "layers": 12,
+  "max_length": 128,
+  "opset_version": 14,
+  "files": {
+    "cascade.onnx": {
+      "size_mb": 799.3
+    },
+    "cascade-int8.onnx": {
+      "size_mb": 261.8
+    }
+  },
+  "validation": {
+    "fp32": {
+      "max_diff_overall": 8.96453857421875e-05,
+      "per_output": {
+        "pos_logits": 4.887580871582031e-06,
+        "ner_logits": 5.7220458984375e-05,
+        "arc_scores": 8.96453857421875e-05,
+        "label_scores": 4.100799560546875e-05,
+        "srl_logits": 3.814697265625e-05,
+        "cls_logits": 9.059906005859375e-06
+      }
+    },
+    "int8": {
+      "max_diff_overall": 26.473796844482422,
+      "per_output": {
+        "pos_logits": 3.7207376956939697,
+        "ner_logits": 26.020715713500977,
+        "arc_scores": 26.473796844482422,
+        "label_scores": 19.136280059814453,
+        "srl_logits": 9.588688850402832,
+        "cls_logits": 2.949235439300537
+      }
+    }
+  },
+  "inputs": {
+    "input_ids": "int64 [batch, seq]",
+    "attention_mask": "int64 [batch, seq]",
+    "predicate_idx": "int64 [batch] \u2014 SRL predicate token index (0 if unused)"
+  },
+  "outputs": {
+    "pos_logits": "float32 [batch, seq, 17]",
+    "ner_logits": "float32 [batch, seq, 37]",
+    "arc_scores": "float32 [batch, seq, seq] \u2014 DEP head selection",
+    "label_scores": "float32 [batch, seq, seq, 53] \u2014 DEP relation labels",
+    "srl_logits": "float32 [batch, seq, 42]",
+    "cls_logits": "float32 [batch, 8]"
+  }
+}

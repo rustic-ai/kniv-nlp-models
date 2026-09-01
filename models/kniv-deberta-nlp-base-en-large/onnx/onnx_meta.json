@@ -1,0 +1,19 @@
+{
+  "file": "cascade.onnx",
+  "size_mb": 1775.7,
+  "max_length": 128,
+  "opset_version": 14,
+  "inputs": {
+    "input_ids": "int64 [batch, seq]",
+    "attention_mask": "int64 [batch, seq]",
+    "predicate_idx": "int64 [batch] \u2014 token index of SRL predicate (0 if no SRL needed)"
+  },
+  "outputs": {
+    "pos_logits": "float32 [batch, seq, 17]",
+    "ner_logits": "float32 [batch, seq, 37]",
+    "arc_scores": "float32 [batch, seq, seq] \u2014 DEP head selection",
+    "label_scores": "float32 [batch, seq, seq, 53] \u2014 DEP relation labels",
+    "srl_logits": "float32 [batch, seq, 42]",
+    "cls_logits": "float32 [batch, 8]"
+  }
+}
