@@ -1,0 +1,50 @@
+{
+  "onnx-int8_cuda": {
+    "pos": {
+      "score": 0.9547,
+      "metric": "accuracy",
+      "benchmark": "UD English EWT test",
+      "n": 2077,
+      "standard": true
+    },
+    "ner_conll03": {
+      "score": 0.6193,
+      "metric": "F1",
+      "benchmark": "CoNLL-2003 test",
+      "n": 3453,
+      "standard": true,
+      "note": "OntoNotes\u2192CoNLL type mapping (18\u21924 types, numeric entities dropped)"
+    },
+    "dep": {
+      "score": 0.9178,
+      "las": 0.8908,
+      "metric": "UAS",
+      "benchmark": "UD English EWT test",
+      "n": 2077,
+      "standard": true
+    },
+    "srl": {
+      "score": 0.7906,
+      "metric": "F1",
+      "benchmark": "PropBank EWT test",
+      "n": 1269,
+      "standard": true
+    },
+    "cls_dailydialog": {
+      "score": 0.5742,
+      "f1": 0.4015,
+      "metric": "accuracy",
+      "benchmark": "DailyDialog test",
+      "n": 7740,
+      "standard": true,
+      "note": "8\u21924 label mapping"
+    },
+    "cls_internal": {
+      "score": 0.8067,
+      "metric": "macro_f1",
+      "benchmark": "SGD+GPT dev (internal)",
+      "n": 4000,
+      "standard": false
+    }
+  }
+}

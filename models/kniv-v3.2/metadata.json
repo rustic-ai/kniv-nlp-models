@@ -1,0 +1,36 @@
+{
+  "heads": {
+    "pos": {
+      "score": 0.966,
+      "metric": "accuracy"
+    },
+    "ner": {
+      "score": 0.8597,
+      "metric": "F1"
+    },
+    "srl": {
+      "score": 0.802,
+      "metric": "F1"
+    },
+    "dep": {
+      "score": 0.922,
+      "metric": "UAS"
+    },
+    "cls": {
+      "score": 0.9301,
+      "metric": "macro_f1",
+      "labels": [
+        "inform",
+        "request",
+        "question",
+        "confirm",
+        "reject",
+        "offer",
+        "social",
+        "status"
+      ]
+    }
+  },
+  "encoder": "DeBERTa-v3-large (SRL-tuned)",
+  "version": "v3.2_ner860"
+}

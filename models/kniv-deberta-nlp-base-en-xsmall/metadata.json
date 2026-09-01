@@ -1,0 +1,77 @@
+{
+  "version": "v2",
+  "encoder": "DeBERTa-v3-xsmall",
+  "encoder_hidden_dim": 384,
+  "encoder_layers": 12,
+  "params_total_millions": 74.7,
+  "params_encoder_millions": 70.7,
+  "params_heads_millions": 4.0,
+  "transformers": "5.6.2",
+  "teacher": "dragonscale-ai/kniv-deberta-nlp-base-en-large",
+  "compression_ratio": 5.9,
+  "training": {
+    "stage1": {
+      "method": "distillation",
+      "losses": [
+        "logit_kl",
+        "hard_ce",
+        "hidden_state_mse",
+        "rdrop"
+      ]
+    },
+    "stage2": {
+      "method": "gold + teacher_silver fine-tune",
+      "pattern": "C (sequential SRL \u2192 frozen-encoder CLS)"
+    }
+  },
+  "heads": {
+    "pos": {
+      "score": 0.9628,
+      "metric": "accuracy",
+      "benchmark": "UD English EWT test",
+      "n": 2077,
+      "status": "completed"
+    },
+    "ner": {
+      "score": 0.7738,
+      "metric": "F1",
+      "benchmark": "OntoNotes 5.0 test",
+      "n": 8262,
+      "conll2003_score": 0.7738,
+      "status": "completed"
+    },
+    "dep": {
+      "score": 0.9417,
+      "las": 0.9201,
+      "metric": "UAS",
+      "benchmark": "UD English EWT test",
+      "n": 2077,
+      "status": "completed"
+    },
+    "srl": {
+      "score": 0.8289,
+      "metric": "F1",
+      "benchmark": "PropBank EWT test",
+      "n": 1269,
+      "status": "completed"
+    },
+    "cls": {
+      "score": 0.9376,
+      "metric": "macro_f1",
+      "benchmark": "SGD+GPT dev",
+      "n": 4000,
+      "labels": [
+        "inform",
+        "request",
+        "question",
+        "confirm",
+        "reject",
+        "offer",
+        "social",
+        "status"
+      ],
+      "status": "completed"
+    }
+  },
+  "checkpoint_size_mb": 298.8
+}
