@@ -1,0 +1,18 @@
+{
+  "model": "DeBERTa-v3-base",
+  "device": "cuda:0",
+  "n_sentences_with_verbs": 1907,
+  "n_pairs": 9195,
+  "avg_verbs_per_sentence": 4.82,
+  "phase_a_pos_prepass_sec": 7.275,
+  "option1_per_sentence_fanout": {
+    "elapsed_sec": 28.146,
+    "pairs_per_sec": 326.7
+  },
+  "option2_cross_sentence_packing": {
+    "elapsed_sec": 18.227,
+    "pairs_per_sec": 504.5,
+    "batch_size": 128
+  },
+  "speedup_opt2_over_opt1": 1.54
+}

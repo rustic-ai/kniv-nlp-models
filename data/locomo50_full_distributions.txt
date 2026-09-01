@@ -1,0 +1,1034 @@
+
+D1:1 [Caroline] gold=social
+  message: "Hey Mel! Good to see you! How have you been?"
+  WHOLE TURN (with punct):
+    question=0.828 social=0.171 inform=0.000 request=0.000 offer=0.000 status=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=0.844 social=0.156 request=0.000 inform=0.000 offer=0.000 status=0.000 reject=0.000 confirm=0.000
+  PER-SENTENCE (with punct):
+    1. "Hey Mel!"
+       social=0.818 question=0.178 confirm=0.002 inform=0.001 request=0.000 reject=0.000 offer=0.000 status=0.000
+    2. "Good to see you!"
+       social=0.951 status=0.018 offer=0.018 confirm=0.011 question=0.001 request=0.001 inform=0.000 reject=0.000
+    3. "How have you been?"
+       question=0.848 request=0.141 social=0.009 inform=0.002 offer=0.000 reject=0.000 status=0.000 confirm=0.000
+  PER-SENTENCE (no punct):
+    1. "Hey Mel"
+       social=0.844 question=0.123 request=0.016 confirm=0.015 inform=0.001 offer=0.001 reject=0.000 status=0.000
+    2. "Good to see you"
+       social=0.703 status=0.157 offer=0.096 confirm=0.030 request=0.010 reject=0.002 question=0.001 inform=0.001
+    3. "How have you been"
+       question=0.927 social=0.044 request=0.025 inform=0.003 reject=0.000 offer=0.000 status=0.000 confirm=0.000
+
+D1:2 [Melanie] gold=question
+  message: "Hey Caroline! Good to see you! I'm swamped with the kids & work. What's up with you? Anything new?"
+  WHOLE TURN (with punct):
+    question=0.898 social=0.102 inform=0.000 request=0.000 status=0.000 reject=0.000 confirm=0.000 offer=0.000
+  WHOLE TURN (no punct):
+    question=0.942 social=0.057 inform=0.001 status=0.000 request=0.000 reject=0.000 confirm=0.000 offer=0.000
+  PER-SENTENCE (with punct):
+    1. "Hey Caroline!"
+       question=0.565 social=0.429 confirm=0.003 inform=0.001 request=0.001 reject=0.000 offer=0.000 status=0.000
+    2. "Good to see you!"
+       social=0.951 status=0.018 offer=0.018 confirm=0.011 question=0.001 request=0.001 inform=0.000 reject=0.000
+    3. "I'm swamped with the kids & work."
+       inform=0.562 social=0.361 question=0.074 reject=0.002 status=0.001 confirm=0.000 request=0.000 offer=0.000
+    4. "What's up with you?"
+       question=0.968 social=0.015 inform=0.008 request=0.005 reject=0.003 status=0.000 offer=0.000 confirm=0.000
+    5. "Anything new?"
+       social=0.618 request=0.297 question=0.067 reject=0.008 status=0.007 offer=0.002 inform=0.000 confirm=0.000
+  PER-SENTENCE (no punct):
+    1. "Hey Caroline"
+       question=0.744 social=0.233 confirm=0.014 request=0.009 inform=0.001 offer=0.000 reject=0.000 status=0.000
+    2. "Good to see you"
+       social=0.703 status=0.157 offer=0.096 confirm=0.030 request=0.010 reject=0.002 question=0.001 inform=0.001
+    3. "I'm swamped with the kids & work"
+       inform=0.893 social=0.071 question=0.034 reject=0.001 status=0.000 confirm=0.000 request=0.000 offer=0.000
+    4. "What's up with you"
+       question=0.835 social=0.159 inform=0.005 request=0.000 reject=0.000 status=0.000 offer=0.000 confirm=0.000
+    5. "Anything new"
+       social=0.607 question=0.158 status=0.084 inform=0.062 request=0.046 reject=0.035 confirm=0.007 offer=0.001
+
+D1:3 [Caroline] gold=inform
+  message: "I went to a LGBTQ support group yesterday and it was so powerful."
+  WHOLE TURN (with punct):
+    inform=0.757 social=0.212 question=0.029 confirm=0.003 request=0.000 offer=0.000 reject=0.000 status=0.000
+  WHOLE TURN (no punct):
+    inform=0.877 social=0.111 question=0.012 confirm=0.000 reject=0.000 offer=0.000 request=0.000 status=0.000
+  PER-SENTENCE (with punct):
+    1. "I went to a LGBTQ support group yesterday and it was so powerful."
+       inform=0.757 social=0.212 question=0.029 confirm=0.003 request=0.000 offer=0.000 reject=0.000 status=0.000
+  PER-SENTENCE (no punct):
+    1. "I went to a LGBTQ support group yesterday and it was so powerful"
+       inform=0.877 social=0.111 question=0.012 confirm=0.000 reject=0.000 offer=0.000 request=0.000 status=0.000
+
+D1:4 [Melanie] gold=question
+  message: "Wow, that's cool, Caroline! What happened that was so awesome? Did you hear any inspiring stories?"
+  WHOLE TURN (with punct):
+    question=0.897 social=0.103 inform=0.000 request=0.000 offer=0.000 status=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=0.980 social=0.020 inform=0.000 offer=0.000 request=0.000 status=0.000 confirm=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Wow, that's cool, Caroline!"
+       social=0.497 confirm=0.489 question=0.013 offer=0.000 request=0.000 status=0.000 inform=0.000 reject=0.000
+    2. "What happened that was so awesome?"
+       question=0.991 social=0.007 inform=0.001 request=0.000 status=0.000 confirm=0.000 offer=0.000 reject=0.000
+    3. "Did you hear any inspiring stories?"
+       question=0.882 social=0.091 confirm=0.024 inform=0.001 request=0.001 status=0.000 offer=0.000 reject=0.000
+  PER-SENTENCE (no punct):
+    1. "Wow that's cool Caroline"
+       social=0.430 confirm=0.317 question=0.246 offer=0.005 inform=0.001 status=0.001 request=0.000 reject=0.000
+    2. "What happened that was so awesome"
+       question=0.761 inform=0.121 social=0.109 confirm=0.005 status=0.003 reject=0.000 request=0.000 offer=0.000
+    3. "Did you hear any inspiring stories"
+       question=0.823 social=0.159 confirm=0.016 inform=0.002 status=0.000 offer=0.000 request=0.000 reject=0.000
+
+D1:5 [Caroline] gold=inform
+  message: "The transgender stories were so inspiring! I was so happy and thankful for all the support."
+  WHOLE TURN (with punct):
+    social=0.963 inform=0.036 question=0.001 confirm=0.001 reject=0.000 status=0.000 offer=0.000 request=0.000
+  WHOLE TURN (no punct):
+    social=0.939 inform=0.060 question=0.001 confirm=0.000 reject=0.000 status=0.000 offer=0.000 request=0.000
+  PER-SENTENCE (with punct):
+    1. "The transgender stories were so inspiring!"
+       social=0.810 confirm=0.138 inform=0.034 question=0.018 status=0.000 offer=0.000 request=0.000 reject=0.000
+    2. "I was so happy and thankful for all the support."
+       social=0.998 inform=0.001 question=0.000 confirm=0.000 reject=0.000 status=0.000 offer=0.000 request=0.000
+  PER-SENTENCE (no punct):
+    1. "The transgender stories were so inspiring"
+       social=0.731 inform=0.154 confirm=0.105 question=0.009 status=0.000 request=0.000 reject=0.000 offer=0.000
+    2. "I was so happy and thankful for all the support"
+       social=0.994 inform=0.004 question=0.001 confirm=0.000 reject=0.000 status=0.000 offer=0.000 request=0.000
+
+D1:6 [Melanie] gold=question
+  message: "Wow, love that painting! So cool you found such a helpful group. What's it done for you?"
+  WHOLE TURN (with punct):
+    social=0.584 question=0.414 request=0.002 offer=0.000 status=0.000 inform=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=0.551 social=0.448 inform=0.000 request=0.000 status=0.000 offer=0.000 confirm=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Wow, love that painting!"
+       social=0.906 confirm=0.094 question=0.000 status=0.000 inform=0.000 offer=0.000 request=0.000 reject=0.000
+    2. "So cool you found such a helpful group."
+       social=0.989 confirm=0.005 status=0.004 question=0.001 offer=0.000 inform=0.000 request=0.000 reject=0.000
+    3. "What's it done for you?"
+       question=0.708 social=0.187 request=0.095 inform=0.005 reject=0.003 status=0.001 offer=0.000 confirm=0.000
+  PER-SENTENCE (no punct):
+    1. "Wow love that painting"
+       social=0.925 confirm=0.075 status=0.000 question=0.000 inform=0.000 offer=0.000 request=0.000 reject=0.000
+    2. "So cool you found such a helpful group"
+       social=0.979 status=0.010 confirm=0.006 question=0.003 inform=0.002 offer=0.001 request=0.000 reject=0.000
+    3. "What's it done for you"
+       question=0.497 social=0.485 inform=0.016 request=0.001 status=0.001 reject=0.000 offer=0.000 confirm=0.000
+
+D1:7 [Caroline] gold=inform
+  message: "The support group has made me feel accepted and given me courage to embrace myself."
+  WHOLE TURN (with punct):
+    inform=0.645 social=0.235 request=0.104 question=0.007 status=0.007 reject=0.001 confirm=0.001 offer=0.001
+  WHOLE TURN (no punct):
+    inform=0.828 social=0.124 request=0.032 status=0.007 question=0.007 offer=0.001 reject=0.000 confirm=0.000
+  PER-SENTENCE (with punct):
+    1. "The support group has made me feel accepted and given me courage to embrace myself."
+       inform=0.645 social=0.235 request=0.104 question=0.007 status=0.007 reject=0.001 confirm=0.001 offer=0.001
+  PER-SENTENCE (no punct):
+    1. "The support group has made me feel accepted and given me courage to embrace myself"
+       inform=0.828 social=0.124 request=0.032 status=0.007 question=0.007 offer=0.001 reject=0.000 confirm=0.000
+
+D1:8 [Melanie] gold=question
+  message: "That's really cool. You've got guts. What now?"
+  WHOLE TURN (with punct):
+    social=0.885 question=0.108 request=0.004 offer=0.002 status=0.001 confirm=0.000 inform=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=0.546 social=0.450 inform=0.002 status=0.001 request=0.001 offer=0.000 confirm=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "That's really cool."
+       social=0.585 confirm=0.415 question=0.000 offer=0.000 status=0.000 inform=0.000 request=0.000 reject=0.000
+    2. "You've got guts."
+       social=0.774 confirm=0.121 status=0.080 offer=0.011 reject=0.007 request=0.003 inform=0.003 question=0.003
+    3. "What now?"
+       request=0.685 reject=0.151 social=0.079 question=0.054 offer=0.016 status=0.008 confirm=0.004 inform=0.003
+  PER-SENTENCE (no punct):
+    1. "That's really cool"
+       social=0.811 confirm=0.189 inform=0.000 question=0.000 status=0.000 reject=0.000 offer=0.000 request=0.000
+    2. "You've got guts"
+       social=0.740 inform=0.084 status=0.066 confirm=0.045 reject=0.038 question=0.014 offer=0.008 request=0.005
+    3. "What now"
+       social=0.513 question=0.276 request=0.102 reject=0.055 inform=0.015 status=0.015 confirm=0.014 offer=0.010
+
+D1:9 [Caroline] gold=inform
+  message: "Gonna continue my edu and check out career options, which is pretty exciting!"
+  WHOLE TURN (with punct):
+    social=0.854 inform=0.072 question=0.037 confirm=0.020 request=0.016 reject=0.000 status=0.000 offer=0.000
+  WHOLE TURN (no punct):
+    social=0.681 inform=0.183 question=0.107 request=0.017 confirm=0.010 status=0.001 reject=0.000 offer=0.000
+  PER-SENTENCE (with punct):
+    1. "Gonna continue my edu and check out career options, which is pretty exciting!"
+       social=0.854 inform=0.072 question=0.037 confirm=0.020 request=0.016 reject=0.000 status=0.000 offer=0.000
+  PER-SENTENCE (no punct):
+    1. "Gonna continue my edu and check out career options which is pretty exciting"
+       social=0.681 inform=0.183 question=0.107 request=0.017 confirm=0.010 status=0.001 reject=0.000 offer=0.000
+
+D1:10 [Melanie] gold=question
+  message: "Wow, Caroline! What kinda jobs are you thinkin' of? Anything that stands out?"
+  WHOLE TURN (with punct):
+    question=0.848 social=0.150 inform=0.001 request=0.000 status=0.000 offer=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=0.947 social=0.051 inform=0.001 request=0.000 status=0.000 reject=0.000 confirm=0.000 offer=0.000
+  PER-SENTENCE (with punct):
+    1. "Wow, Caroline!"
+       social=0.632 question=0.353 confirm=0.013 request=0.001 inform=0.001 offer=0.000 reject=0.000 status=0.000
+    2. "What kinda jobs are you thinkin' of?"
+       question=0.694 request=0.285 social=0.021 inform=0.000 status=0.000 reject=0.000 offer=0.000 confirm=0.000
+    3. "Anything that stands out?"
+       question=0.815 social=0.149 request=0.025 reject=0.007 offer=0.003 inform=0.000 status=0.000 confirm=0.000
+  PER-SENTENCE (no punct):
+    1. "Wow Caroline"
+       question=0.518 social=0.459 confirm=0.013 offer=0.005 inform=0.002 request=0.002 status=0.000 reject=0.000
+    2. "What kinda jobs are you thinkin' of"
+       question=0.977 social=0.014 request=0.008 inform=0.001 reject=0.000 status=0.000 offer=0.000 confirm=0.000
+    3. "Anything that stands out"
+       question=0.669 social=0.214 reject=0.060 inform=0.041 confirm=0.006 offer=0.005 request=0.004 status=0.002
+
+D1:11 [Caroline] gold=inform
+  message: "I'm keen on counseling or working in mental health - I'd love to support those with similar issues."
+  WHOLE TURN (with punct):
+    request=0.262 question=0.253 social=0.210 inform=0.193 confirm=0.056 reject=0.026 offer=0.000 status=0.000
+  WHOLE TURN (no punct):
+    request=0.267 inform=0.255 social=0.216 question=0.182 reject=0.046 confirm=0.034 offer=0.000 status=0.000
+  PER-SENTENCE (with punct):
+    1. "I'm keen on counseling or working in mental health - I'd love to support those with similar issues."
+       request=0.262 question=0.253 social=0.210 inform=0.193 confirm=0.056 reject=0.026 offer=0.000 status=0.000
+  PER-SENTENCE (no punct):
+    1. "I'm keen on counseling or working in mental health - I'd love to support those with similar issues"
+       request=0.267 inform=0.255 social=0.216 question=0.182 reject=0.046 confirm=0.034 offer=0.000 status=0.000
+
+D1:12 [Melanie] gold=social
+  message: "You'd be a great counselor! Your empathy and understanding will really help the people you work with. By the way, take a look at this."
+  WHOLE TURN (with punct):
+    social=0.851 question=0.140 inform=0.005 request=0.003 confirm=0.000 offer=0.000 reject=0.000 status=0.000
+  WHOLE TURN (no punct):
+    social=0.780 question=0.213 inform=0.007 request=0.000 offer=0.000 confirm=0.000 status=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "You'd be a great counselor!"
+       social=0.976 confirm=0.019 question=0.004 offer=0.001 inform=0.000 request=0.000 status=0.000 reject=0.000
+    2. "Your empathy and understanding will really help the people you work with."
+       social=0.537 question=0.421 inform=0.041 confirm=0.001 reject=0.000 status=0.000 request=0.000 offer=0.000
+    3. "By the way, take a look at this."
+       social=0.889 request=0.058 question=0.049 offer=0.003 confirm=0.001 inform=0.001 status=0.000 reject=0.000
+  PER-SENTENCE (no punct):
+    1. "You'd be a great counselor"
+       social=0.954 confirm=0.040 inform=0.002 offer=0.002 question=0.002 request=0.001 reject=0.000 status=0.000
+    2. "Your empathy and understanding will really help the people you work with"
+       inform=0.458 question=0.307 social=0.234 reject=0.001 confirm=0.000 status=0.000 request=0.000 offer=0.000
+    3. "By the way take a look at this"
+       social=0.786 question=0.145 request=0.044 inform=0.015 offer=0.009 status=0.001 confirm=0.000 reject=0.000
+
+D1:13 [Caroline] gold=question
+  message: "Thanks, Melanie! That's really sweet. Is this your own painting?"
+  WHOLE TURN (with punct):
+    question=0.761 social=0.233 request=0.005 offer=0.001 inform=0.000 status=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=0.739 social=0.256 request=0.005 offer=0.001 inform=0.000 status=0.000 confirm=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Thanks, Melanie!"
+       social=0.994 confirm=0.006 question=0.000 reject=0.000 inform=0.000 request=0.000 offer=0.000 status=0.000
+    2. "That's really sweet."
+       social=0.644 confirm=0.351 question=0.004 inform=0.000 status=0.000 offer=0.000 reject=0.000 request=0.000
+    3. "Is this your own painting?"
+       question=0.916 request=0.079 social=0.005 offer=0.000 inform=0.000 reject=0.000 status=0.000 confirm=0.000
+  PER-SENTENCE (no punct):
+    1. "Thanks Melanie"
+       social=0.965 confirm=0.031 question=0.003 reject=0.001 inform=0.000 offer=0.000 request=0.000 status=0.000
+    2. "That's really sweet"
+       social=0.535 confirm=0.428 inform=0.032 question=0.004 status=0.000 reject=0.000 offer=0.000 request=0.000
+    3. "Is this your own painting"
+       question=0.932 social=0.036 request=0.027 inform=0.004 offer=0.001 confirm=0.000 status=0.000 reject=0.000
+
+D1:14 [Melanie] gold=confirm
+  message: "Yeah, I painted that lake sunrise last year! It's special to me."
+  WHOLE TURN (with punct):
+    social=0.762 inform=0.229 confirm=0.007 question=0.001 reject=0.000 request=0.000 offer=0.000 status=0.000
+  WHOLE TURN (no punct):
+    social=0.673 inform=0.315 confirm=0.008 question=0.004 reject=0.000 request=0.000 status=0.000 offer=0.000
+  PER-SENTENCE (with punct):
+    1. "Yeah, I painted that lake sunrise last year!"
+       social=0.606 inform=0.332 question=0.033 offer=0.017 confirm=0.011 request=0.001 status=0.000 reject=0.000
+    2. "It's special to me."
+       social=0.951 inform=0.023 confirm=0.021 reject=0.005 question=0.000 status=0.000 request=0.000 offer=0.000
+  PER-SENTENCE (no punct):
+    1. "Yeah I painted that lake sunrise last year"
+       inform=0.572 social=0.190 offer=0.159 question=0.049 confirm=0.027 request=0.003 status=0.001 reject=0.000
+    2. "It's special to me"
+       social=0.556 inform=0.379 reject=0.051 confirm=0.013 question=0.001 status=0.000 request=0.000 offer=0.000
+
+D1:15 [Caroline] gold=social
+  message: "Wow, Melanie! The colors really blend nicely. Painting looks like a great outlet for expressing yourself."
+  WHOLE TURN (with punct):
+    social=0.780 inform=0.214 question=0.004 request=0.001 confirm=0.000 offer=0.000 status=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    social=0.691 inform=0.301 question=0.004 request=0.002 offer=0.002 confirm=0.000 status=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Wow, Melanie!"
+       social=0.953 confirm=0.023 question=0.019 request=0.002 offer=0.001 inform=0.000 reject=0.000 status=0.000
+    2. "The colors really blend nicely."
+       social=0.669 inform=0.320 question=0.010 confirm=0.001 status=0.000 request=0.000 offer=0.000 reject=0.000
+    3. "Painting looks like a great outlet for expressing yourself."
+       inform=0.872 request=0.045 social=0.033 confirm=0.029 offer=0.015 question=0.005 status=0.001 reject=0.000
+  PER-SENTENCE (no punct):
+    1. "Wow Melanie"
+       social=0.931 confirm=0.032 question=0.017 request=0.007 inform=0.005 offer=0.004 status=0.003 reject=0.000
+    2. "The colors really blend nicely"
+       inform=0.842 social=0.152 question=0.004 status=0.001 confirm=0.000 reject=0.000 request=0.000 offer=0.000
+    3. "Painting looks like a great outlet for expressing yourself"
+       inform=0.934 request=0.032 social=0.023 confirm=0.005 offer=0.004 question=0.001 status=0.001 reject=0.000
+
+D1:16 [Melanie] gold=inform
+  message: "Thanks, Caroline! Painting's a fun way to express my feelings and get creative. It's a great way to relax after a long day."
+  WHOLE TURN (with punct):
+    social=0.877 inform=0.118 question=0.005 confirm=0.000 request=0.000 status=0.000 offer=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    social=0.765 inform=0.234 question=0.001 confirm=0.000 request=0.000 status=0.000 offer=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Thanks, Caroline!"
+       social=0.975 confirm=0.017 question=0.008 inform=0.000 reject=0.000 request=0.000 offer=0.000 status=0.000
+    2. "Painting's a fun way to express my feelings and get creative."
+       social=0.486 inform=0.453 question=0.048 status=0.008 offer=0.003 request=0.002 confirm=0.000 reject=0.000
+    3. "It's a great way to relax after a long day."
+       social=0.948 inform=0.030 question=0.010 confirm=0.010 status=0.001 request=0.001 offer=0.000 reject=0.000
+  PER-SENTENCE (no punct):
+    1. "Thanks Caroline"
+       social=0.519 question=0.391 confirm=0.089 inform=0.000 offer=0.000 request=0.000 reject=0.000 status=0.000
+    2. "Painting's a fun way to express my feelings and get creative"
+       inform=0.749 social=0.229 question=0.015 status=0.006 request=0.001 offer=0.000 confirm=0.000 reject=0.000
+    3. "It's a great way to relax after a long day"
+       social=0.900 inform=0.090 question=0.004 confirm=0.003 status=0.002 request=0.002 reject=0.000 offer=0.000
+
+D1:17 [Caroline] gold=social
+  message: "Totally agree, Mel. Relaxing and expressing ourselves is key. Well, I'm off to go do some research."
+  WHOLE TURN (with punct):
+    social=0.804 inform=0.120 question=0.069 request=0.006 confirm=0.001 reject=0.000 status=0.000 offer=0.000
+  WHOLE TURN (no punct):
+    social=0.570 question=0.221 inform=0.208 request=0.000 status=0.000 confirm=0.000 reject=0.000 offer=0.000
+  PER-SENTENCE (with punct):
+    1. "Totally agree, Mel."
+       question=0.543 social=0.375 confirm=0.077 inform=0.003 offer=0.001 request=0.000 status=0.000 reject=0.000
+    2. "Relaxing and expressing ourselves is key."
+       social=0.367 request=0.277 inform=0.204 status=0.124 confirm=0.014 offer=0.006 question=0.006 reject=0.003
+    3. "Well, I'm off to go do some research."
+       social=0.714 question=0.217 request=0.048 inform=0.020 reject=0.001 confirm=0.000 offer=0.000 status=0.000
+  PER-SENTENCE (no punct):
+    1. "Totally agree Mel"
+       question=0.516 social=0.366 confirm=0.072 offer=0.019 inform=0.017 status=0.008 request=0.002 reject=0.000
+    2. "Relaxing and expressing ourselves is key"
+       inform=0.727 social=0.152 status=0.053 request=0.043 reject=0.010 question=0.010 confirm=0.004 offer=0.001
+    3. "Well I'm off to go do some research"
+       question=0.628 social=0.295 inform=0.056 request=0.020 reject=0.000 confirm=0.000 status=0.000 offer=0.000
+
+D1:18 [Melanie] gold=social
+  message: "Yep, Caroline. Taking care of ourselves is vital. I'm off to go swimming with the kids. Talk to you soon!"
+  WHOLE TURN (with punct):
+    social=0.964 inform=0.030 question=0.004 request=0.002 confirm=0.000 status=0.000 reject=0.000 offer=0.000
+  WHOLE TURN (no punct):
+    social=0.970 inform=0.018 question=0.012 request=0.000 status=0.000 confirm=0.000 reject=0.000 offer=0.000
+  PER-SENTENCE (with punct):
+    1. "Yep, Caroline."
+       question=0.583 confirm=0.379 social=0.035 inform=0.002 request=0.001 offer=0.000 reject=0.000 status=0.000
+    2. "Taking care of ourselves is vital."
+       social=0.966 inform=0.020 request=0.012 question=0.002 reject=0.001 confirm=0.000 status=0.000 offer=0.000
+    3. "I'm off to go swimming with the kids."
+       request=0.685 inform=0.285 question=0.019 social=0.010 reject=0.000 confirm=0.000 status=0.000 offer=0.000
+    4. "Talk to you soon!"
+       social=0.999 inform=0.000 question=0.000 reject=0.000 request=0.000 status=0.000 offer=0.000 confirm=0.000
+  PER-SENTENCE (no punct):
+    1. "Yep Caroline"
+       question=0.779 confirm=0.203 social=0.015 inform=0.003 offer=0.000 status=0.000 request=0.000 reject=0.000
+    2. "Taking care of ourselves is vital"
+       social=0.806 inform=0.172 request=0.013 question=0.006 reject=0.001 confirm=0.001 status=0.000 offer=0.000
+    3. "I'm off to go swimming with the kids"
+       request=0.480 inform=0.472 question=0.035 social=0.013 reject=0.000 status=0.000 confirm=0.000 offer=0.000
+    4. "Talk to you soon"
+       social=0.993 inform=0.002 question=0.002 reject=0.001 offer=0.001 request=0.001 status=0.000 confirm=0.000
+
+D10:1 [Caroline] gold=social
+  message: "Hey Melanie! Just wanted to say hi!"
+  WHOLE TURN (with punct):
+    social=0.705 question=0.292 inform=0.002 request=0.001 confirm=0.000 reject=0.000 offer=0.000 status=0.000
+  WHOLE TURN (no punct):
+    social=0.736 question=0.262 inform=0.001 request=0.001 confirm=0.000 reject=0.000 offer=0.000 status=0.000
+  PER-SENTENCE (with punct):
+    1. "Hey Melanie!"
+       social=0.775 question=0.206 confirm=0.010 inform=0.005 request=0.002 reject=0.001 offer=0.000 status=0.000
+    2. "Just wanted to say hi!"
+       social=0.884 question=0.114 request=0.001 inform=0.001 confirm=0.000 reject=0.000 offer=0.000 status=0.000
+  PER-SENTENCE (no punct):
+    1. "Hey Melanie"
+       social=0.789 question=0.173 confirm=0.016 request=0.016 inform=0.005 reject=0.001 offer=0.000 status=0.000
+    2. "Just wanted to say hi"
+       social=0.775 question=0.221 request=0.002 inform=0.001 confirm=0.000 reject=0.000 offer=0.000 status=0.000
+
+D10:2 [Melanie] gold=question
+  message: "Hey Caroline! Good to talk to you again. What's up? Anything new since last time?"
+  WHOLE TURN (with punct):
+    question=0.939 social=0.061 inform=0.000 request=0.000 status=0.000 reject=0.000 offer=0.000 confirm=0.000
+  WHOLE TURN (no punct):
+    question=0.968 social=0.032 inform=0.000 request=0.000 status=0.000 reject=0.000 confirm=0.000 offer=0.000
+  PER-SENTENCE (with punct):
+    1. "Hey Caroline!"
+       question=0.565 social=0.429 confirm=0.003 inform=0.001 request=0.001 reject=0.000 offer=0.000 status=0.000
+    2. "Good to talk to you again."
+       social=0.983 status=0.006 offer=0.004 confirm=0.003 reject=0.002 question=0.001 request=0.001 inform=0.000
+    3. "What's up?"
+       request=0.413 question=0.299 reject=0.244 inform=0.034 social=0.008 status=0.001 offer=0.000 confirm=0.000
+    4. "Anything new since last time?"
+       social=0.511 question=0.481 request=0.006 reject=0.001 inform=0.001 status=0.000 confirm=0.000 offer=0.000
+  PER-SENTENCE (no punct):
+    1. "Hey Caroline"
+       question=0.744 social=0.233 confirm=0.014 request=0.009 inform=0.001 offer=0.000 reject=0.000 status=0.000
+    2. "Good to talk to you again"
+       social=0.874 status=0.063 offer=0.021 reject=0.015 confirm=0.009 request=0.009 question=0.007 inform=0.002
+    3. "What's up"
+       question=0.837 social=0.131 inform=0.014 reject=0.012 request=0.006 confirm=0.000 status=0.000 offer=0.000
+    4. "Anything new since last time"
+       social=0.556 question=0.367 inform=0.045 reject=0.023 status=0.005 request=0.002 confirm=0.002 offer=0.000
+
+D10:3 [Caroline] gold=inform
+  message: "Hey Mel! A lot's happened since we last chatted - I just joined a new LGBTQ activist group last Tues. I'm meeting so many cool people who are as passionate as I am about rights and community support. I'm giving my voice and making a real difference, plus it's fulfilling in so many ways. It's just great, you know?"
+  WHOLE TURN (with punct):
+    social=0.669 inform=0.214 question=0.106 confirm=0.011 reject=0.000 request=0.000 status=0.000 offer=0.000
+  WHOLE TURN (no punct):
+    social=0.788 inform=0.192 question=0.019 confirm=0.001 reject=0.000 request=0.000 status=0.000 offer=0.000
+  PER-SENTENCE (with punct):
+    1. "Hey Mel!"
+       social=0.818 question=0.178 confirm=0.002 inform=0.001 request=0.000 reject=0.000 offer=0.000 status=0.000
+    2. "A lot's happened since we last chatted - I just joined a new LGBTQ activist group last Tues."
+       inform=0.872 social=0.123 question=0.005 confirm=0.000 request=0.000 reject=0.000 offer=0.000 status=0.000
+    3. "I'm meeting so many cool people who are as passionate as I am about rights and community support."
+       inform=0.473 social=0.395 question=0.127 confirm=0.004 reject=0.000 request=0.000 status=0.000 offer=0.000
+    4. "I'm giving my voice and making a real difference, plus it's fulfilling in so many ways."
+       social=0.814 inform=0.126 question=0.042 reject=0.013 confirm=0.005 status=0.001 request=0.000 offer=0.000
+    5. "It's just great, you know?"
+       confirm=0.859 social=0.089 question=0.050 inform=0.001 request=0.000 reject=0.000 offer=0.000 status=0.000
+  PER-SENTENCE (no punct):
+    1. "Hey Mel"
+       social=0.844 question=0.123 request=0.016 confirm=0.015 inform=0.001 offer=0.001 reject=0.000 status=0.000
+    2. "A lot's happened since we last chatted - I just joined a new LGBTQ activist group last Tues"
+       inform=0.907 social=0.087 question=0.006 confirm=0.000 request=0.000 reject=0.000 offer=0.000 status=0.000
+    3. "I'm meeting so many cool people who are as passionate as I am about rights and community support"
+       social=0.484 inform=0.436 question=0.077 confirm=0.002 reject=0.000 request=0.000 status=0.000 offer=0.000
+    4. "I'm giving my voice and making a real difference plus it's fulfilling in so many ways"
+       inform=0.480 social=0.458 question=0.041 reject=0.016 status=0.004 confirm=0.001 request=0.000 offer=0.000
+    5. "It's just great you know"
+       social=0.856 confirm=0.110 inform=0.025 question=0.008 reject=0.001 status=0.000 request=0.000 offer=0.000
+
+D10:4 [Melanie] gold=request
+  message: "That's awesome, Caroline! Glad to hear you found a great group where you can have an impact. Bet it feels great to be able to speak your truth and stand up for what's right. Want to tell me a bit more about it?"
+  WHOLE TURN (with punct):
+    question=0.834 social=0.164 inform=0.001 request=0.000 offer=0.000 confirm=0.000 reject=0.000 status=0.000
+  WHOLE TURN (no punct):
+    question=0.884 social=0.115 inform=0.001 offer=0.000 request=0.000 confirm=0.000 reject=0.000 status=0.000
+  PER-SENTENCE (with punct):
+    1. "That's awesome, Caroline!"
+       social=0.762 confirm=0.223 question=0.013 inform=0.001 status=0.000 offer=0.000 reject=0.000 request=0.000
+    2. "Glad to hear you found a great group where you can have an impact."
+       social=0.973 status=0.013 inform=0.009 offer=0.003 question=0.001 confirm=0.000 request=0.000 reject=0.000
+    3. "Bet it feels great to be able to speak your truth and stand up for what's right."
+       question=0.588 inform=0.253 confirm=0.110 social=0.034 offer=0.010 reject=0.004 status=0.001 request=0.000
+    4. "Want to tell me a bit more about it?"
+       question=0.803 social=0.185 request=0.010 offer=0.001 inform=0.001 reject=0.001 confirm=0.000 status=0.000
+  PER-SENTENCE (no punct):
+    1. "That's awesome Caroline"
+       confirm=0.537 social=0.236 question=0.224 offer=0.003 inform=0.001 request=0.000 status=0.000 reject=0.000
+    2. "Glad to hear you found a great group where you can have an impact"
+       social=0.932 inform=0.052 status=0.008 question=0.006 offer=0.002 confirm=0.000 request=0.000 reject=0.000
+    3. "Bet it feels great to be able to speak your truth and stand up for what's right"
+       inform=0.557 question=0.393 confirm=0.027 social=0.014 offer=0.005 reject=0.002 status=0.002 request=0.000
+    4. "Want to tell me a bit more about it"
+       question=0.797 social=0.201 inform=0.001 request=0.000 offer=0.000 status=0.000 confirm=0.000 reject=0.000
+
+D10:5 [Caroline] gold=inform
+  message: "Thanks, Melanie! It's awesome to have our own platform to be ourselves and support others' rights. Our group, 'Connected LGBTQ Activists', is made of all kinds of people investing in positive changes. We have regular meetings, plan events and campaigns, to get together and support each other."
+  WHOLE TURN (with punct):
+    inform=0.914 social=0.074 question=0.012 request=0.000 offer=0.000 status=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    inform=0.971 social=0.022 question=0.007 status=0.000 request=0.000 confirm=0.000 offer=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Thanks, Melanie!"
+       social=0.994 confirm=0.006 question=0.000 reject=0.000 inform=0.000 request=0.000 offer=0.000 status=0.000
+    2. "It's awesome to have our own platform to be ourselves and support others' rights."
+       social=0.587 inform=0.365 question=0.016 confirm=0.015 reject=0.008 offer=0.004 status=0.003 request=0.002
+    3. "Our group, 'Connected LGBTQ Activists', is made of all kinds of people investing in positive changes."
+       inform=0.956 question=0.043 social=0.001 confirm=0.000 request=0.000 offer=0.000 reject=0.000 status=0.000
+    4. "We have regular meetings, plan events and campaigns, to get together and support each other."
+       inform=0.741 question=0.199 social=0.030 request=0.030 status=0.000 confirm=0.000 reject=0.000 offer=0.000
+  PER-SENTENCE (no punct):
+    1. "Thanks Melanie"
+       social=0.965 confirm=0.031 question=0.003 reject=0.001 inform=0.000 offer=0.000 request=0.000 status=0.000
+    2. "It's awesome to have our own platform to be ourselves and support others' rights"
+       inform=0.599 social=0.369 question=0.012 reject=0.011 confirm=0.004 request=0.003 status=0.002 offer=0.001
+    3. "Our group 'Connected LGBTQ Activists' is made of all kinds of people investing in positive changes"
+       inform=0.981 question=0.019 social=0.000 confirm=0.000 request=0.000 reject=0.000 offer=0.000 status=0.000
+    4. "We have regular meetings plan events and campaigns to get together and support each other"
+       inform=0.679 question=0.279 request=0.021 social=0.020 status=0.001 confirm=0.000 reject=0.000 offer=0.000
+
+D10:6 [Melanie] gold=question
+  message: "Wow, Caroline, your group sounds awesome! Supporting each other and making good things happen - that's so inspiring! Have you been part of any events or campaigns lately?"
+  WHOLE TURN (with punct):
+    question=0.557 social=0.443 inform=0.000 request=0.000 status=0.000 offer=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=0.827 social=0.173 request=0.000 inform=0.000 offer=0.000 status=0.000 reject=0.000 confirm=0.000
+  PER-SENTENCE (with punct):
+    1. "Wow, Caroline, your group sounds awesome!"
+       social=0.975 question=0.013 inform=0.007 confirm=0.004 status=0.000 offer=0.000 request=0.000 reject=0.000
+    2. "Supporting each other and making good things happen - that's so inspiring!"
+       social=0.705 inform=0.277 confirm=0.014 question=0.004 status=0.000 reject=0.000 request=0.000 offer=0.000
+    3. "Have you been part of any events or campaigns lately?"
+       question=0.937 request=0.058 social=0.005 inform=0.000 offer=0.000 reject=0.000 status=0.000 confirm=0.000
+  PER-SENTENCE (no punct):
+    1. "Wow Caroline your group sounds awesome"
+       social=0.986 inform=0.007 question=0.005 confirm=0.001 status=0.001 offer=0.000 request=0.000 reject=0.000
+    2. "Supporting each other and making good things happen - that's so inspiring"
+       inform=0.618 social=0.376 confirm=0.003 question=0.002 status=0.000 reject=0.000 request=0.000 offer=0.000
+    3. "Have you been part of any events or campaigns lately"
+       question=0.978 social=0.017 request=0.005 inform=0.000 offer=0.000 reject=0.000 status=0.000 confirm=0.000
+
+D10:7 [Caroline] gold=inform
+  message: "Last weekend our city held a pride parade! So many people marched through the streets waving flags, holding signs and celebrating love and diversity. I missed it but it was a powerful reminder that we are not alone in this fight for equality and inclusivity. Change is possible!"
+  WHOLE TURN (with punct):
+    inform=0.582 social=0.384 question=0.027 reject=0.006 confirm=0.000 request=0.000 offer=0.000 status=0.000
+  WHOLE TURN (no punct):
+    inform=0.728 social=0.171 reject=0.065 question=0.034 confirm=0.002 request=0.001 offer=0.000 status=0.000
+  PER-SENTENCE (with punct):
+    1. "Last weekend our city held a pride parade!"
+       social=0.962 inform=0.022 request=0.010 question=0.004 confirm=0.001 reject=0.000 offer=0.000 status=0.000
+    2. "So many people marched through the streets waving flags, holding signs and celebrating love and diversity."
+       inform=0.429 social=0.342 question=0.228 confirm=0.001 request=0.000 reject=0.000 status=0.000 offer=0.000
+    3. "I missed it but it was a powerful reminder that we are not alone in this fight for equality and inclusivity."
+       inform=0.920 social=0.049 question=0.031 reject=0.000 confirm=0.000 status=0.000 request=0.000 offer=0.000
+    4. "Change is possible!"
+       request=0.593 offer=0.184 confirm=0.070 social=0.049 status=0.048 reject=0.039 inform=0.016 question=0.002
+  PER-SENTENCE (no punct):
+    1. "Last weekend our city held a pride parade"
+       social=0.823 inform=0.150 question=0.012 request=0.007 reject=0.005 confirm=0.002 offer=0.000 status=0.000
+    2. "So many people marched through the streets waving flags holding signs and celebrating love and diversity"
+       inform=0.389 social=0.352 question=0.258 confirm=0.000 request=0.000 reject=0.000 status=0.000 offer=0.000
+    3. "I missed it but it was a powerful reminder that we are not alone in this fight for equality and inclusivity"
+       inform=0.957 social=0.030 question=0.012 reject=0.000 confirm=0.000 status=0.000 request=0.000 offer=0.000
+    4. "Change is possible"
+       request=0.471 reject=0.154 confirm=0.144 status=0.098 offer=0.073 inform=0.043 social=0.016 question=0.002
+
+D10:8 [Melanie] gold=inform
+  message: "Wow, fantastic, Caroline! Bet the atmosphere was incredible. Oh yeah, we went to the beach recently. It was awesome! The kids had such a blast."
+  WHOLE TURN (with punct):
+    social=0.817 inform=0.174 question=0.008 status=0.000 offer=0.000 request=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    social=0.754 inform=0.234 question=0.013 request=0.000 status=0.000 confirm=0.000 offer=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Wow, fantastic, Caroline!"
+       social=0.773 question=0.202 confirm=0.022 inform=0.001 offer=0.001 request=0.000 status=0.000 reject=0.000
+    2. "Bet the atmosphere was incredible."
+       social=0.624 inform=0.205 question=0.158 confirm=0.010 status=0.003 offer=0.000 request=0.000 reject=0.000
+    3. "Oh yeah, we went to the beach recently."
+       social=0.725 inform=0.215 request=0.042 question=0.018 confirm=0.000 reject=0.000 status=0.000 offer=0.000
+    4. "It was awesome!"
+       social=0.636 confirm=0.363 inform=0.001 status=0.000 reject=0.000 question=0.000 request=0.000 offer=0.000
+    5. "The kids had such a blast."
+       social=0.996 inform=0.004 question=0.001 confirm=0.000 status=0.000 request=0.000 offer=0.000 reject=0.000
+  PER-SENTENCE (no punct):
+    1. "Wow fantastic Caroline"
+       social=0.729 question=0.223 confirm=0.038 offer=0.007 request=0.001 inform=0.001 status=0.000 reject=0.000
+    2. "Bet the atmosphere was incredible"
+       social=0.458 inform=0.333 question=0.199 status=0.006 confirm=0.003 request=0.000 offer=0.000 reject=0.000
+    3. "Oh yeah we went to the beach recently"
+       social=0.563 inform=0.348 question=0.060 request=0.029 reject=0.000 confirm=0.000 status=0.000 offer=0.000
+    4. "It was awesome"
+       confirm=0.581 social=0.411 inform=0.003 reject=0.003 status=0.001 request=0.000 question=0.000 offer=0.000
+    5. "The kids had such a blast"
+       social=0.981 inform=0.017 question=0.001 status=0.000 request=0.000 confirm=0.000 offer=0.000 reject=0.000
+
+D10:9 [Caroline] gold=question
+  message: "Sounds fun! What was the best part? Do you do it often with the kids?"
+  WHOLE TURN (with punct):
+    question=1.000 social=0.000 request=0.000 inform=0.000 offer=0.000 status=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=1.000 social=0.000 request=0.000 offer=0.000 inform=0.000 status=0.000 confirm=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Sounds fun!"
+       social=0.594 confirm=0.280 status=0.124 question=0.001 offer=0.000 inform=0.000 request=0.000 reject=0.000
+    2. "What was the best part?"
+       question=1.000 social=0.000 request=0.000 inform=0.000 confirm=0.000 reject=0.000 status=0.000 offer=0.000
+    3. "Do you do it often with the kids?"
+       question=1.000 social=0.000 inform=0.000 request=0.000 offer=0.000 confirm=0.000 reject=0.000 status=0.000
+  PER-SENTENCE (no punct):
+    1. "Sounds fun"
+       confirm=0.883 status=0.075 social=0.041 question=0.001 offer=0.000 inform=0.000 request=0.000 reject=0.000
+    2. "What was the best part"
+       question=0.997 social=0.003 inform=0.000 request=0.000 confirm=0.000 reject=0.000 status=0.000 offer=0.000
+    3. "Do you do it often with the kids"
+       question=1.000 social=0.000 inform=0.000 request=0.000 offer=0.000 confirm=0.000 status=0.000 reject=0.000
+
+D10:10 [Melanie] gold=inform
+  message: "Seeing my kids' faces so happy at the beach was the best! We don't go often, usually only once or twice a year. But those times are always special to spend time together and chill."
+  WHOLE TURN (with punct):
+    inform=0.974 social=0.020 question=0.005 request=0.000 reject=0.000 confirm=0.000 status=0.000 offer=0.000
+  WHOLE TURN (no punct):
+    inform=0.978 social=0.011 question=0.011 request=0.000 reject=0.000 confirm=0.000 status=0.000 offer=0.000
+  PER-SENTENCE (with punct):
+    1. "Seeing my kids' faces so happy at the beach was the best!"
+       inform=0.609 social=0.372 question=0.012 confirm=0.007 request=0.000 offer=0.000 reject=0.000 status=0.000
+    2. "We don't go often, usually only once or twice a year."
+       inform=0.955 question=0.043 social=0.002 request=0.000 status=0.000 reject=0.000 confirm=0.000 offer=0.000
+    3. "But those times are always special to spend time together and chill."
+       inform=0.547 social=0.440 question=0.010 request=0.002 offer=0.001 status=0.001 reject=0.000 confirm=0.000
+  PER-SENTENCE (no punct):
+    1. "Seeing my kids' faces so happy at the beach was the best"
+       inform=0.924 social=0.068 question=0.008 confirm=0.000 request=0.000 reject=0.000 offer=0.000 status=0.000
+    2. "We don't go often usually only once or twice a year"
+       inform=0.837 question=0.155 social=0.008 request=0.000 status=0.000 reject=0.000 confirm=0.000 offer=0.000
+    3. "But those times are always special to spend time together and chill"
+       inform=0.638 social=0.352 question=0.008 request=0.002 offer=0.000 reject=0.000 status=0.000 confirm=0.000
+
+D10:11 [Caroline] gold=question
+  message: "Sounds special, those beach trips! Do you have any other summer traditions you all do together? Create those memories!"
+  WHOLE TURN (with punct):
+    question=0.795 social=0.179 inform=0.026 status=0.000 request=0.000 offer=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=0.953 social=0.046 inform=0.002 offer=0.000 request=0.000 status=0.000 confirm=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Sounds special, those beach trips!"
+       social=0.759 confirm=0.204 inform=0.028 question=0.006 status=0.002 offer=0.001 request=0.000 reject=0.000
+    2. "Do you have any other summer traditions you all do together?"
+       question=0.999 social=0.001 inform=0.000 request=0.000 confirm=0.000 status=0.000 offer=0.000 reject=0.000
+    3. "Create those memories!"
+       status=0.829 social=0.107 offer=0.061 inform=0.002 question=0.001 confirm=0.001 request=0.000 reject=0.000
+  PER-SENTENCE (no punct):
+    1. "Sounds special those beach trips"
+       confirm=0.717 social=0.126 inform=0.100 question=0.038 offer=0.012 status=0.006 request=0.001 reject=0.000
+    2. "Do you have any other summer traditions you all do together"
+       question=0.999 social=0.001 inform=0.000 request=0.000 confirm=0.000 status=0.000 offer=0.000 reject=0.000
+    3. "Create those memories"
+       status=0.611 social=0.227 offer=0.145 inform=0.010 confirm=0.003 question=0.003 request=0.001 reject=0.000
+
+D10:12 [Melanie] gold=inform
+  message: "We always look forward to our family camping trip. We roast marshmallows, tell stories around the campfire and just enjoy each other's company. It's the highlight of our summer!"
+  WHOLE TURN (with punct):
+    social=0.902 inform=0.095 question=0.003 confirm=0.000 reject=0.000 status=0.000 request=0.000 offer=0.000
+  WHOLE TURN (no punct):
+    social=0.752 inform=0.247 question=0.002 reject=0.000 confirm=0.000 status=0.000 request=0.000 offer=0.000
+  PER-SENTENCE (with punct):
+    1. "We always look forward to our family camping trip."
+       question=0.785 social=0.190 request=0.019 inform=0.005 offer=0.000 confirm=0.000 reject=0.000 status=0.000
+    2. "We roast marshmallows, tell stories around the campfire and just enjoy each other's company."
+       inform=0.788 social=0.203 question=0.009 status=0.000 confirm=0.000 request=0.000 reject=0.000 offer=0.000
+    3. "It's the highlight of our summer!"
+       social=0.995 inform=0.004 question=0.001 confirm=0.000 request=0.000 reject=0.000 status=0.000 offer=0.000
+  PER-SENTENCE (no punct):
+    1. "We always look forward to our family camping trip"
+       question=0.615 social=0.289 inform=0.056 request=0.036 reject=0.003 confirm=0.001 offer=0.000 status=0.000
+    2. "We roast marshmallows tell stories around the campfire and just enjoy each other's company"
+       inform=0.602 social=0.388 question=0.009 status=0.000 reject=0.000 confirm=0.000 request=0.000 offer=0.000
+    3. "It's the highlight of our summer"
+       social=0.929 inform=0.067 question=0.004 reject=0.000 confirm=0.000 status=0.000 request=0.000 offer=0.000
+
+D10:13 [Caroline] gold=question
+  message: "Wow, Mel, that's awesome! What's your best camping memory?"
+  WHOLE TURN (with punct):
+    question=0.636 social=0.363 inform=0.000 status=0.000 request=0.000 offer=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=0.894 social=0.106 inform=0.000 request=0.000 offer=0.000 status=0.000 confirm=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Wow, Mel, that's awesome!"
+       social=0.952 confirm=0.045 question=0.002 inform=0.002 status=0.000 offer=0.000 reject=0.000 request=0.000
+    2. "What's your best camping memory?"
+       question=1.000 social=0.000 inform=0.000 request=0.000 offer=0.000 status=0.000 confirm=0.000 reject=0.000
+  PER-SENTENCE (no punct):
+    1. "Wow Mel that's awesome"
+       social=0.978 confirm=0.017 inform=0.004 question=0.001 status=0.000 reject=0.000 request=0.000 offer=0.000
+    2. "What's your best camping memory"
+       question=0.998 social=0.002 inform=0.000 request=0.000 status=0.000 offer=0.000 confirm=0.000 reject=0.000
+
+D10:14 [Melanie] gold=inform
+  message: "I'll always remember our camping trip last year when we saw the Perseid meteor shower. It was so amazing lying there and watching the sky light up with streaks of light. We all made wishes and felt so at one with the universe. That's a memory I'll never forget."
+  WHOLE TURN (with punct):
+    inform=0.650 social=0.347 question=0.003 confirm=0.000 reject=0.000 request=0.000 offer=0.000 status=0.000
+  WHOLE TURN (no punct):
+    inform=0.716 social=0.280 question=0.004 confirm=0.000 reject=0.000 request=0.000 status=0.000 offer=0.000
+  PER-SENTENCE (with punct):
+    1. "I'll always remember our camping trip last year when we saw the Perseid meteor shower."
+       inform=0.967 social=0.030 question=0.003 request=0.000 offer=0.000 confirm=0.000 reject=0.000 status=0.000
+    2. "It was so amazing lying there and watching the sky light up with streaks of light."
+       inform=0.821 social=0.178 question=0.001 request=0.000 confirm=0.000 offer=0.000 reject=0.000 status=0.000
+    3. "We all made wishes and felt so at one with the universe."
+       social=0.671 inform=0.294 question=0.035 confirm=0.000 reject=0.000 status=0.000 request=0.000 offer=0.000
+    4. "That's a memory I'll never forget."
+       social=0.713 inform=0.270 question=0.017 confirm=0.001 reject=0.000 status=0.000 request=0.000 offer=0.000
+  PER-SENTENCE (no punct):
+    1. "I'll always remember our camping trip last year when we saw the Perseid meteor shower"
+       inform=0.974 social=0.024 question=0.002 request=0.000 offer=0.000 confirm=0.000 reject=0.000 status=0.000
+    2. "It was so amazing lying there and watching the sky light up with streaks of light"
+       inform=0.856 social=0.142 question=0.002 request=0.000 offer=0.000 confirm=0.000 reject=0.000 status=0.000
+    3. "We all made wishes and felt so at one with the universe"
+       social=0.555 inform=0.430 question=0.015 confirm=0.000 reject=0.000 status=0.000 request=0.000 offer=0.000
+    4. "That's a memory I'll never forget"
+       inform=0.841 social=0.151 question=0.008 reject=0.000 confirm=0.000 status=0.000 request=0.000 offer=0.000
+
+D10:15 [Caroline] gold=question
+  message: "Cool! What did it look like?"
+  WHOLE TURN (with punct):
+    question=0.889 social=0.104 request=0.004 offer=0.001 inform=0.001 status=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=0.901 social=0.088 inform=0.008 request=0.002 offer=0.001 status=0.000 confirm=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Cool!"
+       confirm=0.515 social=0.461 status=0.023 offer=0.001 inform=0.000 question=0.000 request=0.000 reject=0.000
+    2. "What did it look like?"
+       question=0.968 request=0.017 inform=0.014 social=0.000 offer=0.000 status=0.000 reject=0.000 confirm=0.000
+  PER-SENTENCE (no punct):
+    1. "Cool"
+       confirm=0.985 social=0.012 status=0.001 offer=0.001 request=0.000 inform=0.000 reject=0.000 question=0.000
+    2. "What did it look like"
+       question=0.951 inform=0.032 social=0.009 request=0.008 status=0.000 offer=0.000 confirm=0.000 reject=0.000
+
+D10:16 [Melanie] gold=inform
+  message: "The sky was so clear and filled with stars, and the meteor shower was amazing - it felt like we were part of something huge and awe-inspiring."
+  WHOLE TURN (with punct):
+    inform=0.910 social=0.074 question=0.016 confirm=0.000 request=0.000 reject=0.000 offer=0.000 status=0.000
+  WHOLE TURN (no punct):
+    inform=0.817 social=0.172 question=0.010 confirm=0.000 request=0.000 reject=0.000 status=0.000 offer=0.000
+  PER-SENTENCE (with punct):
+    1. "The sky was so clear and filled with stars, and the meteor shower was amazing - it felt like we were part of something huge and awe-inspiring."
+       inform=0.910 social=0.074 question=0.016 confirm=0.000 request=0.000 reject=0.000 offer=0.000 status=0.000
+  PER-SENTENCE (no punct):
+    1. "The sky was so clear and filled with stars and the meteor shower was amazing - it felt like we were part of something huge and awe-inspiring"
+       inform=0.817 social=0.172 question=0.010 confirm=0.000 request=0.000 reject=0.000 status=0.000 offer=0.000
+
+D10:17 [Caroline] gold=social
+  message: "Wow, Mel. That must've been breathtaking!"
+  WHOLE TURN (with punct):
+    social=0.930 question=0.061 confirm=0.006 inform=0.003 status=0.000 offer=0.000 request=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    social=0.958 inform=0.021 question=0.016 confirm=0.005 status=0.000 offer=0.000 request=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Wow, Mel."
+       social=0.971 question=0.024 confirm=0.003 offer=0.002 inform=0.000 request=0.000 status=0.000 reject=0.000
+    2. "That must've been breathtaking!"
+       social=0.672 confirm=0.171 question=0.142 inform=0.012 status=0.002 request=0.000 offer=0.000 reject=0.000
+  PER-SENTENCE (no punct):
+    1. "Wow Mel"
+       social=0.922 offer=0.038 question=0.015 confirm=0.013 request=0.009 inform=0.002 status=0.001 reject=0.000
+    2. "That must've been breathtaking"
+       social=0.722 confirm=0.128 inform=0.124 question=0.020 status=0.005 reject=0.001 offer=0.000 request=0.000
+
+D10:18 [Melanie] gold=inform
+  message: "It was one of those moments where I felt tiny and in awe of the universe. Reminds me how awesome life is - so many little moments like that."
+  WHOLE TURN (with punct):
+    inform=0.760 social=0.201 question=0.039 confirm=0.000 reject=0.000 offer=0.000 status=0.000 request=0.000
+  WHOLE TURN (no punct):
+    inform=0.753 social=0.176 question=0.071 confirm=0.000 reject=0.000 offer=0.000 request=0.000 status=0.000
+  PER-SENTENCE (with punct):
+    1. "It was one of those moments where I felt tiny and in awe of the universe."
+       inform=0.551 social=0.445 question=0.004 confirm=0.000 reject=0.000 status=0.000 offer=0.000 request=0.000
+    2. "Reminds me how awesome life is - so many little moments like that."
+       inform=0.842 social=0.133 question=0.023 confirm=0.003 reject=0.000 offer=0.000 status=0.000 request=0.000
+  PER-SENTENCE (no punct):
+    1. "It was one of those moments where I felt tiny and in awe of the universe"
+       inform=0.527 social=0.470 question=0.003 reject=0.000 confirm=0.000 status=0.000 request=0.000 offer=0.000
+    2. "Reminds me how awesome life is - so many little moments like that"
+       inform=0.817 social=0.136 question=0.045 confirm=0.001 reject=0.000 offer=0.000 status=0.000 request=0.000
+
+D10:19 [Caroline] gold=question
+  message: "That's great, Mel! What other good memories do you have that make you feel thankful for life?"
+  WHOLE TURN (with punct):
+    social=0.656 question=0.343 inform=0.001 offer=0.000 request=0.000 status=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=0.509 social=0.489 inform=0.002 offer=0.000 request=0.000 status=0.000 confirm=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "That's great, Mel!"
+       social=0.890 confirm=0.103 question=0.007 inform=0.001 status=0.000 offer=0.000 request=0.000 reject=0.000
+    2. "What other good memories do you have that make you feel thankful for life?"
+       question=0.918 social=0.075 inform=0.007 request=0.000 offer=0.000 status=0.000 reject=0.000 confirm=0.000
+  PER-SENTENCE (no punct):
+    1. "That's great Mel"
+       confirm=0.794 social=0.203 question=0.003 offer=0.000 request=0.000 inform=0.000 status=0.000 reject=0.000
+    2. "What other good memories do you have that make you feel thankful for life"
+       question=0.886 social=0.092 inform=0.022 offer=0.000 request=0.000 status=0.000 reject=0.000 confirm=0.000
+
+D10:20 [Melanie] gold=inform
+  message: "I'll never forget the day my youngest took her first steps. Seeing her wobble as she took those initial steps really put into perspective how fleeting life is and how lucky I am to be able to share these moments."
+  WHOLE TURN (with punct):
+    inform=0.730 social=0.268 question=0.002 confirm=0.000 status=0.000 reject=0.000 offer=0.000 request=0.000
+  WHOLE TURN (no punct):
+    inform=0.790 social=0.208 question=0.002 status=0.000 confirm=0.000 reject=0.000 offer=0.000 request=0.000
+  PER-SENTENCE (with punct):
+    1. "I'll never forget the day my youngest took her first steps."
+       inform=0.578 social=0.346 question=0.076 request=0.000 status=0.000 confirm=0.000 reject=0.000 offer=0.000
+    2. "Seeing her wobble as she took those initial steps really put into perspective how fleeting life is and how lucky I am to be able to share these moments."
+       inform=0.758 social=0.239 question=0.003 status=0.000 confirm=0.000 reject=0.000 offer=0.000 request=0.000
+  PER-SENTENCE (no punct):
+    1. "I'll never forget the day my youngest took her first steps"
+       inform=0.825 social=0.136 question=0.039 status=0.000 request=0.000 confirm=0.000 reject=0.000 offer=0.000
+    2. "Seeing her wobble as she took those initial steps really put into perspective how fleeting life is and how lucky I am to be able to share these moments"
+       inform=0.799 social=0.199 question=0.002 status=0.000 reject=0.000 confirm=0.000 offer=0.000 request=0.000
+
+D10:21 [Caroline] gold=social
+  message: "Aw, that's sweet, Mel! Those milestones are great reminders of how special our bonds are."
+  WHOLE TURN (with punct):
+    social=0.591 inform=0.370 question=0.039 confirm=0.000 status=0.000 offer=0.000 reject=0.000 request=0.000
+  WHOLE TURN (no punct):
+    inform=0.522 social=0.461 question=0.017 status=0.000 confirm=0.000 offer=0.000 reject=0.000 request=0.000
+  PER-SENTENCE (with punct):
+    1. "Aw, that's sweet, Mel!"
+       social=0.861 question=0.122 inform=0.015 confirm=0.002 offer=0.000 status=0.000 reject=0.000 request=0.000
+    2. "Those milestones are great reminders of how special our bonds are."
+       inform=0.845 social=0.103 question=0.052 confirm=0.000 status=0.000 offer=0.000 reject=0.000 request=0.000
+  PER-SENTENCE (no punct):
+    1. "Aw that's sweet Mel"
+       social=0.840 question=0.128 inform=0.028 confirm=0.004 offer=0.000 status=0.000 reject=0.000 request=0.000
+    2. "Those milestones are great reminders of how special our bonds are"
+       inform=0.944 social=0.040 question=0.015 confirm=0.000 status=0.000 reject=0.000 offer=0.000 request=0.000
+
+D10:22 [Melanie] gold=confirm
+  message: "Yeah, they sure are. It's special moments like these that make me appreciate life and how lucky I am to be with my family and have our love."
+  WHOLE TURN (with punct):
+    social=0.699 inform=0.300 question=0.000 status=0.000 confirm=0.000 offer=0.000 request=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    inform=0.621 social=0.379 question=0.000 status=0.000 confirm=0.000 offer=0.000 request=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Yeah, they sure are."
+       social=0.433 status=0.250 confirm=0.243 inform=0.053 question=0.016 request=0.004 offer=0.001 reject=0.000
+    2. "It's special moments like these that make me appreciate life and how lucky I am to be with my family and have our love."
+       social=0.676 inform=0.323 question=0.000 confirm=0.000 status=0.000 offer=0.000 request=0.000 reject=0.000
+  PER-SENTENCE (no punct):
+    1. "Yeah they sure are"
+       status=0.508 inform=0.353 social=0.068 confirm=0.047 question=0.018 request=0.003 reject=0.002 offer=0.001
+    2. "It's special moments like these that make me appreciate life and how lucky I am to be with my family and have our love"
+       inform=0.501 social=0.499 question=0.000 confirm=0.000 status=0.000 offer=0.000 request=0.000 reject=0.000
+
+D10:23 [Caroline] gold=social
+  message: "Wow, Melanie, what a beautiful moment! Lucky you to have such an awesome family!"
+  WHOLE TURN (with punct):
+    social=0.995 inform=0.004 question=0.001 confirm=0.000 status=0.000 offer=0.000 reject=0.000 request=0.000
+  WHOLE TURN (no punct):
+    social=0.990 question=0.006 inform=0.004 offer=0.000 confirm=0.000 status=0.000 reject=0.000 request=0.000
+  PER-SENTENCE (with punct):
+    1. "Wow, Melanie, what a beautiful moment!"
+       social=0.968 question=0.016 inform=0.008 confirm=0.005 status=0.002 offer=0.001 request=0.000 reject=0.000
+    2. "Lucky you to have such an awesome family!"
+       social=0.998 inform=0.001 question=0.001 confirm=0.000 offer=0.000 status=0.000 reject=0.000 request=0.000
+  PER-SENTENCE (no punct):
+    1. "Wow Melanie what a beautiful moment"
+       social=0.978 inform=0.009 question=0.005 status=0.004 confirm=0.002 offer=0.001 reject=0.001 request=0.000
+    2. "Lucky you to have such an awesome family"
+       social=0.996 inform=0.003 question=0.001 confirm=0.000 offer=0.000 reject=0.000 status=0.000 request=0.000
+
+D10:24 [Melanie] gold=social
+  message: "Thanks, Caroline! I'm really lucky to have my family; they bring so much joy and love."
+  WHOLE TURN (with punct):
+    social=0.984 inform=0.016 question=0.000 confirm=0.000 status=0.000 offer=0.000 reject=0.000 request=0.000
+  WHOLE TURN (no punct):
+    social=0.947 inform=0.053 question=0.000 status=0.000 confirm=0.000 reject=0.000 offer=0.000 request=0.000
+  PER-SENTENCE (with punct):
+    1. "Thanks, Caroline!"
+       social=0.975 confirm=0.017 question=0.008 inform=0.000 reject=0.000 request=0.000 offer=0.000 status=0.000
+    2. "I'm really lucky to have my family; they bring so much joy and love."
+       social=0.978 inform=0.022 question=0.000 confirm=0.000 status=0.000 offer=0.000 reject=0.000 request=0.000
+  PER-SENTENCE (no punct):
+    1. "Thanks Caroline"
+       social=0.519 question=0.391 confirm=0.089 inform=0.000 offer=0.000 request=0.000 reject=0.000 status=0.000
+    2. "I'm really lucky to have my family they bring so much joy and love"
+       social=0.935 inform=0.065 question=0.000 status=0.000 confirm=0.000 offer=0.000 reject=0.000 request=0.000
+
+D11:1 [Melanie] gold=inform
+  message: "Hey Caroline! Last night was amazing! We celebrated my daughter's birthday with a concert surrounded by music, joy and the warm summer breeze. Seeing my kids' smiles was so awesome, and I'm so thankful for our special moments together."
+  WHOLE TURN (with punct):
+    social=0.718 inform=0.281 question=0.002 confirm=0.000 request=0.000 reject=0.000 status=0.000 offer=0.000
+  WHOLE TURN (no punct):
+    social=0.598 inform=0.401 question=0.001 confirm=0.000 reject=0.000 request=0.000 status=0.000 offer=0.000
+  PER-SENTENCE (with punct):
+    1. "Hey Caroline!"
+       question=0.565 social=0.429 confirm=0.003 inform=0.001 request=0.001 reject=0.000 offer=0.000 status=0.000
+    2. "Last night was amazing!"
+       social=0.858 inform=0.142 confirm=0.001 question=0.000 status=0.000 reject=0.000 request=0.000 offer=0.000
+    3. "We celebrated my daughter's birthday with a concert surrounded by music, joy and the warm summer breeze."
+       inform=0.579 social=0.393 question=0.028 request=0.000 status=0.000 offer=0.000 confirm=0.000 reject=0.000
+    4. "Seeing my kids' smiles was so awesome, and I'm so thankful for our special moments together."
+       social=0.785 inform=0.214 question=0.000 confirm=0.000 reject=0.000 status=0.000 request=0.000 offer=0.000
+  PER-SENTENCE (no punct):
+    1. "Hey Caroline"
+       question=0.744 social=0.233 confirm=0.014 request=0.009 inform=0.001 offer=0.000 reject=0.000 status=0.000
+    2. "Last night was amazing"
+       social=0.515 inform=0.481 confirm=0.003 question=0.001 status=0.000 reject=0.000 offer=0.000 request=0.000
+    3. "We celebrated my daughter's birthday with a concert surrounded by music joy and the warm summer breeze"
+       inform=0.579 social=0.403 question=0.018 request=0.000 status=0.000 offer=0.000 confirm=0.000 reject=0.000
+    4. "Seeing my kids' smiles was so awesome and I'm so thankful for our special moments together"
+       social=0.596 inform=0.403 question=0.000 confirm=0.000 reject=0.000 status=0.000 request=0.000 offer=0.000
+
+D11:2 [Caroline] gold=question
+  message: "Wow, sounds wonderful! Your love for your kids is so awesome. What concert was it? The advocacy event was a cool experience - so much love and support, amazing!"
+  WHOLE TURN (with punct):
+    social=0.554 inform=0.338 question=0.092 status=0.013 offer=0.002 confirm=0.001 request=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    social=0.701 inform=0.249 question=0.049 status=0.000 confirm=0.000 request=0.000 offer=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Wow, sounds wonderful!"
+       confirm=0.886 social=0.112 status=0.002 inform=0.000 question=0.000 request=0.000 offer=0.000 reject=0.000
+    2. "Your love for your kids is so awesome."
+       social=0.970 question=0.011 inform=0.009 confirm=0.009 reject=0.000 offer=0.000 status=0.000 request=0.000
+    3. "What concert was it?"
+       request=0.994 inform=0.004 question=0.002 status=0.000 social=0.000 offer=0.000 reject=0.000 confirm=0.000
+    4. "The advocacy event was a cool experience - so much love and support, amazing!"
+       social=0.864 inform=0.098 confirm=0.037 question=0.001 request=0.000 offer=0.000 status=0.000 reject=0.000
+  PER-SENTENCE (no punct):
+    1. "Wow sounds wonderful"
+       confirm=0.887 social=0.085 status=0.023 inform=0.003 question=0.001 request=0.000 offer=0.000 reject=0.000
+    2. "Your love for your kids is so awesome"
+       social=0.750 inform=0.195 question=0.035 confirm=0.020 reject=0.000 status=0.000 offer=0.000 request=0.000
+    3. "What concert was it"
+       request=0.761 inform=0.223 question=0.014 social=0.001 status=0.001 offer=0.000 reject=0.000 confirm=0.000
+    4. "The advocacy event was a cool experience - so much love and support amazing"
+       social=0.880 inform=0.101 confirm=0.018 question=0.001 request=0.000 reject=0.000 offer=0.000 status=0.000
+
+D11:3 [Melanie] gold=inform
+  message: "Thanks, Caroline! It was Matt Patterson, he is so talented! His voice and songs were amazing. What's up with you? Anything interesting going on?"
+  WHOLE TURN (with punct):
+    question=0.475 request=0.344 social=0.180 inform=0.001 offer=0.000 status=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=0.792 social=0.137 request=0.063 inform=0.008 status=0.000 confirm=0.000 reject=0.000 offer=0.000
+  PER-SENTENCE (with punct):
+    1. "Thanks, Caroline!"
+       social=0.975 confirm=0.017 question=0.008 inform=0.000 reject=0.000 request=0.000 offer=0.000 status=0.000
+    2. "It was Matt Patterson, he is so talented!"
+       social=0.714 question=0.220 inform=0.032 confirm=0.031 reject=0.003 status=0.000 request=0.000 offer=0.000
+    3. "His voice and songs were amazing."
+       social=0.646 inform=0.252 confirm=0.079 status=0.011 question=0.009 request=0.001 reject=0.001 offer=0.000
+    4. "What's up with you?"
+       question=0.968 social=0.015 inform=0.008 request=0.005 reject=0.003 status=0.000 offer=0.000 confirm=0.000
+    5. "Anything interesting going on?"
+       request=0.992 question=0.007 social=0.001 inform=0.001 status=0.000 reject=0.000 confirm=0.000 offer=0.000
+  PER-SENTENCE (no punct):
+    1. "Thanks Caroline"
+       social=0.519 question=0.391 confirm=0.089 inform=0.000 offer=0.000 request=0.000 reject=0.000 status=0.000
+    2. "It was Matt Patterson he is so talented"
+       social=0.598 question=0.265 inform=0.118 confirm=0.015 reject=0.003 status=0.000 request=0.000 offer=0.000
+    3. "His voice and songs were amazing"
+       inform=0.535 social=0.316 confirm=0.095 status=0.033 question=0.009 reject=0.009 request=0.003 offer=0.001
+    4. "What's up with you"
+       question=0.835 social=0.159 inform=0.005 request=0.000 reject=0.000 status=0.000 offer=0.000 confirm=0.000
+    5. "Anything interesting going on"
+       request=0.410 question=0.305 inform=0.184 social=0.077 confirm=0.014 reject=0.005 status=0.004 offer=0.000
+
+D11:4 [Caroline] gold=inform
+  message: "Wow, Mel, glad you had a blast at the concert. A lot's happened since we talked. I went to a pride parade last Friday and it was awesome - so much energy and love everywhere. Really made me proud and reminded me how important it is to keep standing up for equality."
+  WHOLE TURN (with punct):
+    inform=0.817 social=0.179 question=0.004 request=0.000 offer=0.000 confirm=0.000 reject=0.000 status=0.000
+  WHOLE TURN (no punct):
+    inform=0.840 social=0.155 question=0.005 request=0.000 confirm=0.000 reject=0.000 offer=0.000 status=0.000
+  PER-SENTENCE (with punct):
+    1. "Wow, Mel, glad you had a blast at the concert."
+       social=0.999 question=0.001 inform=0.000 status=0.000 offer=0.000 confirm=0.000 request=0.000 reject=0.000
+    2. "A lot's happened since we talked."
+       social=0.475 inform=0.436 question=0.079 reject=0.007 request=0.002 status=0.001 confirm=0.000 offer=0.000
+    3. "I went to a pride parade last Friday and it was awesome - so much energy and love everywhere."
+       social=0.546 inform=0.449 question=0.004 confirm=0.001 request=0.001 reject=0.000 offer=0.000 status=0.000
+    4. "Really made me proud and reminded me how important it is to keep standing up for equality."
+       inform=0.970 social=0.021 question=0.009 request=0.000 confirm=0.000 reject=0.000 offer=0.000 status=0.000
+  PER-SENTENCE (no punct):
+    1. "Wow Mel glad you had a blast at the concert"
+       social=0.999 question=0.001 status=0.000 inform=0.000 offer=0.000 request=0.000 confirm=0.000 reject=0.000
+    2. "A lot's happened since we talked"
+       inform=0.864 social=0.069 question=0.064 reject=0.003 status=0.000 request=0.000 confirm=0.000 offer=0.000
+    3. "I went to a pride parade last Friday and it was awesome - so much energy and love everywhere"
+       social=0.549 inform=0.446 question=0.003 request=0.001 confirm=0.001 reject=0.000 offer=0.000 status=0.000
+    4. "Really made me proud and reminded me how important it is to keep standing up for equality"
+       inform=0.973 social=0.016 question=0.011 request=0.000 confirm=0.000 reject=0.000 status=0.000 offer=0.000
+
+D11:5 [Melanie] gold=question
+  message: "Wow, that's awesome! How did it feel being part of that community?"
+  WHOLE TURN (with punct):
+    question=0.945 social=0.055 offer=0.000 inform=0.000 request=0.000 status=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=0.939 social=0.061 offer=0.000 inform=0.000 request=0.000 status=0.000 confirm=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Wow, that's awesome!"
+       social=0.852 confirm=0.147 status=0.001 inform=0.000 question=0.000 reject=0.000 offer=0.000 request=0.000
+    2. "How did it feel being part of that community?"
+       question=0.999 social=0.001 inform=0.000 request=0.000 offer=0.000 status=0.000 confirm=0.000 reject=0.000
+  PER-SENTENCE (no punct):
+    1. "Wow that's awesome"
+       social=0.923 confirm=0.072 status=0.004 inform=0.001 reject=0.000 question=0.000 request=0.000 offer=0.000
+    2. "How did it feel being part of that community"
+       question=0.991 social=0.007 inform=0.002 offer=0.000 request=0.000 status=0.000 confirm=0.000 reject=0.000
+
+D11:6 [Caroline] gold=inform
+  message: "It was so inspiring, Mel! Check out the crowd. People of all kinds celebrating love and acceptance - it really pushed me to keep fighting for LGBTQ rights."
+  WHOLE TURN (with punct):
+    social=0.518 inform=0.353 question=0.128 confirm=0.000 request=0.000 offer=0.000 status=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    social=0.428 inform=0.423 question=0.149 request=0.000 confirm=0.000 offer=0.000 status=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "It was so inspiring, Mel!"
+       social=0.974 confirm=0.011 question=0.009 inform=0.006 status=0.000 offer=0.000 request=0.000 reject=0.000
+    2. "Check out the crowd."
+       request=0.869 offer=0.048 inform=0.029 question=0.025 social=0.016 reject=0.009 confirm=0.002 status=0.001
+    3. "People of all kinds celebrating love and acceptance - it really pushed me to keep fighting for LGBTQ rights."
+       inform=0.804 social=0.099 question=0.097 confirm=0.000 request=0.000 offer=0.000 reject=0.000 status=0.000
+  PER-SENTENCE (no punct):
+    1. "It was so inspiring Mel"
+       social=0.906 confirm=0.078 question=0.010 inform=0.003 offer=0.001 request=0.000 status=0.000 reject=0.000
+    2. "Check out the crowd"
+       request=0.697 question=0.080 inform=0.077 social=0.074 reject=0.035 offer=0.028 status=0.006 confirm=0.002
+    3. "People of all kinds celebrating love and acceptance - it really pushed me to keep fighting for LGBTQ rights"
+       inform=0.843 question=0.084 social=0.073 confirm=0.000 request=0.000 offer=0.000 reject=0.000 status=0.000
+
+D11:7 [Melanie] gold=question
+  message: "Wow, Caroline! That sounds awesome. This pic's from last night - looks like everyone was having a blast! Reminds me it's important to cultivate a loving and accepting environment for our kids. How do you stay inclusive in your work as an artist?"
+  WHOLE TURN (with punct):
+    question=0.926 social=0.072 inform=0.001 request=0.000 offer=0.000 status=0.000 confirm=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    question=0.963 social=0.036 inform=0.001 request=0.000 offer=0.000 status=0.000 confirm=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "Wow, Caroline!"
+       social=0.632 question=0.353 confirm=0.013 request=0.001 inform=0.001 offer=0.000 reject=0.000 status=0.000
+    2. "That sounds awesome."
+       confirm=0.960 social=0.040 question=0.000 status=0.000 inform=0.000 offer=0.000 request=0.000 reject=0.000
+    3. "This pic's from last night - looks like everyone was having a blast!"
+       social=0.728 question=0.192 inform=0.080 confirm=0.000 status=0.000 reject=0.000 request=0.000 offer=0.000
+    4. "Reminds me it's important to cultivate a loving and accepting environment for our kids."
+       inform=0.991 question=0.007 social=0.002 request=0.000 confirm=0.000 status=0.000 reject=0.000 offer=0.000
+    5. "How do you stay inclusive in your work as an artist?"
+       question=0.943 request=0.042 social=0.014 offer=0.000 inform=0.000 status=0.000 reject=0.000 confirm=0.000
+  PER-SENTENCE (no punct):
+    1. "Wow Caroline"
+       question=0.518 social=0.459 confirm=0.013 offer=0.005 inform=0.002 request=0.002 status=0.000 reject=0.000
+    2. "That sounds awesome"
+       confirm=0.962 social=0.037 status=0.000 inform=0.000 question=0.000 offer=0.000 request=0.000 reject=0.000
+    3. "This pic's from last night - looks like everyone was having a blast"
+       social=0.580 question=0.225 inform=0.196 confirm=0.000 status=0.000 reject=0.000 request=0.000 offer=0.000
+    4. "Reminds me it's important to cultivate a loving and accepting environment for our kids"
+       inform=0.993 question=0.006 social=0.001 request=0.000 confirm=0.000 reject=0.000 status=0.000 offer=0.000
+    5. "How do you stay inclusive in your work as an artist"
+       question=0.938 social=0.045 request=0.016 inform=0.000 offer=0.000 status=0.000 reject=0.000 confirm=0.000
+
+D11:8 [Caroline] gold=inform
+  message: "That pic is cool! Representing inclusivity and diversity in my art is important to me. I also use it to speak up for the LGBTQ+ community and push for acceptance. Here's a recent painting!"
+  WHOLE TURN (with punct):
+    social=0.503 inform=0.488 question=0.008 confirm=0.001 request=0.000 offer=0.000 status=0.000 reject=0.000
+  WHOLE TURN (no punct):
+    inform=0.841 social=0.152 question=0.007 confirm=0.000 request=0.000 offer=0.000 status=0.000 reject=0.000
+  PER-SENTENCE (with punct):
+    1. "That pic is cool!"
+       social=0.891 confirm=0.109 question=0.000 inform=0.000 offer=0.000 status=0.000 request=0.000 reject=0.000
+    2. "Representing inclusivity and diversity in my art is important to me."
+       inform=0.955 social=0.029 question=0.010 confirm=0.005 request=0.000 offer=0.000 reject=0.000 status=0.000
+    3. "I also use it to speak up for the LGBTQ+ community and push for acceptance."
+       inform=0.869 question=0.126 social=0.005 confirm=0.000 request=0.000 reject=0.000 offer=0.000 status=0.000
+    4. "Here's a recent painting!"
+       social=0.768 request=0.186 offer=0.016 confirm=0.013 inform=0.011 question=0.005 status=0.001 reject=0.000
+  PER-SENTENCE (no punct):
+    1. "That pic is cool"
+       confirm=0.559 social=0.441 inform=0.000 question=0.000 offer=0.000 request=0.000 status=0.000 reject=0.000
+    2. "Representing inclusivity and diversity in my art is important to me"
+       inform=0.994 social=0.004 question=0.002 confirm=0.001 reject=0.000 request=0.000 status=0.000 offer=0.000
+    3. "I also use it to speak up for the LGBTQ+ community and push for acceptance"
+       inform=0.956 question=0.042 social=0.002 confirm=0.000 request=0.000 reject=0.000 offer=0.000 status=0.000
+    4. "Here's a recent painting"
+       request=0.321 inform=0.318 social=0.263 offer=0.057 confirm=0.022 status=0.011 question=0.009 reject=0.000

@@ -1,0 +1,161 @@
+cls,sentence,predicted,confidence,match
+inform,A brewery commissioned Philadelphia's Grand Opera House.,inform,0.8591,1
+inform,Seraphina Beh secured an EastEnders role after performing in Pigeon English.,inform,0.8486,1
+inform,A 1920s Muslim women's magazine featured Filipino women as models of modernity.,inform,0.8626,1
+inform,Russian soldiers' photographs formed a mosaic of Vereshchagin's The Apotheosis of War.,inform,0.8616,1
+inform,An anime ending sequence featured a song compared to a pink glitter snowglobe.,inform,0.8581,1
+inform,Richard Nixon ordered an FBI investigation into Joetha Collier's killing.,inform,0.8535,1
+inform,An Invisible Woman Marvel Rivals advertisement breached Australian advertising ethics standards.,inform,0.8584,1
+inform,Some Brazilian universities maintain quota systems for transgender students and staff.,inform,0.8619,1
+inform,Archaeologists discovered Menches' papyri wrapped around mummified crocodiles.,inform,0.8535,1
+inform,A manicule in Cicero's manuscript had stretched fingers covering a full passage length.,inform,0.8594,1
+inform,Ann Dallas met Queen Elizabeth II as a surviving Kirkcudbright Artists' Colony member.,inform,0.8533,1
+inform,Bunny Vosters and her daughter Gretchen maintained a winning streak exceeding fifteen years.,inform,0.8514,1
+inform,Sancha of Aragon gained custody of her nephew following papal imprisonment release.,inform,0.8515,1
+inform,Danny Brown named his album Stardust after contemplating a failed Sophie collaboration.,inform,0.8609,1
+inform,I Witness Silwan artworks cover more than six hundred ten metres of walling.,inform,0.8375,1
+inform,Judge Violet Chipao's cases involving Malawian ministers were halted by prosecutorial action.,inform,0.8487,1
+inform,A British newspaper paid one hundred forty thousand dollars for a Jeffrey Epstein photograph.,inform,0.8443,1
+inform,Nearly all of Evernote's remaining staff has been laid off.,inform,0.8534,1
+inform,iOS lets carriers add WiFi networks that you cannot stop from joining.,inform,0.8561,1
+inform,Yamada's Choreographic Symphony Maria Magdalena derives from a ballet blocked by religious concerns.,inform,0.8508,1
+question,"I'm a software engineer going blind, how should I prepare?",inform,0.8302,0
+question,Am I the longest-serving programmer at 57 years and counting?,inform,0.8591,0
+question,Is S3 down?,inform,0.8474,0
+question,What are some cool but obscure data structures you know about?,inform,0.8120,0
+question,What tech job would let me get away with the least real work?,inform,0.8107,0
+question,What books changed the way you think about almost everything?,inform,0.8384,0
+question,What's the most interesting tech you built for just yourself?,inform,0.8286,0
+question,What do you do with your Raspberry Pi?,inform,0.8368,0
+question,What are your favorite low-coding apps or tools as a developer?,inform,0.8355,0
+question,What is your favorite YouTube channel for developers?,inform,0.8327,0
+question,Are you put off building something because it already exists?,inform,0.8191,0
+question,What is your favorite internet rabbit hole?,inform,0.8291,0
+question,Why can a scam company raise forty million in Series C funding?,inform,0.8400,0
+question,Why was HN down?,inform,0.8467,0
+offer,How can I help today?,inform,0.8293,n/a
+question,Is that accurate?,inform,0.8292,0
+question,Would that work for you?,inform,0.8066,0
+request,Can you confirm if it's working for you now?,inform,0.8167,0
+question,Why does the game need to keep advancing if it just finished?,inform,0.8206,0
+request,Could you please give an example?,inform,0.8169,0
+request,Could you please go into a little bit more detail here?,inform,0.8282,0
+request,Could you please clear that up for me?,inform,0.8109,0
+request,Could you please describe the main obstacles?,inform,0.7985,0
+request,Could you please stop referring to people who disagree with you as anti-vaxxers and trolls?,inform,0.8430,0
+request,Could you please elaborate on what you mean by SPA?,inform,0.8168,0
+request,Could you please provide one example of non-determinism?,inform,0.8380,0
+request,Could you please expand on your reasoning here?,inform,0.8192,0
+request,Could you please finish your sentence?,inform,0.8089,0
+request,Could you please provide references for this statement?,inform,0.8124,0
+request,Could you please explain how this is a bad thing?,inform,0.8072,0
+request,Could you please comment on salary ranges?,inform,0.8176,0
+request,Please send your resume and contact information to the address listed.,inform,0.8378,0
+request,Please send us an email at the support address.,inform,0.8357,0
+request,Help restore the tax deduction for software development in the US.,inform,0.8599,0
+request,Tell us about the internet situation inside Iran.,inform,0.8608,0
+request,Name one idea that changed your life.,inform,0.8474,0
+request,Can you walk me through the steps you took to resolve this on your own?,inform,0.7808,0
+request,"Can you confirm your name, email, order number, and shipping address for me?",inform,0.8058,0
+request,Do you mind sharing a bit more about the issue?,inform,0.8232,0
+request,Could you please point to an explanation of why random-access CTR decryption is dangerous?,inform,0.8256,0
+offer,I'll connect you with my colleague who's the best person to help you out.,inform,0.8349,n/a
+offer,"I can recommend these alternative solutions, would you be up for trying that?",inform,0.7703,n/a
+offer,Let me look into this right now and get back to you as soon as possible.,inform,0.8316,n/a
+offer,I'll transfer you to my colleague who works in a dedicated team for requests like yours.,inform,0.8062,n/a
+offer,"I have a workaround for you, you can do this instead.",inform,0.7825,n/a
+offer,I'm going to discuss your feedback with my supervisor and see what I can do.,inform,0.8020,n/a
+offer,"We can fix it, here's how.",inform,0.8517,n/a
+social,Feel free to contact us again any time you need more help.,inform,0.8348,0
+offer,I'll look into this with my team and see what we can do.,inform,0.8070,n/a
+offer,Let me look into this for you.,inform,0.8212,n/a
+offer,I can help schedule a demo for you.,inform,0.8032,n/a
+offer,Save big on your next purchase with this limited-time discount code.,inform,0.8597,n/a
+offer,Allow me a moment to review your request and help with this issue.,inform,0.8221,n/a
+offer,A member of our sales team can help provide an accurate pricing quote.,inform,0.8655,n/a
+offer,I'm going to transfer you to an expert in this area.,inform,0.8237,n/a
+offer,Let me take care of this for you right away.,inform,0.8284,n/a
+offer,Let me apply a quick fix right now.,inform,0.8199,n/a
+offer,Let me personally follow up with you by a specific date.,inform,0.8036,n/a
+offer,Let me connect you with our technical team right away.,inform,0.8366,n/a
+offer,Let me see what I can do to help make things better.,inform,0.8165,n/a
+confirm,"That sounds right, let me make sure I understand you correctly.",inform,0.8152,n/a
+social,Thanks for explaining that to me.,inform,0.8125,0
+confirm,I hear you and I'm sorry that didn't work as expected.,inform,0.7981,n/a
+confirm,I understand what you're trying to do.,inform,0.8262,n/a
+confirm,Let me just make sure I understand you right.,inform,0.8251,n/a
+social,I'm glad I could help today.,inform,0.8175,0
+social,Glad we managed to sort that out.,inform,0.8242,0
+confirm,That's a good choice!,inform,0.8393,n/a
+confirm,"Yes, we do offer that service.",inform,0.8236,n/a
+confirm,I completely understand why you feel this way.,inform,0.8255,n/a
+social,Thanks for explaining those details.,inform,0.8109,0
+confirm,"You're absolutely right, and I'm really sorry about that.",inform,0.8258,n/a
+confirm,I completely understand why you're upset.,inform,0.8410,n/a
+confirm,"Yes, I hear you—that sounds really frustrating.",inform,0.8318,n/a
+confirm,I understand your request.,inform,0.8191,n/a
+confirm,I get why you're upset—that's totally understandable.,inform,0.8451,n/a
+confirm,I want to make sure we're on the same page.,inform,0.8283,n/a
+confirm,I understand how frustrating this must be.,inform,0.8296,n/a
+confirm,That's correct.,inform,0.8454,n/a
+confirm,I understand your concern.,inform,0.8295,n/a
+reject,We don't offer this as a current feature right now.,inform,0.8384,n/a
+reject,I'm afraid that offer is no longer available.,inform,0.8379,n/a
+reject,We don't offer this feature right now.,inform,0.8431,n/a
+reject,"That's no longer available, but what I can offer instead is this.",inform,0.8102,n/a
+reject,"Unfortunately, we don't have that feature currently.",inform,0.8348,n/a
+reject,We don't offer 24/7/365 live chat coverage.,inform,0.8455,n/a
+reject,Our live chat is closed for the day.,inform,0.8566,n/a
+reject,We can't assist with that particular request right now.,inform,0.8370,n/a
+reject,We're unable to process that at this time.,inform,0.8494,n/a
+reject,That feature isn't available in your current plan.,inform,0.8456,n/a
+reject,"Unfortunately, we aren't able to offer that, but here's what I can do instead.",inform,0.8108,n/a
+reject,That's not something we're able to do at the moment.,inform,0.8555,n/a
+reject,"Unfortunately, our policy doesn't allow for a refund in this case.",inform,0.8510,n/a
+reject,"I wish I could make that happen for you, but here's what I can offer.",inform,0.7813,n/a
+reject,"A refund isn't ideal in this situation, but we can provide an alternative option.",inform,0.8512,n/a
+reject,"We cannot promise that, but I can offer an alternative.",inform,0.8306,n/a
+reject,I cannot continue the conversation if the language remains disrespectful.,inform,0.8280,n/a
+reject,"We're unable to process a refund, but we'd be happy to offer an alternative.",inform,0.8650,n/a
+reject,That's outside what we can currently offer.,inform,0.8389,n/a
+reject,Our policy doesn't allow for that in this case.,inform,0.8513,n/a
+social,"Hello, thank you for contacting us, how can I help?",inform,0.8058,0
+social,"Hey there, we appreciate you using our service.",inform,0.8120,0
+social,"Welcome back, it's great to see you again.",inform,0.8286,0
+social,Sorry to hear you ran into that issue.,inform,0.8274,0
+social,Thanks so much for your patience and sorry you've had to wait.,inform,0.8166,0
+social,Have a great day and thanks for chatting with us.,inform,0.8233,0
+social,We're always happy to hear from you.,inform,0.8474,0
+social,Enjoy the rest of your day.,inform,0.8494,0
+social,"Hi, thanks for reaching out, how can I help today?",inform,0.7975,0
+social,Thanks for contacting our support line.,inform,0.8317,0
+social,Hi again! Welcome back.,inform,0.8131,0
+social,I'm so sorry you're dealing with this.,inform,0.8270,0
+social,I apologize for the inconvenience this caused.,inform,0.8361,0
+social,Thanks for your business!,inform,0.8037,0
+social,Have a great day!,inform,0.8207,0
+social,Thanks for reaching out via chat!,inform,0.8108,0
+social,I'm glad I could help today!,inform,0.8163,0
+social,Thanks for reaching out to us today.,inform,0.8406,0
+social,Merry Christmas.,inform,0.8518,0
+social,"Thank you for being fast, almost ad-free and text-only.",inform,0.7924,0
+status,I'm currently listening to Nujabes - Modal Soul.,inform,0.8584,n/a
+status,I'm currently spending my free time learning ML and strengthening up my math.,inform,0.8341,n/a
+status,I'm currently building some products in the WordPress space.,inform,0.8613,n/a
+status,I'm currently finishing my Bachelors Degree in Computer Science.,inform,0.8563,n/a
+status,I'm currently taking a sabbatical from client work to build my own products.,inform,0.8621,n/a
+status,"I'm currently working with HTML, CSS, JS, PHP and MySQL.",inform,0.8363,n/a
+status,I'm currently part of a startup working on a new product.,inform,0.8643,n/a
+status,I'm currently looking for a project mainly related to embedded systems.,inform,0.8380,n/a
+status,I'm currently in the market for a gas range.,inform,0.8407,n/a
+status,I'm currently on a 2 month notice in London.,inform,0.8633,n/a
+status,I'm currently at work and wanted to try Python support.,inform,0.8233,n/a
+status,I'm currently working with Postgres and exploring new tools.,inform,0.8509,n/a
+status,I'm currently a non-traditional student studying computer science.,inform,0.8545,n/a
+status,I'm currently halfway through the first edition of Sweet Reason.,inform,0.8546,n/a
+status,I'm currently writing a book about Kotlin for Android Developers.,inform,0.8633,n/a
+status,I just finished my first web app.,inform,0.8352,n/a
+status,I just finished reading Godel's Proof.,inform,0.8378,n/a
+status,I just finished work on adding much richer SNMP polling ability.,inform,0.8384,n/a
+status,I just finished my master's thesis on optimizing lacing patterns for bicycle wheels.,inform,0.8315,n/a
+status,I just finished a short Joseph Campbell book.,inform,0.8494,n/a
