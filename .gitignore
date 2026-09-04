@@ -74,3 +74,14 @@ data/propbank-frames/
 
 # Training console logs
 train_output.txt
+
+# v6: secrets, response cache, run artifacts
+v6/annotators.yaml
+v6/runs/
+
+# v6: downloaded eval gold and third-party model caches (not source)
+data/litbank/
+data/benchmarks/
+cache/
+.venv-tools/
+.venv-trankit/
