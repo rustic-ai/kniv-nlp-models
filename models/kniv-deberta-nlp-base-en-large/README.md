@@ -1,6 +1,6 @@
 ---
 language: en
-license: cc-by-sa-4.0
+license: apache-2.0
 library_name: transformers
 base_model: microsoft/deberta-v3-large
 tags:
@@ -108,7 +108,7 @@ Part of the [Rustic](https://rustic.ai) initiative by
 | Demo | [`examples/cascade_demo.py`](https://github.com/rustic-ai/kniv-nlp-models/blob/main/examples/cascade_demo.py) |
 | Parameters | 443M (434M encoder + 9.5M heads) |
 | Download | 1.74 GB (PyTorch) / 1.78 GB (ONNX FP32) / 654 MB (ONNX INT8) |
-| License | CC-BY-SA-4.0 |
+| License | Apache-2.0 |
 
 ## Quick Start
 
@@ -296,6 +296,6 @@ with all 5 heads. One call returns all 6 output tensors.
 
 ## License
 
-CC-BY-SA-4.0
+Apache-2.0
 
 Built by [Dragonscale Industries Inc.](https://dragonscale.ai) | [Rustic](https://rustic.ai)

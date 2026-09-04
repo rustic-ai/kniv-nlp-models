@@ -1,6 +1,6 @@
 ---
 language: en
-license: cc-by-sa-4.0
+license: apache-2.0
 library_name: transformers
 base_model: microsoft/deberta-v3-base
 tags:
@@ -110,7 +110,7 @@ Part of the [Rustic](https://rustic.ai) initiative by
 | Parameters | 200M (184M encoder + 16M heads) |
 | Compression | 2.2× smaller than teacher |
 | Download | 798 MB (PyTorch) / 799 MB (ONNX FP32) / 262 MB (ONNX INT8) |
-| License | CC-BY-SA-4.0 |
+| License | Apache-2.0 |
 
 ## Quick Start
 
@@ -274,6 +274,6 @@ for the distillation methodology in full.
 
 ## License
 
-CC-BY-SA-4.0
+Apache-2.0
 
 Built by [Dragonscale Industries Inc.](https://dragonscale.ai) | [Rustic](https://rustic.ai)
