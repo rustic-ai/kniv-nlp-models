@@ -72,6 +72,63 @@ Sample size matters just as much. On 300 sentences Stanza appeared to beat v5
 on NER (0.931 vs 0.925); on the full 8,261 the result reversed (0.882 vs
 0.889). A sub-1-point gap at n=300 is noise.
 
+## Mixed provenance: measured, and affordable
+
+The decisions above take POS/NER/DEP/SRL from v5 and lemma/morph from Stanza.
+Stanza's morph is conditioned on Stanza's *own* POS, so a corpus recording
+v5's POS beside Stanza's morph teaches a mapping neither model implements.
+
+Measured on UD EWT test (`v6/runs/_cache`, no new inference needed):
+
+| | |
+|---|---|
+| v5 / Stanza POS agreement | 97.72% |
+| disagreements | 2.28% |
+| ...Stanza morph impossible given v5's POS | 42% of those |
+| **impossible pairs, share of all tokens** | **0.96%** |
+| on disagreements: v5 correct vs gold | 72% (Stanza 25%) |
+
+"Impossible" means a `(UPOS, FEATS)` combination that never occurs among the
+293 attested in UD EWT train. The failures are systematic, not random —
+participial adjectives (`fledged`, `United`, `committed`), where Stanza reads
+a past participle and emits `Tense=Past|VerbForm=Part|Voice=Pass` under an
+`ADJ` that v5 gets right.
+
+**Resolution: per-token loss masking.** Where the morph is incompatible with
+the recorded POS, mask that token's morph label rather than teaching the
+contradiction. Costs 0.96% of morph supervision; avoids falling back to a
+coherent-bundle compromise that would cost 3.2 DEP points.
+
+## Domain transfer
+
+The bake-off scores each annotator on its benchmark's domain. The v6 corpus
+is not those domains. `v6/probe_corpus.py` measures inter-annotator agreement
+on 600 corpus sentences across all six domains — agreement, not accuracy,
+since no gold exists there.
+
+| domain | v5 vs Stanza | v5 vs spaCy | Stanza vs spaCy |
+|--------|--------------|-------------|-----------------|
+| conversation | 0.9726 | 0.8965 | 0.8900 |
+| narrative | 0.9688 | 0.9218 | 0.9211 |
+| news | 0.9670 | 0.9005 | 0.8971 |
+| technical | 0.9668 | 0.8913 | 0.8815 |
+| business | 0.9595 | 0.8705 | 0.8662 |
+| encyclopedic | 0.9505 | 0.8943 | 0.8921 |
+| **all** | **0.9640** | | |
+| *UD EWT reference* | *0.9772* | | |
+
+Agreement degrades 1.3 points with a 2.2-point spread — mild and uniform, so
+the rankings transfer. But disagreement roughly doubles in the worst domain
+(2.28% -> 4.95%), so the morph mask rate is not constant and must be computed
+per sentence rather than assumed.
+
+The third column is the more consequential finding: **two independent modern
+taggers agree with each other 96% of the time and with the corpus's existing
+spaCy labels only 87-92%.** `corpus/gold/test.parquet` is silver from a
+single 2020-era tool despite the `gold` in its path. Re-annotating with the
+bake-off winners is a real quality gain, not just a schema change — and any
+v5 head trained on it inherited spaCy's errors.
+
 ## Verifications
 
 **v5's published headline numbers both reproduce exactly.**
