@@ -40,15 +40,23 @@ Evaluate all four content labels independently, then `SKIP` if none fired.
 
 ## Multi-label is the point
 
-Single-label was measurably wrong. Across the 50 hand-labelled items in
-`data/locomo50_gold_labels.csv`, **22 (44%) would gain at least one
-additional L1 label**, and 25 of 50 rationales explicitly describe more than
-one act — the annotator documenting a forced choice.
+Single-label forces a choice the data does not support. The evidence here is
+illustrative, not quantified — **nobody has yet annotated anything under this
+scheme**, so the rate at which utterances carry two labels is unknown and is
+one of the things the adjudicated gold set exists to measure.
 
-The cost is concrete. `data/locomo50_with_prev_multilabel.csv` row 1:
+What is checkable today: the `rationale` column in
+`data/locomo50_gold_labels.csv` exists because annotators needed somewhere to
+record what the single label discarded — *"opening greeting + phatic"*,
+*"reaction then info-seeking question"*, *"thanks + new question about the
+painting"*.
+
+And the cost is concrete. `data/locomo50_with_prev_multilabel.csv` row 1:
 
 > *"Hey Mel! Good to see you! How have you been?"* — gold `social`, model
 > predicted `question` at 0.83, **scored wrong.**
+
+(`data/locomo50_with_prev_multilabel.csv`, row 1.)
 
 The model was right. It is a greeting **and** a question: `SKIP` + `QUERY`
 under this scheme — except `SKIP` is exclusive, so it is simply `QUERY`.
@@ -75,7 +83,9 @@ predicted as the complement — if no content label clears threshold, emit
 
 ## What was deliberately dropped
 
-**The sparse classes.** In 500 wild sentences (`longmemeval_summary.json`)
+**The sparse classes.** This is the load-bearing argument for the collapse,
+and it rests on measured counts rather than interpretation. In 500 wild
+sentences (`longmemeval_summary.json`)
 `status` fired 8 times, `reject` once, `offer` once. A 500-item gold set
 yields 1–8 examples of each — not enough to estimate an F1, let alone
 compare annotators. Three of the shipped eight labels were unmeasurable.

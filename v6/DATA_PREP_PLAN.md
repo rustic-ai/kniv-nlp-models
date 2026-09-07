@@ -104,9 +104,10 @@ in-domain and 0.613 in the wild diverge.
 The head is a dispatch table, so granularity follows the number of distinct
 downstream operations — five. Three of the shipped eight labels were
 unmeasurable (`status` 8, `reject` 1, `offer` 1 per 500) and collapse into
-those five. Single-label was measurably wrong: 22/50 hand-labelled items
-(44%) gain a second label under the new scheme, and 25/50 gold rationales
-already describe more than one act.
+those five. Single-label forces choices the data does not support — the
+`rationale` column in the LoCoMo gold exists to record what the single label
+discarded. The rate at which utterances carry two labels is **not yet
+measured**; the adjudicated gold set will establish it.
 
 The `plan_commit` vs `request` actor distinction is dropped from CLS and left
 to the SRL head, which already recovers it from `ARG0`. A nested dialog-act
