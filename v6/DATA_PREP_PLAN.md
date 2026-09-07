@@ -76,7 +76,14 @@ not sentence-split").
 Option 1 is preferred. Either way this is a corpus-pipeline change, and no
 v6 corpus can be built before it lands.
 
-## 3. BLOCKER: the CLS taxonomy is undecided
+## 3. RESOLVED: the CLS taxonomy
+
+Settled in `CLS_TAXONOMY.md`: five multi-label memory actions — `EXTRACT`,
+`UPDATE`, `QUERY`, `COMMIT`, `SKIP` — replacing all three of the label sets
+previously in the repo. Rationale in brief; the full guide is the annotation
+contract.
+
+### Why it was undecided
 
 Three incompatible label sets exist in the repo, none a subset of another:
 
@@ -92,8 +99,19 @@ once; three labels cover 90% of traffic. A macro-F1 over eight labels where
 three are near-empty measures very little, which is part of why 0.951
 in-domain and 0.613 in the wild diverge.
 
-This is a product decision, not a measurement one. Everything about CLS —
-prompts, gold, evaluation — is blocked behind it.
+### Resolution
+
+The head is a dispatch table, so granularity follows the number of distinct
+downstream operations — five. Three of the shipped eight labels were
+unmeasurable (`status` 8, `reject` 1, `offer` 1 per 500) and collapse into
+those five. Single-label was measurably wrong: 22/50 hand-labelled items
+(44%) gain a second label under the new scheme, and 25/50 gold rationales
+already describe more than one act.
+
+The `plan_commit` vs `request` actor distinction is dropped from CLS and left
+to the SRL head, which already recovers it from `ARG0`. A nested dialog-act
+tier was considered and rejected — it reintroduces the sparse classes that
+made v5's CLS unmeasurable.
 
 ## 4. Pipeline
 
@@ -262,7 +280,7 @@ is nothing to select on.
 ## 11. Sequencing
 
 1. **Reintroduce document structure** — window builder over `corpus/output/raw/`. Blocks everything.
-2. **Settle the CLS taxonomy.** Blocks the weakest head.
+2. ~~Settle the CLS taxonomy~~ — done, see `CLS_TAXONOMY.md`.
 3. Extend `build_corpus.py` from sentences to windows; add `sentence_spans`, multi-predicate SRL frames, per-sentence CLS.
 4. Annotate: v5, Stanza, LingMess over the windows; LLM ensemble for CLS/sentiment/keyword.
 5. Build the CLS adjudicated gold set and measure the human ceiling.
