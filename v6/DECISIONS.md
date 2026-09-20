@@ -19,7 +19,7 @@ re-scored without re-running inference.
 | NER | **kniv-v5** | 0.889 F1 | Stanza 0.882 | +0.7 |
 | SRL | **kniv-v5** | 0.843 F1 | grok 0.815 | +2.8 |
 | coref | **LingMess** | 0.699 CoNLL-F1 | astra 0.701 | −0.2 (confirmed) |
-| rel | **ATLOP retrained on Re-DocRED** | 0.755 triple-F1 | astra PAIRS 0.545 | +21.0 |
+| rel | **ATLOP retrained on Re-DocRED** | 0.790 triple-F1 | astra PAIRS 0.545 | +24.5 |
 | CLS, sentiment, keyword | LLM ensemble | — | — | no gold exists |
 
 **kniv-v5 takes four layers, Stanza two, LingMess one. Relations go to a
@@ -307,7 +307,8 @@ Measured on Re-DocRED **test**, 473 documents common to every system:
 
 | system | F1 | P | R |
 |---|---|---|---|
-| **ATLOP retrained on Re-DocRED** | **0.755** | 0.816 | 0.703 |
+| **ATLOP retrained on Re-DocRED (10 epochs)** | **0.790** | **0.901** | 0.704 |
+| ATLOP retrained, epoch 2 only | 0.755 | 0.816 | 0.703 |
 | ATLOP released (DocRED-trained) | 0.459 | 0.952 | 0.302 |
 | astra PAIRS | 0.545 | 0.576 | 0.518 |
 | astra | 0.477 | 0.619 | 0.388 |
@@ -319,9 +320,16 @@ Measured on Re-DocRED **test**, 473 documents common to every system:
 false positives than they recover in recall. The relation layer needs no
 API calls at all: 500 documents infer in ~90 seconds on a laptop.
 
-Training: 10 epochs planned, best at epoch 2, dev F1 0.7479 (test 0.755 —
-test above dev, so no dev overfitting). roberta-large, batch 4, lr 3e-5,
-classifier lr 1e-4. Reproduce with `v6/experiments/atlop_colab.sh`.
+Training: 10 epochs, best at the final epoch, dev F1 0.7799 / test 0.790.
+roberta-large, batch 4, lr 3e-5, classifier lr 1e-4. The late epochs buy
+**precision**: 0.7775 at epoch 0 rising to 0.8871 at epoch 9 while recall
+holds near 0.70 — which is exactly what relation labels need.
+
+An earlier partial run stopped at epoch 2 (test 0.755) and the gap between
+epochs 2 and 4 was only +0.3 F1, from which this document previously
+concluded the curve had flattened. **That was wrong** — epochs 4 to 9 added
+a further 2.4 dev F1 and 3.4 precision. A plateau inferred from two
+adjacent points in the middle of a curve is not a plateau.
 
 ### Precision knob for training labels
 
@@ -331,18 +339,41 @@ precision sharply:
 
 | rule | F1 | **P** | R |
 |---|---|---|---|
-| retrained alone | 0.755 | 0.816 | 0.703 |
-| retrained AND PAIRS | 0.575 | **0.935** | 0.415 |
-| retrained AND (astra OR grok) | 0.548 | 0.930 | 0.389 |
+| **complete model alone** | **0.790** | **0.901** | 0.704 |
+| complete AND PAIRS | 0.588 | 0.964 | 0.423 |
+| complete AND astra | 0.482 | 0.966 | 0.321 |
 
-Untested and likely better: ATLOP has **adaptive thresholding** built in,
-so precision can be bought by moving its own threshold rather than by
-paying for LLM calls. Try that before adopting the intersection.
+**Use the model alone.** At 0.901 precision the intersections are no longer
+worth their cost: they buy ~6 precision points and give up ~28 recall
+points, and they reintroduce the API calls the supervised model removed.
+Uncertain pairs are masked rather than labelled `no_relation`, as for
+morph.
 
-### Operational lessons (four VMs lost)
+ATLOP's adaptive threshold remains available as a cheaper precision knob
+than an LLM intersection if 0.901 is not enough for a given layer.
 
-Colab reclaimed four A100s at 1.5h, 1h, 22min and ~25min. Three failures
-were ours, not Colab's, and each has a fix now in the code:
+### Operational lessons (five VMs lost, then a clean run)
+
+Five A100s were reclaimed at 1.5h, 1h, 22min, 25min and 28min before the
+sixth attempt completed 10 epochs without incident.
+
+**Root cause: the job ran detached from the Jupyter kernel.** Training was
+launched as a background OS process, so the GPU was busy but the *kernel*
+was idle — and Colab reclaims on kernel idleness, which keep-alive does not
+address. `colab status` reported `IDLE` throughout every failed run and
+that was dismissed as cosmetic. Running the same job *inside* the kernel
+via `colab exec` fixed it outright.
+
+Two things this ruled out along the way: the auth token carries the
+`colaboratory` scope, and the keep-alive daemon does spawn and does
+survive. Neither was the problem.
+
+Note that a kernel-resident job cannot be monitored with `colab exec` — the
+kernel is single-threaded, so probes queue behind the training cell. Use
+the contents API (`colab download`) instead, which is what the checkpoint
+puller does.
+
+Four further failures were ours, and each has a fix now in the code:
 
 | failure | cause | fix |
 |---|---|---|
@@ -350,6 +381,7 @@ were ours, not Colab's, and each has a fix now in the code:
 | 40 minutes of "progress" after the VM died | puller downloaded *into* the destination file, so a failed download silently left the stale copy | download to a temp path; treat a >15 min stale heartbeat as a dead run |
 | **overwrote a 0.7161 checkpoint with a 0.6278 one** | no comparison before writing | keep a `best.f1` sidecar; only replace on a higher score |
 | restarting from scratch three times | only `best.pt` was pulled — no optimizer state | pull `latest.pt` too, so a new VM resumes |
+| lost a 0.7511 checkpoint when the VM died mid-pull | the 4.1 GB resume point was fetched *before* the 1.4 GB weights | weights first, resume point second |
 
 The general shape is the one that keeps recurring in this project:
 **silence and staleness look identical to progress unless something

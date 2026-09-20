@@ -415,14 +415,15 @@ ATLOP's near-perfect precision is an artifact of training on the original
 DocRED (systematic false negatives -> a conservative model).
 
 **Final: retrain ATLOP on Re-DocRED and annotate with it alone.** Measured
-on Re-DocRED test (473 docs): **F1 0.755, P 0.816, R 0.703** — +21 over the
-best LLM single model and +17 over the best LLM combination. Every union
+on Re-DocRED test (473 docs): **F1 0.790, P 0.901, R 0.704** — +24 over the
+best LLM single model and +20 over the best LLM combination. Every union
 with an LLM *lowers* F1, so the relation layer needs **no API calls**: 500
 documents infer in ~90 seconds on a laptop.
 
-For training labels, precision can be raised further — `retrained AND
-PAIRS` gives P 0.935 at R 0.415 — but ATLOP's own adaptive threshold is the
-cheaper knob and should be tried first.
+At 0.901 precision, intersecting with an LLM is no longer worth it: it buys
+~6 precision points for ~28 recall points and reintroduces the API calls
+the supervised model removed. **Annotate with the model alone** and mask
+uncertain pairs rather than labelling them `no_relation`.
 
 **Also correct §3A.3:** the type-constraint prune described there does not
 work. Measured on Re-DocRED, type constraints remove only 2.6% of ordered
