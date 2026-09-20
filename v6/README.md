@@ -4,6 +4,14 @@ Next-generation pipeline. Deliberately separate from the v5 work under
 `models/`, `shared/` and `scripts/` — nothing here imports from those. v5 is
 referenced only as a *teacher*, never as a code dependency.
 
+## Documents
+
+| file | what it is |
+|------|-----------|
+| [DATASET_SPEC.md](DATASET_SPEC.md) | the v6 dataset: proposal, record schema, pipeline, QA gates, sequencing |
+| [DECISIONS.md](DECISIONS.md) | which annotator produces each layer, and the measurement behind it |
+| [CLS_TAXONOMY.md](CLS_TAXONOMY.md) | the CLS annotation contract |
+
 ## Annotator bake-off
 
 The v6 corpus is annotated by a committee: frontier LLMs for the semantic and

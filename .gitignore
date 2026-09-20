@@ -85,3 +85,8 @@ data/benchmarks/
 cache/
 .venv-tools/
 .venv-trankit/
+
+# Re-DocRED relation data and ATLOP checkpoints (evaluation + annotator
+# weights; 5+ GB). Re-DocRED is MIT and re-downloadable — see
+# v6/experiments/atlop_colab.sh. best.pt is the trained annotator.
+data/re-docred/

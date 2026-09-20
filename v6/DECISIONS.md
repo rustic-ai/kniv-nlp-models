@@ -18,15 +18,81 @@ re-scored without re-running inference.
 | DEP | **kniv-v5** | 0.949 UAS / 0.925 LAS | Stanza 0.917 / 0.888 | +3.2 |
 | NER | **kniv-v5** | 0.889 F1 | Stanza 0.882 | +0.7 |
 | SRL | **kniv-v5** | 0.843 F1 | grok 0.815 | +2.8 |
-| coref | **LingMess** | 0.695 CoNLL-F1 | grok 0.681 | +1.4 |
+| coref | **LingMess** | 0.699 CoNLL-F1 | astra 0.701 | −0.2 (confirmed) |
+| rel | **ATLOP retrained on Re-DocRED** | 0.755 triple-F1 | astra PAIRS 0.545 | +21.0 |
 | CLS, sentiment, keyword | LLM ensemble | — | — | no gold exists |
 
-**kniv-v5 takes four layers, Stanza two, LingMess one. The LLM ensemble takes
-none.**
+**kniv-v5 takes four layers, Stanza two, LingMess one. Relations go to a
+supervised model unioned with an LLM.**
+
+The relation layer was re-opened after the first result (astra+grok union,
+0.503) and improved to **0.566** — see "Improving the relation layer" below.
+The original conclusion that relations had "no specialist to lose to" was
+wrong: ATLOP exists, its released checkpoint fits our inventory exactly
+because we adopted Re-DocRED's own 96 types, and it runs the full test set
+in 90 seconds on a laptop.
+
+Two decisions are open after the gpt-6 (`astra`) round:
+
+* ~~**coref**~~ — **resolved: LingMess keeps the layer.** astra led by +1.4
+  at n=200, which collapsed to **+0.16 on the full 513-window LitBank**
+  (0.7006 vs 0.6990). Astra retains a real B³ edge (0.7254 vs 0.7109), so
+  the two cluster differently, but not by enough to show in the headline.
+  A 0.16-point difference cannot justify replacing a local MIT model with a
+  hosted API across 20K windows — astra brings per-call cost, content-filter
+  rejections and network failure modes that LingMess does not have.
+* **NER** — astra 0.849 vs Stanza 0.848 at n=300 is inside the noise band
+  that reversed last time; neither is near v5. Needs the full test set.
 
 ## Three findings that generalise
 
-**1. Consensus never beat best-of-breed — 7 layers, 7 times.**
+**1. Consensus beat best-of-breed on exactly one layer of eight — and only
+under the right combination rule.**
+
+The original finding was "7 layers, 7 times, majority voting loses". It
+held, but it was stated too broadly: all seven were **per-token labelling**
+tasks, where majority voting is the natural rule and drags the strongest
+annotator toward the weakest.
+
+Relations are **set-valued and recall-bound**, and there the rule matters
+more than the idea:
+
+| combination | rule | F1 | P | R |
+|---|---|---|---|---|
+| astra | — | 0.478 | 0.619 | 0.389 |
+| grok | — | 0.470 | 0.532 | 0.421 |
+| **astra + grok** | **union** | **0.503** | 0.520 | 0.487 |
+| astra + grok + sol | union | 0.499 | 0.508 | 0.490 |
+| astra + grok | majority | 0.435 | 0.668 | 0.323 |
+| astra + grok + mai | union | 0.412 | 0.353 | 0.493 |
+| all seven | union | 0.335 | 0.244 | 0.532 |
+| all seven | majority | 0.310 | 0.655 | 0.203 |
+
+Measured on the 472 Re-DocRED test documents all seven annotators covered
+(16,293 gold triples). Per annotator:
+
+| annotator | coverage | F1 | P | R |
+|---|---|---|---|---|
+| **astra** | 0.992 | **0.478** | 0.619 | 0.389 |
+| **grok** | 0.952 | **0.470** | 0.532 | 0.421 |
+| sol | 0.992 | 0.326 | 0.581 | 0.226 |
+| luna | 0.992 | 0.275 | 0.499 | 0.189 |
+| deepseek | 0.996 | 0.239 | 0.292 | 0.202 |
+| mistral | 0.998 | 0.230 | 0.294 | 0.188 |
+| mai | 0.996 | 0.110 | 0.153 | 0.085 |
+
+grok's 0.952 coverage is the outlier: 23 documents lost to
+`APIConnectionError` *after four retries each*, at a measured median of 507s
+per call. It matches astra on quality and is far more expensive and less
+reliable to run.
+
+Majority *intersects* the annotators and destroys recall; union *adds* and
+recovers it. The guardrails are narrow: only the top two members help
+(adding sol costs 0.4, adding all six costs 11.5), and only where recall is
+the binding constraint. On a per-token layer union would simply accumulate
+errors.
+
+**1b. Majority voting still loses on every per-token layer — 7 of 7.**
 
 | layer | ENSEMBLE | best single | delta |
 |-------|----------|-------------|-------|
@@ -68,9 +134,15 @@ published 86.22 UAS to a measured 91.7 (+5.5), POS 95.40 → 97.7 (+2.3), and
 UFeats 96.11 → 96.1 (+0.0). The gradient is itself informative: DEP is highly
 sensitive to sentence segmentation, POS moderately, morph not at all.
 
-Sample size matters just as much. On 300 sentences Stanza appeared to beat v5
-on NER (0.931 vs 0.925); on the full 8,261 the result reversed (0.882 vs
-0.889). A sub-1-point gap at n=300 is noise.
+Sample size matters just as much, and this has now happened twice:
+
+| layer | small sample | full sample |
+|---|---|---|
+| NER | Stanza 0.931 > v5 0.925 (n=300) | **reversed** — v5 0.889 > Stanza 0.882 (n=8,261) |
+| coref | astra +1.4 over LingMess (n=200) | **evaporated** — +0.16 (n=513) |
+
+A sub-1-point gap at small n is noise. Treat it as a prompt to enlarge the
+sample, never as a result.
 
 ## Mixed provenance: measured, and affordable
 
@@ -161,6 +233,146 @@ This is a *different* bug from the one in the shipped file — that file uses
 provenance is unknown.
 
 Both live in the dataset repo and are not fixed by anything in `v6/`.
+
+## Improving the relation layer
+
+The first relation result was 0.503 (astra+grok union). Error decomposition
+on the cached predictions showed the loss was **not** under-generation —
+32.4 triples emitted per document against 34.5 gold — but pair *selection*:
+
+| | share of misses |
+|---|---|
+| pair never proposed at all | **74.7%** |
+| pair found, wrong relation | 24.9% |
+| direction reversed | 0.3% |
+
+and 81.4% of false positives fell on pairs holding no gold relation. Three
+interventions were measured against that diagnosis.
+
+| system | F1 | P | R | cost |
+|---|---|---|---|---|
+| ATLOP (supervised, local) | 0.459 | **0.952** | 0.302 | free, 90s total |
+| astra | 0.477 | 0.619 | 0.388 | 1x API |
+| astra + few-shot | — | — | — | +1.2 solo, **0.0 in union** |
+| astra PAIRS (enumerated pairs) | 0.545 | 0.576 | 0.518 | 5.4x API |
+| union astra+grok *(first decision)* | 0.502 | 0.519 | 0.487 | 2x API |
+| **union ATLOP + astra** | **0.566** | 0.664 | 0.493 | **1x API** |
+| **union ATLOP + PAIRS** | **0.586** | 0.596 | 0.577 | 5.4x API |
+| union ATLOP + PAIRS + grok | 0.564 | 0.522 | 0.614 | 7x API |
+
+**1. A supervised model is the single biggest gain, and it is free.**
+ATLOP's released roberta-large checkpoint scores 0.952 precision at 0.302
+recall against Re-DocRED. That profile is a *training artifact*: it was
+trained on the ORIGINAL DocRED, whose systematic false negatives taught it
+to be conservative; Re-DocRED restored the missing triples, which ATLOP
+never proposes. Its errors are therefore near-complementary to the LLMs',
+which over-propose — and the union exploits that for +8.9 F1 over astra at
+**no additional API cost**.
+
+**2. Pair enumeration works, at 5.4x the calls.** Handing the model the
+candidate pairs instead of asking it to find them lifts astra 0.477 ->
+0.545, and raises triples emitted per document from 23.7 to 32.4. Neither
+prune helps: type constraints keep 97.4% of ordered pairs (DocRED has six
+coarse entity types, most combinations admitting 40+ relations) and
+locality pruning costs too much gold (same-sentence keeps 47.6%). So it is
+~397 pairs per document, chunked 80 per call.
+
+**3. Few-shot is not worth it.** +1.2 F1 solo and **0.0 in the union** — the
+examples recover what the second annotator was already contributing.
+
+**Superseded: retrain the supervised model.** See "Retraining ATLOP" below.
+Everything above measures the RELEASED checkpoint, which was trained on the
+original DocRED. Retrained on Re-DocRED it reaches **0.755 test F1**, beats
+every LLM combination by 17+ points, and makes the LLMs redundant on this
+layer — every union with an LLM now *lowers* F1.
+
+**The open risk is domain.** ATLOP is trained on Wikipedia and its 0.952
+precision is measured there. Our corpus is conversation, business and
+narrative, where we have no gold. That precision may not survive the shift,
+and it must be checked with the agreement probe (`v6/probe_corpus.py`)
+before the corpus run, not assumed.
+
+Reproduce: `v6/experiments/rel_variants.py` (few-shot, pairs) and
+`v6/experiments/atlop_runner.py` (setup in its docstring).
+
+## Retraining ATLOP: the decision for the relation layer
+
+The released checkpoint's 0.952 precision / 0.302 recall was a training
+artifact, not a property of the architecture: it learned from the ORIGINAL
+DocRED, whose systematic false negatives taught it to under-propose.
+Retraining the same architecture on **Re-DocRED train** (3,053 documents,
+MIT) changes the regime entirely.
+
+Measured on Re-DocRED **test**, 473 documents common to every system:
+
+| system | F1 | P | R |
+|---|---|---|---|
+| **ATLOP retrained on Re-DocRED** | **0.755** | 0.816 | 0.703 |
+| ATLOP released (DocRED-trained) | 0.459 | 0.952 | 0.302 |
+| astra PAIRS | 0.545 | 0.576 | 0.518 |
+| astra | 0.477 | 0.619 | 0.388 |
+| grok | 0.469 | 0.530 | 0.421 |
+| union retrained + astra | 0.721 | 0.672 | 0.778 |
+| union retrained + PAIRS | 0.695 | 0.612 | 0.806 |
+
+**The LLMs are redundant here.** Every union lowers F1 — they add more
+false positives than they recover in recall. The relation layer needs no
+API calls at all: 500 documents infer in ~90 seconds on a laptop.
+
+Training: 10 epochs planned, best at epoch 2, dev F1 0.7479 (test 0.755 —
+test above dev, so no dev overfitting). roberta-large, batch 4, lr 3e-5,
+classifier lr 1e-4. Reproduce with `v6/experiments/atlop_colab.sh`.
+
+### Precision knob for training labels
+
+Relation labels are training data, where a wrong triple teaches an error
+and a missing one only costs supervision. Intersecting with an LLM raises
+precision sharply:
+
+| rule | F1 | **P** | R |
+|---|---|---|---|
+| retrained alone | 0.755 | 0.816 | 0.703 |
+| retrained AND PAIRS | 0.575 | **0.935** | 0.415 |
+| retrained AND (astra OR grok) | 0.548 | 0.930 | 0.389 |
+
+Untested and likely better: ATLOP has **adaptive thresholding** built in,
+so precision can be bought by moving its own threshold rather than by
+paying for LLM calls. Try that before adopting the intersection.
+
+### Operational lessons (four VMs lost)
+
+Colab reclaimed four A100s at 1.5h, 1h, 22min and ~25min. Three failures
+were ours, not Colab's, and each has a fix now in the code:
+
+| failure | cause | fix |
+|---|---|---|
+| lost a 0.7374 checkpoint entirely | nothing copied weights off the VM | puller downloads `best.pt` on every improvement |
+| 40 minutes of "progress" after the VM died | puller downloaded *into* the destination file, so a failed download silently left the stale copy | download to a temp path; treat a >15 min stale heartbeat as a dead run |
+| **overwrote a 0.7161 checkpoint with a 0.6278 one** | no comparison before writing | keep a `best.f1` sidecar; only replace on a higher score |
+| restarting from scratch three times | only `best.pt` was pulled — no optimizer state | pull `latest.pt` too, so a new VM resumes |
+
+The general shape is the one that keeps recurring in this project:
+**silence and staleness look identical to progress unless something
+explicitly checks.**
+
+## Environment fragility found while re-running coref
+
+`.venv-tools` had been upgraded to transformers 5.x at some point after the
+original coref run, and **LingMess stopped loading entirely** — two separate
+breakages, both silent until a run needed an uncached window:
+
+| symptom | cause | fix |
+|---|---|---|
+| `LongformerModel does not support ... scaled_dot_product_attention` | transformers now defaults to SDPA; LingMess is Longformer-based and fastcoref exposes no `attn_implementation` | inject `attn_implementation="eager"` for the duration of the load only |
+| `'LingMessModel' object has no attribute 'all_tied_weights_keys'` | transformers 5.x reads an attribute its own `post_init` sets; fastcoref's custom classes never call it | class-attribute fallback (not a property — `post_init` *assigns* to it on models that do call it) |
+
+Both live in `v6/annotate/coref.py` as a narrow context manager rather than
+process-wide settings, so FCoref and every other model path are untouched.
+
+The wider point: the cached predictions stayed valid and replayed fine, so
+nothing looked wrong until a larger sample was requested. **A decided layer
+had become unreproducible without anyone noticing.** Pinning the annotator
+environments is a prerequisite for the corpus run, not a tidiness exercise.
 
 ## Annotators evaluated but rejected
 

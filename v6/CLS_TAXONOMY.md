@@ -1,166 +1,152 @@
 # v6 CLS taxonomy
 
-## Purpose
+Six labels, multi-label, named after ISO 24617-2 general-purpose
+communicative functions. This file is the annotation contract: it defines
+the labels, the decision procedure, and the edge cases. Where it and a
+prompt disagree, this file wins.
 
-The CLS head is a **dispatch table**, not a linguistic classification. Its
-job is to decide what the downstream memory system does with an utterance.
-`corpus/pipeline/classify.py` already said so — every label there carries an
-arrow to a memory operation.
+## Provenance
 
-That fixes the design rule: **granularity is set by the number of distinct
-downstream actions.** Two labels triggering the same operation are one class
-with two names. A label triggering no operation is not a class.
+ISO 24617-2 (the Dialogue Act Markup Language standard, DiAML) defines 56
+communicative functions across 9 dimensions. Its **general-purpose**
+functions form this hierarchy:
+
+```
+General-Purpose Communicative Functions
+├─ Information-Transfer
+│  ├─ Information-Seeking → Question
+│  │     Propositional Q · Set Q · Choice Q · Check Q · Test Q
+│  └─ Information-Providing
+│        Inform  → Agreement, Disagreement
+│        Answer  → Confirm, Disconfirm
+└─ Action-Discussion
+   ├─ Commissives  Offer · Promise · Address/Accept/Reject Request
+   └─ Directives   Request · Instruct · Suggestion ·
+                   Address/Accept/Reject Suggestion ·
+                   Address/Accept/Reject Offer
+```
+
+Two things this taxonomy is **not**:
+
+1. **It is not full ISO.** Full ISO assigns each segment a *dimension* as
+   well as a function, and permits labelling at any depth of the tree.
+   Doing that properly needs a hierarchical classifier with one output
+   layer per level; the one published attempt trains on DialogBank, which
+   is far too small to be a teacher corpus. We take ISO's top level only.
+2. **It is not purely general-purpose.** `Feedback` and `Social` are
+   dimension-specific in ISO — `autoPositive`/`autoNegative` belong to the
+   Auto-Feedback dimension, greeting/goodbye/thanking/apology to Social
+   Obligations Management. A flat head has to flatten across dimensions to
+   represent them, and both are far too frequent in conversational text to
+   drop.
+
+So: **ISO-derived, not ISO-compliant.** Documented that way deliberately,
+because claiming standards compliance we do not have is how the previous
+taxonomies ended up undefendable.
+
+## Why not finer
+
+ISO's own annotated corpora are extremely long-tailed: `inform` 53.8%,
+`autoPositive` 20.7%, then `propositionalQuestion` 2.6%, `setQuestion`
+0.97%, `checkQuestion` 0.66%. Splitting `Question` into ISO's five subtypes
+reproduces exactly the failure mode of the shipped v5 head, where three of
+eight labels were near-empty and macro-F1 measured almost nothing.
+
+Reference points for what is achievable: SwDA with 42 tags is ~85.5%
+accuracy with a human inter-annotator ceiling of 84% / κ=0.80; MRDA
+collapsed to 5 tags is ~92.2%. Coarse labels are not a compromise, they are
+where the reliable signal is.
 
 ## The labels
 
-Five actions. Multi-label: every action that applies fires.
+Multi-label. Every function that applies fires. The empty set is legal and
+means none applied (filler, stalling, fragments) — there is no `SKIP` class.
 
-| label | memory operation | fires when |
-|-------|------------------|-----------|
-| `EXTRACT` | create an observation | the utterance asserts something about the world that could be stored |
-| `UPDATE` | revise or reinforce an existing observation | it corrects, contradicts, confirms or agrees with something already said |
-| `QUERY` | record a knowledge gap | it seeks information |
-| `COMMIT` | create a goal/task node | it creates an obligation or intention to act |
-| `SKIP` | nothing | none of the above fired |
+| label | ISO origin | fires when |
+|-------|-----------|-----------|
+| `Question` | Information-Seeking | the speaker seeks information they do not have |
+| `Inform` | Information-Providing (incl. Answer, Agreement, Disagreement) | the speaker asserts, answers, agrees or disagrees with propositional content |
+| `Directive` | Action-Discussion / Directives | the speaker tries to get the *addressee* to act — request, instruct, suggest |
+| `Commissive` | Action-Discussion / Commissives | the *speaker* commits to act — offer, promise, accept/reject a request |
+| `Feedback` | Auto-Feedback dimension | the speaker signals their own processing of what was said — acknowledgement, backchannel, non-understanding |
+| `Social` | Social Obligations Management | greeting, goodbye, thanking, apology, congratulation |
 
 ## Decision procedure
 
-Evaluate all four content labels independently, then `SKIP` if none fired.
+Evaluate every label independently against the utterance. Do not pick "the
+best one".
 
-1. **EXTRACT** — does it assert a storable fact about the world, a person, or
-   a state of affairs? Include facts embedded in other acts.
-2. **UPDATE** — does it revise, contradict, confirm, or agree with prior
-   content? Requires discourse context; the marker is usually explicit
-   (*actually, no, I meant, yes that's right, exactly*).
-3. **QUERY** — does it seek information the speaker does not have?
-4. **COMMIT** — does it create an obligation or intention to act, by either
-   party? (*I'll send it* / *please restart the server* / *shall we meet?*)
-5. **SKIP** — assign only if 1–4 all failed. `SKIP` is exclusive by
-   construction, which removes the annotator's hardest judgement call.
+1. **Question** — is there a genuine information request? Rhetorical
+   questions and *checking* questions both count (ISO's `checkQuestion` is
+   Information-Seeking). Tag questions on an assertion fire both `Question`
+   and `Inform`.
+2. **Inform** — is propositional content asserted? Answers are `Inform`
+   (ISO's `Answer` is under Information-Providing). Agreement and
+   disagreement about content are `Inform`, **not** `Feedback`.
+3. **Directive** — is the addressee being asked, told or advised to act?
+   Includes imperatives, polite requests, and suggestions.
+4. **Commissive** — is the speaker undertaking to act? Includes accepting
+   or refusing someone else's request.
+5. **Feedback** — is the speaker reporting their own uptake? *mm-hm, ok,
+   right, sorry what?* Distinguishing rule: `Feedback` is about the
+   **communication**; `Inform` (agreement) is about the **content**.
+   "Right." as a backchannel is `Feedback`; "Right, it shipped Tuesday" is
+   `Inform`.
+6. **Social** — is a social obligation being discharged? Greetings,
+   thanks, apologies, farewells.
 
-## Multi-label is the point
+## Known edge cases
 
-Single-label forces a choice the data does not support. The evidence here is
-illustrative, not quantified — **nobody has yet annotated anything under this
-scheme**, so the rate at which utterances carry two labels is unknown and is
-one of the things the adjudicated gold set exists to measure.
+| utterance | labels | why |
+|---|---|---|
+| "Can you send the report?" | `Directive` | interrogative form, directive function |
+| "Do you know when it ships?" | `Question` | genuine information-seeking |
+| "It ships Tuesday, right?" | `Question` + `Inform` | check question over asserted content |
+| "Sure, I'll do it." | `Commissive` | speaker commits |
+| "Sure." (after a request) | `Commissive` | accept-request, even with no content |
+| "Got it, thanks." | `Feedback` + `Social` | uptake plus thanking |
+| "No, it was Wednesday." | `Inform` | disagreement about content |
+| "Sorry, what?" | `Feedback` | negative auto-feedback, not `Social` apology |
+| "um, so, yeah" | ∅ | stalling; ISO Time Management, out of scope |
 
-What is checkable today: the `rationale` column in
-`data/locomo50_gold_labels.csv` exists because annotators needed somewhere to
-record what the single label discarded — *"opening greeting + phatic"*,
-*"reaction then info-seeking question"*, *"thanks + new question about the
-painting"*.
+## Relationship to the three label sets in the repo
 
-And the cost is concrete. `data/locomo50_with_prev_multilabel.csv` row 1:
+None of the three is a subset of another; all three are superseded.
 
-> *"Hey Mel! Good to see you! How have you been?"* — gold `social`, model
-> predicted `question` at 0.83, **scored wrong.**
+| old label | source | v6 |
+|---|---|---|
+| inform, status | shipped model | `Inform` |
+| question, question_fact | shipped / eval guide | `Question` |
+| request, command | shipped / eval guide | `Directive` |
+| offer | shipped | `Commissive` |
+| confirm, acknowledgment, agreement, feedback | all three | `Feedback` or `Inform` by the rule in step 5 |
+| reject | shipped | `Commissive` (reject-request) or `Inform` (disagreement) |
+| correction | `classify.py` | `Inform` |
+| plan_commit | `classify.py` | `Commissive` |
+| social, greeting | all three | `Social` |
+| filler | `classify.py` / eval guide | ∅ |
+| statement | eval guide | `Inform` |
 
-(`data/locomo50_with_prev_multilabel.csv`, row 1.)
-
-The model was right. It is a greeting **and** a question: `SKIP` + `QUERY`
-under this scheme — except `SKIP` is exclusive, so it is simply `QUERY`.
-Forced single-label choices like this inflate the apparent error rate and are
-part of why CLS reads 0.951 in-domain and 0.613 in the wild.
-
-Worked examples:
-
-| utterance | labels |
-|-----------|--------|
-| "Caroline works at the hospital downtown." | `EXTRACT` |
-| "Did you know Caroline moved to Paris?" | `EXTRACT` + `QUERY` |
-| "Actually, she moved to Paris, not London." | `EXTRACT` + `UPDATE` |
-| "I'll send the report tomorrow." | `EXTRACT` + `COMMIT` |
-| "Please restart the server." | `COMMIT` |
-| "Where does she work now?" | `QUERY` |
-| "Yes, that's right." | `UPDATE` |
-| "Hey! How have you been?" | `QUERY` |
-| "lol" / "Thanks!" / "Good morning." | `SKIP` |
-
-Implementation: per-label sigmoid with a threshold, not a softmax. `SKIP` is
-predicted as the complement — if no content label clears threshold, emit
-`SKIP`.
-
-## What was deliberately dropped
-
-**The sparse classes.** This is the load-bearing argument for the collapse,
-and it rests on measured counts rather than interpretation. In 500 wild
-sentences (`longmemeval_summary.json`)
-`status` fired 8 times, `reject` once, `offer` once. A 500-item gold set
-yields 1–8 examples of each — not enough to estimate an F1, let alone
-compare annotators. Three of the shipped eight labels were unmeasurable.
-They collapse into `EXTRACT`, `UPDATE` and `COMMIT`.
-
-**The actor distinction.** `plan_commit` (speaker will act) versus `request`
-(addressee should act) is a real difference, but splitting `COMMIT` puts both
-halves near 2% — back in unmeasurable territory. The actor is already
-recoverable from the SRL head: *I'll send it* has `ARG0 = I`, *please send
-it* is imperative with an implicit addressee. **Let the cascade carry it**
-rather than paying for two sparse CLS classes.
-
-**A second level.** A nested dialog-act tier (`inform`/`status` under
-EXTRACT, `correction`/`agreement` under UPDATE, etc.) was considered and
-rejected for v6. It reintroduces exactly the sparse classes that made v5's
-CLS unmeasurable, doubles the annotation burden, and has no consumer today.
-Annotators may record a finer act as free metadata; no head predicts it and
-no report includes it.
-
-## Expected distribution
-
-Consistent across two independent samples, and stable under the collapse:
-
-| label | 500 wild (LongMemEval) | 50 gold (LoCoMo) |
-|-------|------------------------|------------------|
-| `EXTRACT` | 41.4% | 42% |
-| `QUERY` | 29.6% | 34% |
-| `SKIP` | 21.2% | 20% |
-| `COMMIT` | 4.0% | 0%* |
-| `UPDATE` | 3.8% | 4% |
-
-\* LoCoMo is casual conversation with no task commitments; business and
-technical domains carry `COMMIT`.
-
-Two consequences to plan for:
-
-- **`COMMIT` and `UPDATE` need deliberate oversampling** in the synthetic
-  corpus. A natural 500-item sample gives ~20 examples each. This is the
-  concrete form of "diversity over volume".
-- **Multi-label raises the effective count per label**, since an utterance
-  can carry two — so the gold set supports these five better than a
-  single-label set of the same size would.
-
-## Context requirement
-
-`UPDATE` cannot be decided from an utterance alone — *"Yes, that's right"*
-reinforces something, and which something matters. It needs the preceding
-turns. This is the same requirement that drove the 512-token window, so the
-taxonomy and the encoder contract reinforce each other: CLS is predicted per
-sentence **within** a window that supplies its context.
-
-## Migration
-
-| from | to |
-|------|----|
-| `inform`, `status`, `statement` | `EXTRACT` |
-| `confirm`, `reject`, `correction`, `agreement` | `UPDATE` |
-| `question` | `QUERY` (+ `EXTRACT` where a fact is embedded) |
-| `request`, `offer`, `plan_commit`, `command` | `COMMIT` |
-| `social`, `feedback`, `filler`, `greeting`, `acknowledgment` | `SKIP` |
-
-Existing single-label data (corpus parquet in the 9-label set, `locomo50`
-gold in the 8-label set) maps forward mechanically, but **the mapping is
-lossy in one direction only**: it cannot recover the second label a
-multi-label scheme would assign. Migrated data is usable for training and
-**not** usable as evaluation gold — the adjudicated gold set must be
-annotated natively under this scheme.
+`plan_commit` vs `request` was an actor distinction (who acts). That is now
+carried by `Commissive` vs `Directive`, which is the same distinction under
+its standard name, and the SRL head recovers the actor independently
+via `ARG0`.
 
 ## Evaluation
 
-- **Macro-F1 over the five labels**, plus per-label P/R.
-- **Cohen's kappa against human gold, with the human–human ceiling beside
-  it.** Two annotators on a 100-item overlap. Below ~0.6 human–human means
-  this document is underspecified and no model will fix it.
-- **Sliced by domain**, never averaged alone — the aggregate is what hid the
-  in-domain/wild gap last time.
-- Public dialog-act sets are a domain-shift probe with the mapping stated,
-  never a headline. DailyDialog is CC-BY-NC-SA: eval only.
+There is no public gold for this scheme on our domains, so:
+
+- Gold is built by **adjudication** — five independent LLM families label
+  N items, unanimous items get a 10% human spot-audit, disagreements go to
+  human adjudication with a recorded rationale. Target 400–600 items
+  (`data/locomo50_gold_labels.csv` is this shape at n=50, which is ±14
+  points of 95% CI — too small).
+- Report **Cohen's κ against humans with the human–human ceiling beside
+  it**, from a 100-item two-annotator overlap. If human–human κ is below
+  ~0.6 the guide above is underspecified and no model will fix it.
+- Multi-label metrics: per-label F1, micro-F1, and exact-set-match. Never
+  a single macro average — the aggregate is what hid the problem last time.
+- Slice per domain and per label, and inspect the confusion pairs the edge
+  case table predicts (`Feedback`/`Inform`, `Question`/`Directive`).
+- Public dialog-act sets (SwDA, DailyDialog) are a domain-shift probe only,
+  never a headline, and DailyDialog is CC-BY-NC-SA — evaluation only.
