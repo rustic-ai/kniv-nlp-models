@@ -11,9 +11,45 @@ than approximated.
 """
 from __future__ import annotations
 
+import contextlib
 import time
 
 from .base import AnnotationResult
+
+
+@contextlib.contextmanager
+def _eager_attention():
+    """Force eager attention while a fastcoref checkpoint loads.
+
+    LingMess is Longformer-based, and current transformers defaults to SDPA
+    and raises for architectures that do not implement it. fastcoref does not
+    expose ``attn_implementation``, so the default is injected here for the
+    duration of the load only — narrower than setting it process-wide, and it
+    leaves FCoref (distilroberta, SDPA-capable) untouched in every other
+    code path.
+    """
+    from transformers import PreTrainedModel
+    # fastcoref's model classes predate `all_tied_weights_keys`, which
+    # transformers 5.x reads during weight loading. Supplying an empty
+    # mapping is faithful: these checkpoints tie no weights.
+    # A plain class attribute, not a property: transformers' own post_init
+    # *assigns* to this on models that do call it, and a read-only property
+    # would break them. This only supplies a fallback for fastcoref's custom
+    # classes, which tie no weights and never set it.
+    if not hasattr(PreTrainedModel, "all_tied_weights_keys"):
+        PreTrainedModel.all_tied_weights_keys = {}
+    original = PreTrainedModel.from_pretrained.__func__
+
+    @classmethod
+    def patched(cls, *args, **kwargs):
+        kwargs.setdefault("attn_implementation", "eager")
+        return original(cls, *args, **kwargs)
+
+    PreTrainedModel.from_pretrained = patched
+    try:
+        yield
+    finally:
+        PreTrainedModel.from_pretrained = classmethod(original)
 
 
 class FastCorefAnnotator:
@@ -30,7 +66,8 @@ class FastCorefAnnotator:
     def _load(self):
         from fastcoref import FCoref, LingMessCoref
         cls = LingMessCoref if self.model_kind == "lingmess" else FCoref
-        self._pipe = cls(device=self.device)
+        with _eager_attention():
+            self._pipe = cls(device=self.device)
         print(f"  [{self.name}] fastcoref ({self.model_kind}) ready", flush=True)
 
     def _analyse(self, tokens: list[str]) -> list[list[list[int]]]:
