@@ -76,12 +76,43 @@ def tree_is_wellformed(heads: list[int]) -> bool:
     return True
 
 
-def validate_payload(layer: str, payload: object, n: int) -> tuple[object, str | None, str | None]:
+def validate_payload(layer: str, payload: object, n: int,
+                     n_entities: int | None = None) -> tuple[object, str | None, str | None]:
     """Return ``(normalised_payload, error, error_kind)``.
 
     Length and value-range violations are errors, not something to repair
     silently. ``error`` is None when the payload is usable.
     """
+    if layer == "rel":
+        if not isinstance(payload, list):
+            return None, "triples is not a list", "parse"
+        if n_entities is None:
+            return None, "rel validation requires n_entities", "parse"
+        out, seen = [], set()
+        for ti, tr in enumerate(payload):
+            if isinstance(tr, dict):
+                if not {"h", "t", "r"} <= set(tr):
+                    return None, f"triple {ti} missing h/t/r", "parse"
+                h, t, r = tr["h"], tr["t"], tr["r"]
+            elif isinstance(tr, (list, tuple)) and len(tr) == 3:
+                h, t, r = tr                      # cached form
+            else:
+                return None, f"triple {ti} malformed", "parse"
+            try:
+                h, t = int(h), int(t)
+            except (TypeError, ValueError):
+                return None, f"triple {ti} entity id not an integer", "parse"
+            if not (0 <= h < n_entities and 0 <= t < n_entities):
+                return None, (f"triple {ti} entity id out of range "
+                              f"0..{n_entities - 1}"), "range"
+            if h == t:
+                continue                          # a self-relation is not a fact
+            key = (h, t, str(r))
+            if key not in seen:                   # duplicates are not new facts
+                seen.add(key)
+                out.append([h, t, str(r)])
+        return out, None, None
+
     if layer == "coref":
         if not isinstance(payload, list):
             return None, "clusters is not a list", "parse"

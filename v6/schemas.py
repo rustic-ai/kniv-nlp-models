@@ -43,6 +43,14 @@ NER_TYPES = [
 NER_LABELS = ["O"] + [f"{p}-{t}" for t in NER_TYPES for p in ("B", "I")]
 
 
+# Re-DocRED's relation inventory (96 Wikidata properties). Loaded lazily from
+# the gold data so the enum is never a hand-copied list that can drift from
+# what the benchmark actually contains.
+def relation_names() -> list[str]:
+    from .gold.redocred import relation_inventory
+    return relation_inventory()[0]
+
+
 def _array_of(items: dict, description: str) -> dict:
     return {"type": "array", "description": description, "items": items}
 
@@ -147,6 +155,36 @@ COREF_SCHEMA = _envelope("coref_clusters", {
     ),
 })
 
+def rel_schema(names: list[str]) -> dict:
+    """Relation schema, built against the inventory in use.
+
+    The annotator emits only the triples that hold. Enumerating all
+    E*(E-1) ordered pairs would be ~397 per document at Re-DocRED's mean of
+    19.6 entities, against a mean of 34.9 true triples — two orders of
+    magnitude of wasted output for a task whose answer is sparse.
+    """
+    return _envelope("relation_triples", {
+        "triples": _array_of(
+            {
+                "type": "object",
+                "properties": {
+                    "h": {"type": "integer",
+                          "description": "id of the HEAD (subject) entity"},
+                    "t": {"type": "integer",
+                          "description": "id of the TAIL (object) entity"},
+                    "r": {"type": "string", "enum": names,
+                          "description": "relation holding from head to tail"},
+                },
+                "required": ["h", "t", "r"],
+                "additionalProperties": False,
+            },
+            "Every relation triple supported by the document. A pair of "
+            "entities may hold several relations — emit one triple each. "
+            "Return an empty list if no relation holds.",
+        ),
+    })
+
+
 SCHEMAS = {
     "ner": NER_SCHEMA,
     "coref": COREF_SCHEMA,
@@ -162,5 +200,22 @@ PAYLOAD_KEY = {
     "coref": "clusters",
     "ner": "tags",
     "pos": "tags", "lemma": "lemmas", "morph": "feats",
-    "dep": "arcs", "srl": "tags",
+    "dep": "arcs", "srl": "tags", "rel": "triples",
 }
+
+
+_REL_SCHEMA_CACHE: dict | None = None
+
+
+def schema_for(layer: str) -> dict:
+    """Return the JSON schema for a layer.
+
+    ``rel`` is built on first use because its enum comes from the gold data
+    rather than a literal in this file.
+    """
+    global _REL_SCHEMA_CACHE
+    if layer != "rel":
+        return SCHEMAS[layer]
+    if _REL_SCHEMA_CACHE is None:
+        _REL_SCHEMA_CACHE = rel_schema(relation_names())
+    return _REL_SCHEMA_CACHE

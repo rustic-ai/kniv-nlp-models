@@ -23,6 +23,9 @@ class GoldItem:
     tokens: list[str]
     layers: dict[str, object] = field(default_factory=dict)
     predicate_idx: int | None = None
+    # Relation extraction supplies pre-clustered entities; the annotator
+    # classifies relations over them rather than finding mentions itself.
+    entities: list[dict] | None = None
 
 
 def _feats_to_string(feats: dict | None) -> str:

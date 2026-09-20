@@ -166,12 +166,31 @@ def score_layer(layer: str, annotator: str, gold_items: list,
                           n_items=n_items, n_scored=n_scored,
                           n_units=n_gold, precision=prec, recall=rec)
 
+    if layer == "rel":
+        # Micro-F1 over (head, tail, relation) triples — the standard DocRED
+        # protocol. Note this is NOT comparable to published DocRED numbers:
+        # those come from models trained on DocRED's own train split, while
+        # everything here is zero-shot over a supplied entity list.
+        tp = n_pred = n_gold = 0
+        for it in scored:
+            gs = {tuple(x) for x in it.layers["rel"]}
+            ps = {tuple(x) for x in preds[it.id]}
+            tp += len(gs & ps)
+            n_pred += len(ps)
+            n_gold += len(gs)
+        prec, rec, f1 = _prf(tp, n_pred, n_gold)
+        return LayerScore(layer, annotator, f1, "triple-F1",
+                          secondary=prec, secondary_name="precision",
+                          coverage=coverage, n_items=n_items,
+                          n_scored=n_scored, n_units=n_gold,
+                          precision=prec, recall=rec)
+
     raise ValueError(f"no scorer for layer {layer!r}")
 
 
 _PRIMARY = {"pos": "accuracy", "lemma": "accuracy", "morph": "feat-F1",
             "dep": "UAS", "srl": "span-F1", "ner": "span-F1",
-            "coref": "CoNLL-F1"}
+            "coref": "CoNLL-F1", "rel": "triple-F1"}
 
 
 def pairwise_agreement(layer: str, items: list,
@@ -199,6 +218,14 @@ def pairwise_agreement(layer: str, items: list,
                                               pb[it.id]["heads"], pb[it.id]["rels"]):
                         total += 1
                         same += (h1 == h2 and r1 == r2)
+                elif layer == "rel":
+                    # Set-valued output: Jaccard over triples, not per-token.
+                    ta = {tuple(x) for x in pa[it.id]}
+                    tb = {tuple(x) for x in pb[it.id]}
+                    union = ta | tb
+                    if union:
+                        total += 1
+                        same += len(ta & tb) / len(union)
                 else:
                     for x, y in zip(pa[it.id], pb[it.id]):
                         total += 1

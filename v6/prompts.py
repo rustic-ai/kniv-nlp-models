@@ -101,6 +101,29 @@ SYSTEM = {
         "Label roles ONLY for the indicated predicate, ignoring every other "
         "verb in the sentence."
     ),
+    "rel": (
+        "You are an expert annotator extracting a relation graph from a "
+        "document.\n"
+        "The entities have ALREADY been found and clustered for you: each "
+        "numbered entity is one real-world thing, and every mention of it in "
+        "the document belongs to that entity. Do not introduce new entities "
+        "and do not re-segment the given ones.\n"
+        "Return every relation triple the document supports, as (h, t, r) "
+        "where h and t are entity ids and r is the relation holding FROM h "
+        "TO t.\n"
+        "Rules:\n"
+        "- Direction matters. 'X is located in Y' is (h=X, t=Y, "
+        "r='located in the administrative territorial entity'), never the "
+        "reverse.\n"
+        "- A pair of entities may hold more than one relation. Emit a "
+        "separate triple for each; do not pick just one.\n"
+        "- Include relations stated across sentences, not only within one "
+        "sentence. That is the point of a document-level task.\n"
+        "- Only assert what the document supports. Do not add facts you "
+        "happen to know about these entities from elsewhere.\n"
+        "- Omit a pair entirely when no listed relation holds. Most pairs "
+        "hold no relation; an empty answer for a pair is the normal case."
+    ),
 }
 
 
@@ -108,9 +131,29 @@ def render_tokens(tokens: list[str]) -> str:
     return "\n".join(f"{i + 1}\t{t}" for i, t in enumerate(tokens))
 
 
+def render_entities(entities: list[dict]) -> str:
+    lines = []
+    for e in entities:
+        alias = "; ".join(e["aliases"][:4])
+        lines.append(f"{e['id']}\t[{e['type']}]\t{alias}")
+    return "\n".join(lines)
+
+
 def user_message(layer: str, tokens: list[str],
-                 predicate_idx: int | None = None) -> str:
+                 predicate_idx: int | None = None,
+                 entities: list[dict] | None = None) -> str:
     n = len(tokens)
+    if layer == "rel":
+        if not entities:
+            raise ValueError("rel prompts require entities")
+        return "\n".join([
+            "Document:",
+            " ".join(tokens),
+            f"\nEntities ({len(entities)} total) as `id  [type]  names`:",
+            render_entities(entities),
+            f"\nReturn every relation triple the document supports. Entity "
+            f"ids are 0..{len(entities) - 1}.",
+        ])
     parts = [f"Tokens ({n} total, 1-indexed):", render_tokens(tokens)]
     if layer == "coref":
         return "\n".join(parts + [

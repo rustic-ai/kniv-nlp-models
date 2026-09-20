@@ -32,7 +32,8 @@ from pathlib import Path
 
 from .config import LAYERS, RUNS_DIR, annotator_names, load_annotators
 from .annotate import CacheStore, LLMAnnotator, RunLogger, tree_is_wellformed
-from .gold import load_ner_items, load_srl_items, load_ud_items
+from .gold import (load_ner_items, load_rel_items, load_srl_items,
+                   load_ud_items)
 from .gold.litbank import load_coref_items
 from .prompts import PROMPT_VERSION
 from .score import pairwise_agreement, score_layer
@@ -62,6 +63,13 @@ def resolve_baselines(scores: list, imported: dict | None = None) -> None:
             BASELINE_SOURCE[s.layer] = "measured (same sample)"
 
 UD_LAYERS = ("pos", "lemma", "morph", "dep")
+
+GOLD_SOURCE = {
+    "pos": "UD English EWT test", "lemma": "UD English EWT test",
+    "morph": "UD English EWT test", "dep": "UD English EWT test",
+    "ner": "OntoNotes 5.0 test (rebuilt)", "srl": "PropBank EWT test",
+    "coref": "LitBank", "rel": "Re-DocRED test",
+}
 
 
 def make_annotator(spec, cache, max_repairs: int):
@@ -107,6 +115,13 @@ def load_gold(layers: tuple[str, ...], limit: int | None,
         items = load_srl_items(limit=limit, path=srl_path)
         print(f"Gold: PropBank EWT test — {len(items)} predicates", flush=True)
         gold["srl"] = items
+    if "rel" in layers:
+        items = load_rel_items(limit=limit)
+        n_trip = sum(len(it.layers["rel"]) for it in items)
+        n_ent = sum(len(it.entities) for it in items)
+        print(f"Gold: Re-DocRED test — {len(items)} documents, "
+              f"{n_ent} entities, {n_trip} triples", flush=True)
+        gold["rel"] = items
     return gold
 
 
@@ -166,6 +181,12 @@ def vote(layer: str, items: list, per_annotator: dict[str, dict]) -> tuple[dict,
                 rels.append(r)
             voted[it.id] = {"heads": heads, "rels": rels}
             well_formed[it.id] = tree_is_wellformed(heads)
+        elif layer == "rel":
+            # Set-valued: a triple is kept when a majority of the annotators
+            # that answered this item proposed it.
+            counts = Counter(tuple(t) for a in available for t in set(map(tuple, a)))
+            need = len(available) // 2 + 1
+            voted[it.id] = [list(t) for t, c in counts.items() if c >= need]
         else:
             voted[it.id] = [
                 Counter(a[i] for a in available).most_common(1)[0][0]
@@ -254,7 +275,8 @@ async def main_async(args) -> int:
                         "pos", "lemma", "morph", "dep", "ner"):
                     print(f"  [{name}] no {layer} head — skipping", flush=True)
                     continue
-                if specs[name].kind == "kniv-v5" and layer in ("lemma", "morph", "coref"):
+                if specs[name].kind == "kniv-v5" and layer in (
+                        "lemma", "morph", "coref", "rel"):
                     print(f"  [{name}] no {layer} head — skipping", flush=True)
                     continue
                 ann = make_annotator(specs[name], cache, args.max_repairs)
@@ -310,7 +332,8 @@ async def main_async(args) -> int:
     (run_dir / "report.json").write_text(json.dumps(report, indent=2))
     (run_dir / "report.md").write_text(
         f"# v6 annotator bake-off — {run_id}\n\n"
-        f"Gold: UD English EWT test / PropBank EWT test (evaluation only).\n"
+        f"Gold (evaluation only): "
+        + ", ".join(GOLD_SOURCE[lyr] for lyr in layers) + ".\n"
         f"Prompt version: `{PROMPT_VERSION}`. Limit: {args.limit}.\n\n"
         f"{table}\n\n"
         f"`vs v5` is the delta against the v5 teacher. Baseline source: "
