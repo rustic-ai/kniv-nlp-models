@@ -19,7 +19,7 @@ import time
 
 from ..config import AnnotatorSpec
 from ..prompts import PROMPT_VERSION, SYSTEM, user_message
-from ..schemas import PAYLOAD_KEY, SCHEMAS
+from ..schemas import PAYLOAD_KEY, schema_for
 from .base import (
     AnnotationResult, CacheStore, validate_payload, tree_is_wellformed,
 )
@@ -75,16 +75,27 @@ class LLMAnnotator:
         if self._client is None:
             if self.spec.kind == "azure":
                 from openai import AsyncAzureOpenAI
-                self._client = AsyncAzureOpenAI(
-                    azure_endpoint=self.spec.base_url,
-                    api_key=self.spec.api_key,
-                    api_version=self.spec.api_version or "2024-10-21",
-                )
+                kwargs = {
+                    "azure_endpoint": self.spec.base_url,
+                    "api_version": self.spec.api_version or "2024-10-21",
+                    "timeout": self.spec.request_timeout,
+                    # Retries belong to our loop, which counts and reports
+                    # them; the SDK's own would multiply against it silently.
+                    "max_retries": 0,
+                }
+                if self.spec.auth == "azure_ad":
+                    from .azure_auth import get_token
+                    kwargs["azure_ad_token_provider"] = get_token
+                else:
+                    kwargs["api_key"] = self.spec.api_key
+                self._client = AsyncAzureOpenAI(**kwargs)
             else:
                 from openai import AsyncOpenAI
                 self._client = AsyncOpenAI(
                     base_url=self.spec.base_url or None,
                     api_key=self.spec.api_key,
+                    timeout=self.spec.request_timeout,
+                    max_retries=0,
                 )
         return self._client
 
@@ -103,7 +114,7 @@ class LLMAnnotator:
             kwargs["seed"] = self.spec.seed
         if self._rf_level == 0:
             kwargs["response_format"] = {
-                "type": "json_schema", "json_schema": SCHEMAS[layer],
+                "type": "json_schema", "json_schema": schema_for(layer),
             }
         elif self._rf_level == 1:
             kwargs["response_format"] = {"type": "json_object"}
@@ -156,8 +167,20 @@ class LLMAnnotator:
                 return True
         return False
 
+    # A request that blew its deadline is not going to succeed on the fourth
+    # attempt, and each retry costs another full timeout. Two attempts is the
+    # allowance: one for a genuine transient stall, then give up. Left
+    # unbounded this is the dominant cost of a stuck item — measured at ~20
+    # minutes of wall-clock per item against a 300s deadline.
+    MAX_TIMEOUT_ATTEMPTS = 2
+
+    @staticmethod
+    def _is_timeout(exc: Exception) -> bool:
+        return any(t in str(exc).lower() for t in ("timeout", "timed out"))
+
     async def _call(self, layer: str, messages: list[dict]) -> tuple[str, int, int]:
         last: Exception | None = None
+        timeouts = 0
         for attempt in range(self.max_retries):
             kwargs = self._build_kwargs(layer, messages)
             try:
@@ -192,18 +215,38 @@ class LLMAnnotator:
                     if attempt == self.max_retries - 1:
                         raise
                     continue
+                if self._is_timeout(exc):
+                    timeouts += 1
+                    if timeouts >= self.MAX_TIMEOUT_ATTEMPTS:
+                        raise
                 if not _is_retryable(exc) or attempt == self.max_retries - 1:
                     raise
                 # Exponential backoff with jitter.
                 await asyncio.sleep(min(2 ** attempt, 30) * (0.5 + random.random()))
         raise last                                          # pragma: no cover
 
+    def build_messages(self, layer: str, item) -> list[dict]:
+        """System + user turn for one item.
+
+        Factored out so prompt experiments (few-shot, pair enumeration) can
+        vary the wording without touching the bake-off path or the retry,
+        cache and validation machinery around it.
+        """
+        return [
+            {"role": "system", "content": SYSTEM[layer]},
+            {"role": "user", "content": user_message(
+                layer, item.tokens, item.predicate_idx,
+                getattr(item, "entities", None)) + self._json_hint(layer)},
+        ]
+
     # ── one item ─────────────────────────────────────────────────
     async def annotate(self, layer: str, item) -> AnnotationResult:
         n = len(item.tokens)
+        n_ent = len(item.entities) if getattr(item, "entities", None) else None
         cached = self.cache.get(self.spec.name, layer, item.id)
         if cached is not None:
-            payload, err, kind = validate_payload(layer, cached.get("payload"), n)
+            payload, err, kind = validate_payload(
+                layer, cached.get("payload"), n, n_ent)
             return AnnotationResult(
                 item_id=item.id, layer=layer, annotator=self.spec.name,
                 ok=err is None, payload=payload, error=err, error_kind=kind,
@@ -213,11 +256,7 @@ class LLMAnnotator:
                 cached=True,
             )
 
-        messages = [
-            {"role": "system", "content": SYSTEM[layer]},
-            {"role": "user", "content": user_message(
-                layer, item.tokens, item.predicate_idx) + self._json_hint(layer)},
-        ]
+        messages = self.build_messages(layer, item)
 
         # Every task for a layer is created up front, so most of them sit on
         # the semaphore before doing anything. Timing from here would fold
@@ -254,7 +293,7 @@ class LLMAnnotator:
                 except (json.JSONDecodeError, AttributeError):
                     payload, err, kind = None, "response was not valid JSON", "parse"
                 else:
-                    payload, err, kind = validate_payload(layer, raw, n)
+                    payload, err, kind = validate_payload(layer, raw, n, n_ent)
 
                 if err is None:
                     break

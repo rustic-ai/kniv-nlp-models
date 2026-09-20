@@ -24,7 +24,7 @@ RUNS_DIR = REPO / "v6" / "runs"
 ANNOTATORS_YAML = Path(__file__).parent / "annotators.yaml"
 
 # Layers the bake-off can measure, in report order.
-LAYERS = ("pos", "lemma", "morph", "dep", "ner", "srl", "coref")
+LAYERS = ("pos", "lemma", "morph", "dep", "ner", "srl", "coref", "rel")
 
 _ENV_RE = re.compile(r"^\$\{([A-Z0-9_]+)\}$")
 
@@ -58,11 +58,19 @@ class AnnotatorSpec:
     name: str
     kind: str                       # "openai" | "azure" | "kniv-v5"
     family: str                     # e.g. "openai", "xai", "microsoft"
+    # "azure_ad" mints a short-lived token from the signed-in Azure CLI
+    # identity; "api_key" reads a long-lived secret from the environment.
+    auth: str = "api_key"
     model: str = ""
     base_url: str = ""
     api_key: str = ""
     api_version: str = ""
     max_concurrency: int = 8
+    # Per-request deadline. Without one the SDK default (600s) compounds with
+    # the retry loop, so a couple of stalled requests can block a sequential
+    # run for the better part of an hour. Must exceed the slowest legitimate
+    # call — grok measured ~129s on the semantic layers.
+    request_timeout: float = 300.0
     temperature: float = 0.0
     seed: int | None = 7
     # USD per 1M tokens; used for the cost column in the run report.
