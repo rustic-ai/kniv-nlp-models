@@ -74,7 +74,14 @@ def collect_taskmaster(config: dict):
             if isinstance(turns, list):
                 for turn in turns:
                     text = turn.get("text", "") if isinstance(turn, dict) else str(turn)
-                    if text and len(text) > 10:
+                    # Keep every turn. A length filter here deletes turns from the MIDDLE
+                    # of a conversation, leaving gaps in turn_idx (69% of
+                    # Taskmaster conversations) so a window built over them
+                    # splices non-adjacent turns. It also removes exactly the
+                    # short acknowledgements CLS needs: 'ok', 'thanks', 'yes'
+                    # are Feedback and Social. Filtering belongs downstream,
+                    # where config.filtering already defines it.
+                    if text and text.strip():
                         utterances.append({
                             "text": text.strip(),
                             "source": f"taskmaster/{ds_name}",
@@ -122,7 +129,8 @@ def collect_oasst(config: dict):
     utterances = []
     for msg_id, msg in messages.items():
         text = msg.get("text", "")
-        if not text or len(text) < 15:
+        # see note above: no per-turn length filter in raw collection
+        if not text or not text.strip():
             continue
 
         # Compute turn_idx by walking parent chain
@@ -179,7 +187,8 @@ def collect_multiwoz(config: dict):
         texts = turns.get("utterance", [])
 
         for tid, spk, text in zip(turn_ids, speakers, texts):
-            if text and len(text) > 10:
+            # see note above: no per-turn length filter in raw collection
+            if text and text.strip():
                 utterances.append({
                     "text": text.strip(),
                     "source": "multiwoz",
@@ -228,7 +237,8 @@ def collect_glaive(config: dict):
             if line.startswith(("USER:", "ASSISTANT:")):
                 speaker = "user" if line.startswith("USER:") else "assistant"
                 text = line.split(":", 1)[1].strip()
-                if text and len(text) > 10 and not text.startswith(("{", "[")):
+                # length filter dropped; the JSON guard stays (tool-call payloads)
+                if text and text.strip() and not text.startswith(("{", "[")):
                     utterances.append({
                         "text": text,
                         "source": "glaive",
@@ -277,7 +287,8 @@ def collect_discord(config: dict):
         while i + 1 < len(turns):
             speaker = turns[i]
             content = re.sub(r"<\|im_end\|>", "", turns[i + 1]).strip()
-            if content and len(content) > 10 and len(content) < 500:
+            # see note above: no per-turn length filter in raw collection
+            if content and content.strip():
                 utterances.append({
                     "text": content,
                     "source": "discord",
