@@ -112,8 +112,18 @@ class KnivV5Annotator:
         self.cache = cache
         self.model_dir = Path(model_dir or TEACHER_DIR)
         self.max_length = max_length
-        self.device = torch.device(
-            device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        # Apple Metal is a real accelerator on this hardware and was
+        # missing from the fallback chain, so every local run silently used
+        # the CPU.
+        if device:
+            picked = device
+        elif torch.cuda.is_available():
+            picked = "cuda"
+        elif torch.backends.mps.is_available():
+            picked = "mps"
+        else:
+            picked = "cpu"
+        self.device = torch.device(picked)
         self._loaded = False
 
     def _load(self) -> None:
@@ -177,7 +187,40 @@ class KnivV5Annotator:
         print(f"  [kniv-v5] teacher loaded on {self.device}", flush=True)
 
     @torch.no_grad()
+    def predict_batch(self, layer: str, batch: list[list[str]]):
+        """Encode a batch in one pass, then decode each item.
+
+        Batch size 1 leaves the accelerator idle: measured on this machine,
+        deberta-v3-large runs 22.4 sentences/s at batch 1 on MPS and 116.9
+        at batch 64, against 3.7 on CPU. The decode stays per item because
+        Viterbi and the biaffine head are sequential, but the encoder —
+        the dominant cost — is shared.
+        """
+        self._load()
+        enc = self.tok(batch, is_split_into_words=True, truncation=True,
+                       max_length=self.max_length, padding=True,
+                       return_tensors="pt")
+        ids = enc["input_ids"].to(self.device)
+        mask = enc["attention_mask"].to(self.device)
+        out = self.encoder(input_ids=ids, attention_mask=mask,
+                           output_hidden_states=True)
+        hs_all = list(out.hidden_states)
+
+        results = []
+        for bi, tokens in enumerate(batch):
+            hs = [h[bi:bi + 1] for h in hs_all]
+            w2t, prev = {}, None
+            for k, wid in enumerate(enc.word_ids(batch_index=bi)):
+                if wid is not None and wid != prev:
+                    w2t[wid] = k
+                prev = wid
+            results.append(self._decode(layer, tokens, hs, w2t))
+        return results
+
+    @torch.no_grad()
     def _predict(self, layer: str, tokens: list[str]):
+        """Single-item path, kept so the bake-off numbers stay reproducible."""
+        self._load()
         enc = self.tok(tokens, is_split_into_words=True, truncation=True,
                        max_length=self.max_length, return_tensors="pt")
         ids = enc["input_ids"].to(self.device)
@@ -185,16 +228,18 @@ class KnivV5Annotator:
         out = self.encoder(input_ids=ids, attention_mask=mask,
                            output_hidden_states=True)
         hs = list(out.hidden_states)
-
-        pos_logits = self.pos_head(self.pos_sm(hs))
-        pos_p = torch.softmax(pos_logits, -1)
-
-        # word -> first sub-token
         w2t, prev = {}, None
         for k, wid in enumerate(enc.word_ids()):
             if wid is not None and wid != prev:
                 w2t[wid] = k
             prev = wid
+        return self._decode(layer, tokens, hs, w2t)
+
+    @torch.no_grad()
+    def _decode(self, layer: str, tokens: list[str], hs, w2t):
+        """Head decode for one item, given its encoder hidden states."""
+        pos_logits = self.pos_head(self.pos_sm(hs))
+        pos_p = torch.softmax(pos_logits, -1)
 
         if layer == "pos":
             idx = pos_logits[0].argmax(-1).tolist()
@@ -223,25 +268,31 @@ class KnivV5Annotator:
             self.dep_proj(torch.cat([dep_h, pos_p, ner_p], -1)))
 
         # Restrict arc selection to real word positions, plus a root slot.
-        heads, rels = [], []
-        for i in range(len(tokens)):
-            if i not in w2t:
-                heads.append(0)
-                rels.append("dep")
-                continue
-            ti = w2t[i]
-            cand = [(0, w2t.get(i))] + [(j + 1, w2t[j]) for j in range(len(tokens))
-                                        if j in w2t]
-            best_h, best_s = 0, float("-inf")
-            for h_id, tj in cand:
-                if tj is None:
-                    continue
-                s = arc[0, ti, tj].item()
-                if s > best_s:
-                    best_s, best_h = s, h_id
-            heads.append(best_h)
-            th = w2t.get(best_h - 1, ti) if best_h > 0 else ti
-            rels.append(DEPRELS[lab[0, ti, th].argmax().item()])
+        #
+        # Vectorised: the original scored every (token, candidate-head) pair
+        # with a separate `.item()`, which is an O(n^2) round trip to the
+        # accelerator per sentence and made DEP the slowest layer by far.
+        # Identical results, one gather and one argmax.
+        words = [i for i in range(len(tokens)) if i in w2t]
+        heads = [0] * len(tokens)
+        rels = ["dep"] * len(tokens)
+        if words:
+            ti = torch.tensor([w2t[i] for i in words], device=arc.device)
+            # candidate heads: the root slot (self position) then every word
+            cand_t = torch.cat([ti.new_tensor([-1]), ti])       # -1 = root marker
+            cand_ids = [0] + [j + 1 for j in words]
+            sub = arc[0].index_select(0, ti)                    # [W, T]
+            # root score for token i is arc[ti, ti]; others are arc[ti, tj]
+            root_s = sub.gather(1, ti.unsqueeze(1))             # [W, 1]
+            other_s = sub.index_select(1, ti)                   # [W, W]
+            scores = torch.cat([root_s, other_s], dim=1)        # [W, 1+W]
+            best = scores.argmax(dim=1).tolist()
+            lab_sel = lab[0].index_select(0, ti)                # [W, T, R]
+            for k, i in enumerate(words):
+                h_id = cand_ids[best[k]]
+                heads[i] = h_id
+                th = w2t.get(h_id - 1, w2t[i]) if h_id > 0 else w2t[i]
+                rels[i] = DEPRELS[int(lab_sel[k, th].argmax())]
         return {"heads": heads, "rels": rels}
 
     @torch.no_grad()

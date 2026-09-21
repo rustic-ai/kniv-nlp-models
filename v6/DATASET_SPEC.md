@@ -630,11 +630,29 @@ Measured over the built corpus — 23,106 windows, 409,741 sentences,
 | SRL | 1,974,952 | 81.9 |
 | coref, relations | 23,106 each | minutes |
 
-132 CPU-hours for the kniv-v5 layers alone, so the build runs on a GPU
-box. Colab works provided the job runs **inside the kernel**: a detached
-process leaves the kernel idle and the VM is reclaimed within the hour
-regardless of keep-alive, which cost five runs during the relation
-training. See `v6/experiments/atlop_colab.sh` for the pattern.
+**That estimate was measuring a bug.** The annotator selected its device
+as `cuda if available else cpu`, so Apple Metal was never in the chain and
+every local run silently used the CPU. Measured on `deberta-v3-large`:
+
+| device | batch 1 | batch 16 | batch 64 |
+|---|---|---|---|
+| CPU | 2.4 sent/s | 3.8 | 3.7 |
+| **MPS** | 22.4 | 68.9 | **116.9** |
+
+Enabling MPS alone gained only 1.2x, because the pipeline annotates one
+sentence at a time and batch 1 leaves the accelerator idle. Two changes
+followed: a batched encode path (`predict_batch`), and a vectorised
+dependency decode — the original scored every (token, candidate-head)
+pair with a separate `.item()`, an O(n^2) round trip per sentence that
+made DEP the slowest layer. Both are verified behaviour-preserving:
+batch output is identical to single-item output on POS, NER and DEP, and
+the vectorised decode reproduces 120/120 cached sentences exactly.
+
+**The build is therefore a local job, not a Colab job.** Colab remains
+the fallback for larger runs, and if used the job must run *inside the
+kernel* — a detached process leaves the kernel idle and the VM is
+reclaimed within the hour regardless of keep-alive, which cost five runs
+during relation training. See `v6/experiments/atlop_colab.sh`.
 
 ### 4.2 Environment isolation
 
