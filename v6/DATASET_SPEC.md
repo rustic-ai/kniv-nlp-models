@@ -492,8 +492,56 @@ The residual gap against the UD EWT reference is **−1.8 points**
 rankings hold on our text. Per-domain agreement should still be recorded
 in the corpus so a head trained on it can be evaluated with that in view.
 
-The equivalent probe for relations still needs NER and coref over our
-own text first, and remains outstanding.
+### 3A.5c Relations on our corpus: sparse by inventory, not by failure
+
+`v6/probe_relations.py` runs the real pipeline — NER per sentence from
+kniv-v5, coref per window from LingMess, merged into entity clusters in
+DocRED format — then the trained ATLOP over 176 windows sampled across
+five domains.
+
+**The model transfers; it abstains rather than breaking.** Spot checks
+show correct extractions on conversational text (`Animal Farm --author-->
+George Orwell` from a book-search dialogue) and domain-appropriate types
+(narrative is 54% `sibling`/`spouse`). Technical yields almost nothing
+because technical prose genuinely contains few entity-entity Wikidata
+relations.
+
+Yield, after entity deduplication:
+
+| domain | triples/doc | per ordered pair | share of corpus |
+|---|---|---|---|
+| news | 13.4 | 0.0240 | 12% |
+| encyclopedic | 4.9 | 0.0124 | 7% |
+| conversation | 1.0 | 0.0127 | 44% |
+| narrative | 0.4 | 0.0053 | 13% |
+| technical | 0.1 | 0.0021 | 24% |
+| **all** | **4.4** | **0.0174** | |
+| *Re-DocRED reference* | *27.1* | *0.0683* | |
+
+**Decision: accept sparse relations.** Overall yield is a quarter of
+Wikipedia's and concentrated in the 19% of windows that are news and
+encyclopedic. That is the inventory, not the annotator: Re-DocRED's 96
+Wikidata properties describe encyclopedic facts and most of our corpus is
+not encyclopedic. Windows with no relation carry a masked relation layer
+rather than an empty one — a document with no extractable triples is not
+evidence that none exist.
+
+A conversational relation inventory (`employed_by`, `plans_to`,
+`prefers`) would cover the remaining 81%, but it has no supervised model
+and no gold, which is the position the Wikidata inventory was chosen to
+escape.
+
+### 3A.5d Entity assembly: coref needs a string-match fallback
+
+Coref alone left **12.6% of entities as unmerged duplicates** of the same
+surface form, 26.8% on conversation — `George Orwell` became three
+entities and produced three identical `author` triples, which for a
+knowledge graph is three nodes where there should be one. Merging exact
+normalised surface forms for PER/ORG/LOC/MISC drops this to **0.5%** and
+removed **293 duplicate triples, 28% of the raw output**.
+
+NUM and TIME are deliberately excluded: two occurrences of `1` or
+`Monday` are not the same entity.
 
 ### 3A.6 What relations do not cover
 

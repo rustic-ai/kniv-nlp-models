@@ -46,7 +46,8 @@ from prepro import read_docred
 
 # ATLOP_CKPT overrides the released checkpoint with one we trained.
 CKPT = os.environ.get("ATLOP_CKPT") or os.path.join(BASE, "atlop-roberta")
-TEST = "/Users/rohit/Work/kniv-nlp-models/data/re-docred/test_revised.json"
+TEST = os.environ.get("ATLOP_INPUT") or \
+       "/Users/rohit/Work/kniv-nlp-models/data/re-docred/test_revised.json"
 OUT  = os.environ.get("ATLOP_OUT") or \
        "/Users/rohit/Work/kniv-nlp-models/data/re-docred/atlop_preds.json"
 LIMIT = int(os.environ.get("ATLOP_LIMIT", "0")) or None
