@@ -329,6 +329,15 @@ class KnivV5Annotator:
                 out.append("O")
         return out
 
+    # SRL batching was implemented and REVERTED. All predicates of a
+    # sentence can share one encoder call — same ids, one indicator row
+    # each — and the output is byte-identical (verified 80/80 and 60/60
+    # predicate passes). But on Metal it is 5-10x SLOWER than the
+    # sequential path: 16.1 -> 2.6 passes/s with expand(), 17.5 -> 1.6 with
+    # repeat(). The per-predicate encoder call is already small enough that
+    # batching only adds allocation and a slower kernel path. Do not retry
+    # without measuring on the target device.
+
     async def annotate_and_cache(self, layer: str, item) -> AnnotationResult:
         if layer not in ("pos", "ner", "dep", "srl"):
             return AnnotationResult(

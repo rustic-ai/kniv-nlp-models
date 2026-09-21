@@ -9,6 +9,7 @@ referenced only as a *teacher*, never as a code dependency.
 | file | what it is |
 |------|-----------|
 | [DATASET_SPEC.md](DATASET_SPEC.md) | the v6 dataset: proposal, record schema, pipeline, QA gates, sequencing |
+| [MODEL_CHANGES.md](MODEL_CHANGES.md) | architecture changes for the v6 cascade, with the risk each carries |
 | [DECISIONS.md](DECISIONS.md) | which annotator produces each layer, and the measurement behind it |
 | [CLS_TAXONOMY.md](CLS_TAXONOMY.md) | the CLS annotation contract |
 
