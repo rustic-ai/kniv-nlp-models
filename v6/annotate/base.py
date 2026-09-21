@@ -138,6 +138,14 @@ def validate_payload(layer: str, payload: object, n: int,
         return out, None, None
 
     if layer == "dep":
+        # Already-normalised form, as written to the cache. Validation must
+        # be idempotent: re-reading a cached entry has to succeed, the same
+        # way the coref branch accepts both its input and its output shape.
+        if isinstance(payload, dict) and "heads" in payload and "rels" in payload:
+            heads, rels = payload["heads"], payload["rels"]
+            if len(heads) != n or len(rels) != n:
+                return None, f"expected {n} arcs, got {len(heads)}", "length"
+            return {"heads": list(heads), "rels": list(rels)}, None, None
         if not isinstance(payload, list):
             return None, "arcs is not a list", "parse"
         if len(payload) != n:
