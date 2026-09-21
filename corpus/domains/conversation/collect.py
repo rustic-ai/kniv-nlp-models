@@ -118,37 +118,55 @@ def collect_oasst(config: dict):
     dataset = load_dataset(cfg["dataset"], split="train")
     max_utt = cfg.get("max_utterances", 30000)
 
-    # Build message lookup for parent chain walking
+    # OASST1 is a TREE, not a linear dialogue: a message_tree_id contains
+    # several alternative replies to the same parent, all at the same depth.
+    # Indexing by depth makes sibling branches look like consecutive turns,
+    # so a window over them would splice competing answers together as if
+    # they were a conversation — worse than a gap, because it looks valid.
+    #
+    # One root-to-leaf path is one conversation. Only the LONGEST path per
+    # tree is kept: emitting every path would repeat each shared prefix
+    # many times and fill the corpus with near-duplicate windows.
     messages = {}
     for item in dataset:
         if item.get("lang") != "en":
             continue
         messages[item["message_id"]] = item
 
-    # Walk parent chains to build (conv_id, turn_idx, prev_message_id)
-    utterances = []
-    for msg_id, msg in messages.items():
-        text = msg.get("text", "")
-        # see note above: no per-turn length filter in raw collection
-        if not text or not text.strip():
-            continue
-
-        # Compute turn_idx by walking parent chain
-        turn_idx = 0
+    children = {}
+    roots = []
+    for mid, msg in messages.items():
         parent = msg.get("parent_id")
-        while parent and parent in messages:
-            turn_idx += 1
-            parent = messages[parent].get("parent_id")
+        if parent and parent in messages:
+            children.setdefault(parent, []).append(mid)
+        elif not parent:
+            roots.append(mid)
 
-        utterances.append({
-            "text": text.strip(),
-            "source": "oasst",
-            "domain": "conversation",
-            "conv_id": f"oasst-{msg['message_tree_id']}",
-            "turn_idx": turn_idx,
-            "speaker": "user" if msg.get("role") == "prompter" else "assistant",
-        })
+    def longest_path(mid):
+        kids = children.get(mid, [])
+        if not kids:
+            return [mid]
+        return [mid] + max((longest_path(k) for k in kids), key=len)
 
+    utterances = []
+    for root in roots:
+        path = longest_path(root)
+        tree_id = messages[root].get("message_tree_id", root)
+        turn = 0
+        for mid in path:
+            msg = messages[mid]
+            text = (msg.get("text") or "").strip()
+            if not text:
+                continue
+            utterances.append({
+                "text": text,
+                "source": "oasst",
+                "domain": "conversation",
+                "conv_id": f"oasst-{tree_id}",
+                "turn_idx": turn,
+                "speaker": "user" if msg.get("role") == "prompter" else "assistant",
+            })
+            turn += 1
         if len(utterances) >= max_utt:
             break
 
