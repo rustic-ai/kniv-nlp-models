@@ -455,6 +455,33 @@ semantic end, and here there is no specialist to lose to.
 Expect relations to be the **weakest head in the cascade**, against 0.84–0.99
 for the others. That is the task, not our shortfall.
 
+### 3A.5b Domain transfer, measured
+
+`v6/probe_windows.py` samples windows evenly across domains and measures
+inter-annotator agreement on our own text — agreement, not accuracy,
+since no gold exists here. Read as a delta against the benchmark number.
+
+POS, kniv-v5 vs Stanza, annotated per sentence:
+
+| domain | agreement | vs UD EWT (0.9772) |
+|---|---|---|
+| news | 0.9686 | −0.9 |
+| narrative | 0.9613 | −1.6 |
+| encyclopedic | 0.9412 | −3.6 |
+| technical | 0.9229 | −5.4 |
+| **conversation** | **0.8927** | **−8.5** |
+| all | 0.9399 | −3.7 |
+
+Degradation is mild overall and concentrated where it matters most:
+**conversation is the weakest domain and 49% of the windows.** The
+Discord source is the furthest from anything these annotators were
+trained on. Benchmark rankings are unlikely to reverse at this
+magnitude, but the corpus should record per-domain agreement so a head
+trained on it can be evaluated with that in view.
+
+The equivalent probe for relations still needs NER and coref over our
+own text first, and remains outstanding.
+
 ### 3A.6 What relations do not cover
 
 Two structural limits, worth stating before the knowledge-graph design
@@ -496,7 +523,32 @@ corpus/output/raw/<domain>/<source>.jsonl        whole documents
 ### 4.1 Rule zero
 
 **Tokenization is fixed before any annotator sees the text**, and every
-annotator returns exactly one entry per token index. Silent
+annotator returns exactly one entry per token index. `v6/windows.py`
+provides the canonical tokenizer: deliberately dependency-free and
+deterministic, so the corpus is re-derivable without pinning a toolkit
+version and every annotator sees byte-identical tokens.
+
+### 4.1a Rule one: the window is not the annotation unit
+
+**POS, lemma, morph, DEP, NER and SRL are annotated per SENTENCE inside
+the window, then mapped back to window coordinates. Only coref and
+relations see the whole window.**
+
+kniv-v5 and Stanza are sentence-level models. Passing a 512-token window
+to them as if it were one sentence is out of distribution, and they
+degrade in different directions. Measured on 300 windows across five
+domains, POS agreement between the two:
+
+| unit | agreement |
+|---|---|
+| UD EWT sentences (benchmark reference) | 0.9772 |
+| **our windows, annotated per sentence** | **0.9399** |
+| our windows, fed whole | **0.5045** |
+
+A 43-point collapse, entirely from the unit. The window is the unit of
+*training* and of *context* for coref and relations; it is not the unit
+of inference for the structural annotators. `sentence_spans` exists
+precisely so the mapping is exact. Silent
 re-tokenization is the dominant failure mode of LLM token-level
 annotation; here a length or range mismatch is a **recorded failure, never
 padded**.

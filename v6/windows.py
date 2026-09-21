@@ -36,6 +36,44 @@ RAW = Path(__file__).resolve().parents[1] / "corpus" / "output" / "raw"
 # never a unit of training, and never decides what the model sees.
 _SENT_END = re.compile(r"(?<=[.!?])[\"')\]]*\s+(?=[A-Z0-9\"'(\[])")
 
+# Canonical tokenization, fixed here once for every annotator. Whitespace
+# splitting is not adequate: it leaves "coffee.", "str.find" and
+# 'parser.add_argument("x",' as single tokens, and annotators then guess at
+# malformed units and guess differently — measured at 0.41 POS agreement
+# between two taggers that agree 0.977 on UD EWT.
+#
+# UD-style: clitics and contractions split off, punctuation separated,
+# but URLs, emails and decimals kept whole.
+_URLISH = re.compile(r"""(?:https?://|www\.)\S+|\S+@\S+\.\w+""")
+_CLITIC = re.compile(
+    r"(?i)(.+?)(n't|'s|'re|'ve|'ll|'d|'m)$")
+_TOKEN = re.compile(r"""
+      \d+(?:[.,]\d+)*(?:%|st|nd|rd|th)?   # numbers, percents, ordinals
+    | \w+(?:[-']\w+)*                     # words, hyphenated, internal '
+    | \.\.\.|[^\w\s]                     # ellipsis, single punctuation
+""", re.VERBOSE)
+
+
+def tokenize(text: str) -> list[str]:
+    """Deterministic UD-ish word tokenizer.
+
+    Deliberately dependency-free and reproducible: the corpus must be
+    re-derivable without pinning a toolkit, and every annotator must see
+    byte-identical tokens.
+    """
+    out: list[str] = []
+    for chunk in text.split():
+        if _URLISH.fullmatch(chunk):
+            out.append(chunk)
+            continue
+        for tok in _TOKEN.findall(chunk):
+            m = _CLITIC.match(tok)
+            if m and m.group(1):
+                out.extend([m.group(1), m.group(2)])
+            else:
+                out.append(tok)
+    return out
+
 
 @dataclass
 class Document:
