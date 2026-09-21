@@ -8,7 +8,6 @@ Sources (all commercially licensed):
   2. OASST1 (Apache 2.0) — human-assistant conversations
   3. MultiWOZ 2.2 (Apache 2.0) — goal-driven multi-domain
   4. Glaive Function Calling (Apache 2.0) — tool use
-  5. Discord Dialogues (Apache 2.0) — casual conversations
 
 Usage:
     python -m corpus.domains.conversation.collect
@@ -334,7 +333,6 @@ COLLECTORS = {
     "oasst": collect_oasst,
     "multiwoz": collect_multiwoz,
     "glaive": collect_glaive,
-    "discord": collect_discord,
 }
 
 

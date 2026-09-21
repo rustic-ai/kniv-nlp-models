@@ -461,23 +461,36 @@ for the others. That is the task, not our shortfall.
 inter-annotator agreement on our own text — agreement, not accuracy,
 since no gold exists here. Read as a delta against the benchmark number.
 
-POS, kniv-v5 vs Stanza, annotated per sentence:
+POS, kniv-v5 vs Stanza, annotated per sentence. The first pass exposed two
+corpus-quality problems; the second is after fixing them:
 
-| domain | agreement | vs UD EWT (0.9772) |
-|---|---|---|
-| news | 0.9686 | −0.9 |
-| narrative | 0.9613 | −1.6 |
-| encyclopedic | 0.9412 | −3.6 |
-| technical | 0.9229 | −5.4 |
-| **conversation** | **0.8927** | **−8.5** |
-| all | 0.9399 | −3.7 |
+| domain | first pass | after | delta |
+|---|---|---|---|
+| **conversation** | 0.8927 | **0.9652** | **+7.3** |
+| technical | 0.9229 | 0.9453 | +2.2 |
+| encyclopedic | 0.9412 | 0.9577 | +1.7 |
+| narrative | 0.9613 | 0.9656 | +0.4 |
+| news | 0.9686 | 0.9634 | −0.5 |
+| **all** | 0.9399 | **0.9588** | **+1.9** |
 
-Degradation is mild overall and concentrated where it matters most:
-**conversation is the weakest domain and 49% of the windows.** The
-Discord source is the furthest from anything these annotators were
-trained on. Benchmark rankings are unlikely to reverse at this
-magnitude, but the corpus should record per-domain agreement so a head
-trained on it can be evaluated with that in view.
+Two changes, both validated by the re-measurement:
+
+* **Discord dropped from the conversation domain.** Scraped casual chat
+  was furthest from anything these annotators were trained on, and
+  removing it moved conversation from worst domain to roughly best
+  (+7.3). Note the trade: the remaining sources — OASST, Taskmaster,
+  MultiWOZ, Glaive — are all assistant or task-oriented dialogue, which
+  is cleaner but a narrower register than production traffic. If CLS
+  underperforms in the wild, this is the first thing to revisit.
+* **Non-prose filtered from every document domain** (`looks_like_prose`).
+  Python documentation mixes prose with code blocks and RST tables, where
+  measured agreement was 0.04-0.06 — the taggers were guessing, not
+  annotating. Dropped at paragraph level so surrounding prose survives.
+
+The residual gap against the UD EWT reference is **−1.8 points**
+(0.9588 vs 0.9772), down from −3.7. Comfortable enough that the bake-off
+rankings hold on our text. Per-domain agreement should still be recorded
+in the corpus so a head trained on it can be evaluated with that in view.
 
 The equivalent probe for relations still needs NER and coref over our
 own text first, and remains outstanding.

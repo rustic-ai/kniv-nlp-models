@@ -75,6 +75,46 @@ def tokenize(text: str) -> list[str]:
     return out
 
 
+# Non-prose rejection. The technical domain carries Python documentation,
+# which mixes prose with code blocks and reStructuredText tables:
+#
+#     import argparse; parser.add_argument("x", type=int, help="the base")
+#     | Searching and Replacing | str.find | +--------------+------------+
+#
+# Measured POS agreement between two taggers on such windows is 0.04-0.06 —
+# they are not annotating language, they are guessing. Dropped at the unit
+# (paragraph) level so surrounding prose in the same document survives.
+_CODEY = re.compile(r"""
+      ^\s{4,}\S                      # indented block
+    | [{}();]\s*$                     # statement punctuation at line end
+    | \b(?:import|def|class|return|lambda|elif|None|True|False)\b
+    | [A-Za-z_]\w*\s*=\s*\S          # assignment
+    | [A-Za-z_]\w*\.\w+\(            # method call
+    | \+[-+]{3,}                      # ASCII table rule
+    | ^\s*[|:]                        # table / directive line
+    | ::\s*$                          # RST literal block marker
+""", re.VERBOSE | re.MULTILINE)
+
+
+def looks_like_prose(text: str, min_words: int = 5) -> bool:
+    """True if a unit reads as natural language rather than code or markup."""
+    words = text.split()
+    if len(words) < min_words:
+        return False
+    alpha = sum(c.isalpha() or c.isspace() for c in text) / max(len(text), 1)
+    if alpha < 0.75:                       # punctuation/symbol heavy
+        return False
+    if len(_CODEY.findall(text)) >= 2:     # one hit can be ordinary prose
+        return False
+    # A real sentence has function words; code and tables rarely do.
+    lowered = {w.strip(".,;:!?()[]\"'").lower() for w in words}
+    if not (lowered & {"the", "a", "an", "is", "are", "was", "were", "to",
+                       "of", "and", "or", "in", "on", "for", "that", "this",
+                       "it", "you", "we", "i", "be", "with", "as", "but"}):
+        return False
+    return True
+
+
 @dataclass
 class Document:
     doc_id: str
@@ -127,10 +167,14 @@ def _articles(domain_dir: Path, domain: str):
             if not text:
                 continue
             key = r.get("title") or r.get("path") or r.get("id") or f"{f.stem}-{i}"
+            units = [p for p in (q.strip() for q in text.split("\n\n"))
+                     if p and looks_like_prose(p)]
+            if not units:
+                continue
             yield Document(
                 doc_id=f"{f.parent.name}/{key}", domain=domain,
                 source=r.get("source", f.parent.name),
-                units=[p.strip() for p in text.split("\n\n") if p.strip()] or [text],
+                units=units,
             )
 
 
@@ -143,8 +187,9 @@ def _narrative(domain_dir: Path, chunk_paragraphs: int = 40):
     for f in sorted(domain_dir.glob("*.txt")):
         if f.stem == "all_books":
             continue
-        paras = [p.strip() for p in f.read_text(errors="replace").split("\n\n")
-                 if p.strip()]
+        paras = [p for p in (q.strip() for q in
+                             f.read_text(errors="replace").split("\n\n"))
+                 if p and looks_like_prose(p)]
         for c in range(0, len(paras), chunk_paragraphs):
             block = paras[c:c + chunk_paragraphs]
             yield Document(doc_id=f"{f.stem}-{c // chunk_paragraphs:04d}",
