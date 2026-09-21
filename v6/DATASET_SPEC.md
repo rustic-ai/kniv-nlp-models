@@ -45,12 +45,15 @@ single corpus with all layers on the same tokens gives:
 
 - **Coreference is impossible below the window.** Most chains cross
   sentence boundaries; within-sentence coref is close to vacuous.
-- **It makes SRL cheaper.** SRL needs one predicate-conditioned forward
-  pass per predicate — 4.82 verbs/sentence measured
-  (`data/bench_srl_fanout.json`), so ~5.8 encoder passes per sentence. One
-  512-token window scoring all predicates jointly is ~4.3× cheaper for the
-  same text, because the fan-out multiplier dominates the quadratic
-  attention term at these lengths.
+- ~~**It makes SRL cheaper.**~~ **Withdrawn.** The original argument was
+  that one window scoring all predicates jointly is ~4.3x cheaper than
+  ~5.8 encoder passes per sentence. That assumed the annotator could
+  consume a whole window, and §4.1a measured that it cannot: kniv-v5 is a
+  sentence-level model and feeding it windows costs 43 points of
+  agreement. The structural layers therefore run per sentence and the
+  fan-out is unchanged — 1,974,952 predicate passes over the corpus,
+  against 409,741 for each of POS/NER/DEP. Windows remain justified by
+  coreference, relations and CLS context; they do not save SRL compute.
 - **CLS needs context.** The v5 head reads 0.951 in-domain and 0.613 in
   the wild, partly because it sees one utterance plus at most one
   predecessor.
@@ -613,6 +616,25 @@ precisely so the mapping is exact. Silent
 re-tokenization is the dominant failure mode of LLM token-level
 annotation; here a length or range mismatch is a **recorded failure, never
 padded**.
+
+### 4.1b Scale: this is a GPU job
+
+Measured over the built corpus — 23,106 windows, 409,741 sentences,
+8.17M tokens — at kniv-v5's observed 6.7 sentences/s on this laptop's CPU:
+
+| layer | passes | CPU hours |
+|---|---|---|
+| POS | 409,741 | 17.0 |
+| NER | 409,741 | 17.0 |
+| DEP | 409,741 | 17.0 |
+| SRL | 1,974,952 | 81.9 |
+| coref, relations | 23,106 each | minutes |
+
+132 CPU-hours for the kniv-v5 layers alone, so the build runs on a GPU
+box. Colab works provided the job runs **inside the kernel**: a detached
+process leaves the kernel idle and the VM is reclaimed within the hour
+regardless of keep-alive, which cost five runs during the relation
+training. See `v6/experiments/atlop_colab.sh` for the pattern.
 
 ### 4.2 Environment isolation
 
