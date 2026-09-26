@@ -42,8 +42,13 @@ DOMAINS = ("conversation", "narrative", "technical", "news", "encyclopedic")
 
 # Which layers each annotator owns, and at which granularity. Per
 # DECISIONS.md; every entry is a measured choice, not a preference.
-PER_SENTENCE = {"kniv-v5": ["pos", "ner", "dep", "srl"],
+# SRL is handled separately: it is predicate-conditioned, so it needs one
+# item per (sentence, predicate) rather than one per sentence, and the
+# predicates come from the POS layer — which means POS must be annotated
+# first. See stage_srl.
+PER_SENTENCE = {"kniv-v5": ["pos", "ner", "dep"],
                 "stanza": ["lemma", "morph"]}
+SRL_PREDICATE_TAGS = {"VERB", "AUX"}
 PER_WINDOW = {"lingmess": ["coref"]}
 
 # LLM layers. CLS and sentiment are labelled PER SENTENCE with the whole
@@ -220,6 +225,51 @@ def is_tree(heads: list[int], start: int, end: int) -> bool:
     return True
 
 
+async def stage_srl(windows: list[dict], cache_dir: Path) -> None:
+    """One predicate-conditioned pass per verb, per sentence.
+
+    The predicate list comes from the POS layer rather than from a caller,
+    so POS must already be annotated — a sentence whose POS is missing is
+    skipped rather than guessed at. Measured at 4.82 predicates per
+    sentence, which is why SRL dominates the build; v6 plans a head that
+    scores every predicate in one pass (MODEL_CHANGES.md §1).
+    """
+    from .annotate import RunLogger
+    from .bakeoff import make_annotator
+    spec = load_annotators(["kniv-v5"])["kniv-v5"]
+    cache = CacheStore(cache_dir, CACHE_VERSION)
+    ann = make_annotator(spec, cache, max_repairs=1)
+
+    items, no_pos = [], 0
+    for w in windows:
+        for si, (s, e) in enumerate(w["sentence_spans"]):
+            key = f"{w['window_id']}:{si}"
+            pos = _get(cache, "kniv-v5", "pos", key, e - s)
+            if pos is None:
+                no_pos += 1
+                continue
+            for pi, tag in enumerate(pos):
+                if tag in SRL_PREDICATE_TAGS:
+                    items.append(GoldItem(id=f"{key}:p{pi}",
+                                          tokens=w["tokens"][s:e], layers={},
+                                          predicate_idx=pi))
+    print(f"srl: {len(items)} predicate passes over {len(windows)} windows"
+          f"{f' ({no_pos} sentences skipped, POS missing)' if no_pos else ''}",
+          flush=True)
+    if no_pos and not items:
+        raise SystemExit("POS must be annotated before SRL")
+
+    logger = RunLogger(RUNS_DIR / "corpus-kniv-v5-srl", every=1000)
+    n_ok = 0
+    try:
+        for it in items:
+            res = await ann.annotate_and_cache("srl", it)
+            logger.record(res, (0, 0), len(items)); n_ok += res.ok
+    finally:
+        logger.close()
+    print(f"kniv-v5/srl: {n_ok}/{len(items)} ok", flush=True)
+
+
 def stage_entities(windows: list[dict], cache_dir: Path) -> None:
     cache = CacheStore(cache_dir, CACHE_VERSION)
     docs, skipped = [], 0
@@ -332,6 +382,31 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
                     mask[layer] = True            # absent, not wrong
                     stats[f"missing_{layer}"] += 1
 
+        # srl_frames: one entry per predicate, tags in window coordinates.
+        frames = []
+        for si, (s2, e2) in enumerate(w["sentence_spans"]):
+            key = f"{w['window_id']}:{si}"
+            pos = _get(cache, "kniv-v5", "pos", key, e2 - s2)
+            if pos is None:
+                continue
+            for pi, tag in enumerate(pos):
+                if tag not in SRL_PREDICATE_TAGS:
+                    continue
+                tags = _get(cache, "kniv-v5", "srl", f"{key}:p{pi}", e2 - s2)
+                if tags is None:
+                    continue
+                full = ["O"] * n
+                full[s2:e2] = tags
+                frames.append({"predicate_idx": s2 + pi, "tags": full})
+        if frames:
+            row["srl_frames"] = frames
+            provenance["srl"] = "kniv-v5"
+            stats["srl_frames"] += len(frames)
+        else:
+            row["srl_frames"] = None
+            mask["srl"] = True
+            stats["windows_without_srl"] += 1
+
         if relations is not None:
             rel = relations.get(w["window_id"])
             # struct, not a mixed list: [h, t, r] is (int, int, str) and
@@ -383,7 +458,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--stage", required=True,
                     choices=["windows", "annotate", "llm", "entities",
-                             "assemble"])
+                             "assemble", "srl"])
     ap.add_argument("--annotator")
     ap.add_argument("--layers", help="comma-separated subset")
     ap.add_argument("--limit", type=int)
@@ -398,6 +473,9 @@ def main() -> int:
     print(f"{len(windows)} windows", flush=True)
     if args.stage == "entities":
         stage_entities(windows, args.cache_dir)
+        return 0
+    if args.stage == "srl":
+        asyncio.run(stage_srl(windows, args.cache_dir))
         return 0
     if args.stage == "llm":
         if not args.annotator:

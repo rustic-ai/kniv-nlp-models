@@ -51,8 +51,11 @@ single corpus with all layers on the same tokens gives:
   consume a whole window, and §4.1a measured that it cannot: kniv-v5 is a
   sentence-level model and feeding it windows costs 43 points of
   agreement. The structural layers therefore run per sentence and the
-  fan-out is unchanged — 1,974,952 predicate passes over the corpus,
-  against 409,741 for each of POS/NER/DEP. Windows remain justified by
+  fan-out is unchanged. **Measured on this corpus it is 2.86 predicates per
+  sentence, not the 4.82 in `data/bench_srl_fanout.json`** — our sentences
+  average 19.9 tokens and skew conversational, and that benchmark was taken
+  on different text. So 1,230,259 predicate passes over the corpus, against
+  430,141 for each of POS/NER/DEP. Windows remain justified by
   coreference, relations and CLS context; they do not save SRL compute.
 - **CLS needs context.** The v5 head reads 0.951 in-domain and 0.613 in
   the wild, partly because it sees one utterance plus at most one
@@ -627,7 +630,7 @@ Measured over the built corpus — 23,106 windows, 409,741 sentences,
 | POS | 409,741 | 17.0 |
 | NER | 409,741 | 17.0 |
 | DEP | 409,741 | 17.0 |
-| SRL | 1,974,952 | 81.9 |
+| SRL | 1,230,259 | 19.5 (MPS) |
 | coref, relations | 23,106 each | minutes |
 
 **That estimate was measuring a bug.** The annotator selected its device
@@ -653,6 +656,16 @@ the fallback for larger runs, and if used the job must run *inside the
 kernel* — a detached process leaves the kernel idle and the VM is
 reclaimed within the hour regardless of keep-alive, which cost five runs
 during relation training. See `v6/experiments/atlop_colab.sh`.
+
+### 4.1c SRL needs POS first
+
+SRL is predicate-conditioned, so it needs one item per (sentence,
+predicate) rather than one per sentence — and the predicate list comes from
+the **POS layer**, not from a caller. POS must therefore be annotated
+before SRL, and a sentence with missing POS is skipped rather than guessed
+at. Assembly writes `srl_frames: [{predicate_idx, tags}, ...]` in window
+coordinates, which is the shape a single-pass v6 head would also train from
+(`MODEL_CHANGES.md` §1).
 
 ### 4.2 Environment isolation
 
