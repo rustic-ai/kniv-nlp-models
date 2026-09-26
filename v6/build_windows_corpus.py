@@ -46,6 +46,18 @@ PER_SENTENCE = {"kniv-v5": ["pos", "ner", "dep", "srl"],
                 "stanza": ["lemma", "morph"]}
 PER_WINDOW = {"lingmess": ["coref"]}
 
+# LLM layers. CLS and sentiment are labelled PER SENTENCE with the whole
+# window supplied as context: the v5 CLS head reads 0.951 in-domain and
+# 0.613 in the wild partly because it saw one utterance plus at most one
+# predecessor. Keywords are window-level by nature.
+#
+# One annotator over the bulk, not an ensemble. Consensus lost on 7 of 8
+# layers in the bake-off, and on the one where it won only a union of the
+# top two helped. The adjudicated CLS gold set needs 400-600 items and a
+# 100-item human overlap (CLS_TAXONOMY.md) — a sample, not the corpus.
+LLM_PER_SENTENCE = ["cls", "sentiment"]
+LLM_PER_WINDOW = ["keywords"]
+
 # Relations are not annotated by an LLM or by a toolkit: they come from the
 # ATLOP checkpoint retrained on Re-DocRED (0.790 test F1), which needs entity
 # clusters supplied rather than finding them itself. So the layer is two
@@ -102,6 +114,52 @@ def sentence_items(w: dict) -> list[GoldItem]:
         items.append(GoldItem(id=f"{w['window_id']}:{si}",
                               tokens=w["tokens"][s:e], layers={}))
     return items
+
+
+async def stage_llm(name: str, windows: list[dict], cache_dir: Path,
+                    layers: list[str] | None) -> None:
+    """Annotate the LLM layers, running items concurrently.
+
+    The structural annotators are local and sequential; these are API calls,
+    so throughput comes from concurrency. Measured on this deployment:
+    7.21 sentences/s at concurrency 16, 16.23 at 64.
+    """
+    from .annotate import RunLogger
+    from .annotate.llm import LLMAnnotator
+    spec = load_annotators([name])[name]
+    cache = CacheStore(cache_dir, CACHE_VERSION)
+    ann = LLMAnnotator(spec, cache, max_repairs=1)
+    todo = layers or (LLM_PER_SENTENCE + LLM_PER_WINDOW)
+
+    for layer in todo:
+        per_sentence = layer in LLM_PER_SENTENCE
+        items = []
+        for w in windows:
+            if per_sentence:
+                ctx = " ".join(w["tokens"])[:2000]
+                for si, (s, e) in enumerate(w["sentence_spans"]):
+                    items.append(GoldItem(
+                        id=f"{w['window_id']}:{si}", tokens=w["tokens"][s:e],
+                        layers={}, context=ctx,
+                        target=" ".join(w["tokens"][s:e])))
+            else:
+                items.append(GoldItem(id=w["window_id"], tokens=w["tokens"],
+                                      layers={}))
+        logger = RunLogger(RUNS_DIR / f"corpus-{name}-{layer}", every=500)
+        print(f"{name}/{layer}: {len(items)} items", flush=True)
+        n_ok = 0
+        try:
+            # Warm up once so the response_format ladder settles before the
+            # fan-out, then run everything concurrently.
+            first = await ann.annotate_and_cache(layer, items[0])
+            logger.record(first, (0, 0), len(items)); n_ok += first.ok
+            tasks = [ann.annotate_and_cache(layer, it) for it in items[1:]]
+            for coro in asyncio.as_completed(tasks):
+                res = await coro
+                logger.record(res, (0, 0), len(items)); n_ok += res.ok
+        finally:
+            logger.close()
+        print(f"{name}/{layer}: {n_ok}/{len(items)} ok", flush=True)
 
 
 async def stage_annotate(name: str, windows: list[dict], cache_dir: Path,
@@ -324,7 +382,8 @@ def _write(rows, shard, pa, pq):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--stage", required=True,
-                    choices=["windows", "annotate", "entities", "assemble"])
+                    choices=["windows", "annotate", "llm", "entities",
+                             "assemble"])
     ap.add_argument("--annotator")
     ap.add_argument("--layers", help="comma-separated subset")
     ap.add_argument("--limit", type=int)
@@ -339,6 +398,12 @@ def main() -> int:
     print(f"{len(windows)} windows", flush=True)
     if args.stage == "entities":
         stage_entities(windows, args.cache_dir)
+        return 0
+    if args.stage == "llm":
+        if not args.annotator:
+            raise SystemExit("--annotator required")
+        layers = [x.strip() for x in args.layers.split(",")] if args.layers else None
+        asyncio.run(stage_llm(args.annotator, windows, args.cache_dir, layers))
         return 0
     if args.stage == "annotate":
         if not args.annotator:
