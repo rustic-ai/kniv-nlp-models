@@ -101,6 +101,115 @@ def collect_taskmaster(config: dict):
 
 # ── OASST1 ────────────────────────────────────────────────────────
 
+def collect_taskmaster2(config: dict):
+    """Taskmaster-2 (CC-BY-4.0): 17,304 dialogs, ALL spoken two-person.
+
+    Added specifically to raise Feedback and Commissive, which measured
+    1.9% and 2.5% of the corpus. Those functions live in spoken
+    back-and-forth — "mm-hm", "got it", "sure, I'll do that" — and our
+    other sources are assistant-style or self-written. Taskmaster-2 is
+    Wizard-of-Oz: users believed they were talking to an automated system,
+    so they spoke naturally rather than writing.
+
+    Taskmaster-1 mixes self-dialog in; this release does not.
+    """
+    out_dir = OUTPUT_DIR / "taskmaster2"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_file = out_dir / "utterances.jsonl"
+    if output_file.exists():
+        print("Taskmaster-2: already collected.", flush=True)
+        return
+
+    from datasets import load_dataset
+    print("  Loading Taskmaster-2...", flush=True)
+    # Script-based on the Hub; the auto-converted parquet branch is the only
+    # route current `datasets` can read.
+    ds = load_dataset("google-research-datasets/taskmaster2",
+                      revision="refs/convert/parquet", split="train")
+
+    max_utt = config["sources"].get("taskmaster2", {}).get("max_utterances", 60000)
+    utterances = []
+    for item in ds:
+        cid = item.get("conversation_id") or ""
+        turn = 0
+        for u in item.get("utterances") or []:
+            text = (u.get("text") or "").strip()
+            if not text:
+                continue
+            utterances.append({
+                "text": text, "source": "taskmaster2",
+                "domain": "conversation", "conv_id": f"tm2-{cid}",
+                "turn_idx": turn,
+                "speaker": (u.get("speaker") or "").lower(),
+            })
+            turn += 1
+        if len(utterances) >= max_utt:
+            break
+    _save_utterances(utterances[:max_utt], output_file)
+    print(f"Taskmaster-2: {min(len(utterances), max_utt)} utterances", flush=True)
+
+
+def collect_sgd(config: dict):
+    """Schema-Guided Dialogue / DSTC8 (CC-BY-SA-4.0): 16k+ dialogs, 17 domains.
+
+    Task-oriented human<->assistant dialogue, which is dense in offers and
+    acceptances — the Commissive function.
+
+    SGD also carries GOLD DIALOGUE ACTS (AFFIRM, NEGATE, OFFER, REQUEST,
+    THANK_YOU, GOODBYE, CONFIRM, ...) which map onto the v6 CLS taxonomy.
+    That makes it a candidate evaluation set for a layer that otherwise has
+    no gold at all — see CLS_TAXONOMY.md. The acts are not collected here;
+    this is the text pass.
+
+    Loaded shard-by-shard: the repo splits dialogues/ from schema/ with
+    different columns, which defeats the standard loader.
+    """
+    out_dir = OUTPUT_DIR / "sgd"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_file = out_dir / "utterances.jsonl"
+    if output_file.exists():
+        print("SGD: already collected.", flush=True)
+        return
+
+    import pyarrow.parquet as pq
+    from huggingface_hub import hf_hub_download, list_repo_files
+    repo = "google-research-datasets/schema_guided_dstc8"
+    print("  Loading SGD...", flush=True)
+    files = [f for f in list_repo_files(repo, repo_type="dataset",
+                                        revision="refs/convert/parquet")
+             if f.startswith("dialogues/train/") and f.endswith(".parquet")]
+
+    max_utt = config["sources"].get("sgd", {}).get("max_utterances", 60000)
+    utterances = []
+    for f in sorted(files):
+        path = hf_hub_download(repo, f, repo_type="dataset",
+                               revision="refs/convert/parquet")
+        for row in pq.read_table(path).to_pylist():
+            turns = row.get("turns") or {}
+            texts = turns.get("utterance") or []
+            speakers = turns.get("speaker") or []
+            cid = row.get("dialogue_id") or ""
+            turn = 0
+            for i, text in enumerate(texts):
+                text = (text or "").strip()
+                if not text:
+                    continue
+                spk = speakers[i] if i < len(speakers) else 0
+                utterances.append({
+                    "text": text, "source": "sgd", "domain": "conversation",
+                    "conv_id": f"sgd-{cid}", "turn_idx": turn,
+                    # speaker is a ClassLabel: 0=USER, 1=SYSTEM
+                    "speaker": "user" if spk == 0 else "assistant",
+                })
+                turn += 1
+            if len(utterances) >= max_utt:
+                break
+        if len(utterances) >= max_utt:
+            break
+    _save_utterances(utterances[:max_utt], output_file)
+    print(f"SGD: {min(len(utterances), max_utt)} utterances", flush=True)
+
+
 def collect_oasst(config: dict):
     cfg = config["sources"]["oasst"]
     out_dir = OUTPUT_DIR / "oasst"
@@ -329,6 +438,8 @@ def collect_discord(config: dict):
 # ── Main ──────────────────────────────────────────────────────────
 
 COLLECTORS = {
+    "taskmaster2": collect_taskmaster2,
+    "sgd": collect_sgd,
     "taskmaster": collect_taskmaster,
     "oasst": collect_oasst,
     "multiwoz": collect_multiwoz,
