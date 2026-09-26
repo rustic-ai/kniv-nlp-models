@@ -132,6 +132,45 @@ carried by `Commissive` vs `Directive`, which is the same distinction under
 its standard name, and the SRL head recovers the actor independently
 via `ARG0`.
 
+## Measured distribution
+
+Annotated over 427,450 corpus sentences, then re-measured after adding two
+spoken-dialogue sources (Taskmaster-2, SGD):
+
+| label | first corpus | Taskmaster-2 + SGD | blended (projected) |
+|---|---|---|---|
+| Inform | 73.7% | 50.5% | ~69% |
+| Directive | 11.0% | 16.5% | ~12% |
+| Question | 7.7% | 27.9% | ~12% |
+| Social | 3.7% | 11.8% | ~5% |
+| Commissive | 2.5% | 4.8% | ~3.0% |
+| **Feedback** | **1.9%** | **4.1%** | **~2.4%** |
+| *empty (no function)* | 6.5% | 0.1% | ~5% |
+
+**Multi-label rate: 6.6%** of sentences carry more than one label. This is
+the measured figure; an earlier draft of this document quoted 44% from a
+substring heuristic, which was not a measurement.
+
+### Feedback stays thin, and that is accepted
+
+Adding spoken dialogue raised every minority label — Feedback 2.2x,
+Question 3.6x, Social 3.2x — and Feedback is still only ~2.4% blended. The
+reason is structural: backchannels are dense in telephone and meeting
+speech (Switchboard, Fisher, MRDA) and every one of those is LDC-gated,
+the same wall that blocked Re-TACRED.
+
+**Decision: accept the distribution and evaluate per class.** Two reasons.
+The absolute count is large — 4.1% of 3.68M conversational tokens is ample
+supervision, and v5's actual failure was `reject` firing once per 500
+sentences, which is a different problem. And reweighting the corpus toward
+conversation would narrow domain coverage for every other head sharing the
+encoder.
+
+The consequence is a reporting rule, not a training change: **per-class F1,
+never macro.** A macro average over six classes where two sit near 2%
+measures variance more than skill, and that averaging is what hid v5's
+problem.
+
 ## Evaluation
 
 There is no public gold for this scheme on our domains, so:
@@ -150,3 +189,9 @@ There is no public gold for this scheme on our domains, so:
   case table predicts (`Feedback`/`Inform`, `Question`/`Directive`).
 - Public dialog-act sets (SwDA, DailyDialog) are a domain-shift probe only,
   never a headline, and DailyDialog is CC-BY-NC-SA — evaluation only.
+- **SGD is the most promising external benchmark.** It is CC-BY-SA-4.0 and
+  ships gold dialogue acts — AFFIRM, NEGATE, OFFER, REQUEST, THANK_YOU,
+  GOODBYE, CONFIRM, SELECT, NOTIFY_SUCCESS/FAILURE — which map onto these
+  six labels. That would give CLS a human-annotated external yardstick
+  rather than LLM adjudication alone, which is the weakest part of the plan
+  above. The text is already collected; the acts are not yet extracted.
