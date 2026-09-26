@@ -24,7 +24,8 @@ RUNS_DIR = REPO / "v6" / "runs"
 ANNOTATORS_YAML = Path(__file__).parent / "annotators.yaml"
 
 # Layers the bake-off can measure, in report order.
-LAYERS = ("pos", "lemma", "morph", "dep", "ner", "srl", "coref", "rel")
+LAYERS = ("pos", "lemma", "morph", "dep", "ner", "srl", "coref", "rel",
+          "cls", "sentiment", "keywords")
 
 _ENV_RE = re.compile(r"^\$\{([A-Z0-9_]+)\}$")
 

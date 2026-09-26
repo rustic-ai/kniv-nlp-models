@@ -83,6 +83,40 @@ def validate_payload(layer: str, payload: object, n: int,
     Length and value-range violations are errors, not something to repair
     silently. ``error`` is None when the payload is usable.
     """
+    if layer == "cls":
+        if not isinstance(payload, list):
+            return None, "labels is not a list", "parse"
+        from ..schemas import CLS_LABELS
+        out = []
+        for x in payload:
+            if not isinstance(x, str):
+                return None, "cls labels must be strings", "parse"
+            if x not in CLS_LABELS:
+                return None, f"unknown cls label {x!r}", "range"
+            if x not in out:                  # multi-label set, not a bag
+                out.append(x)
+        return out, None, None               # empty list is valid: no function
+
+    if layer == "sentiment":
+        from ..schemas import SENTIMENT_LABELS
+        if not isinstance(payload, str):
+            return None, "sentiment is not a string", "parse"
+        if payload not in SENTIMENT_LABELS:
+            return None, f"unknown sentiment {payload!r}", "range"
+        return payload, None, None
+
+    if layer == "keywords":
+        if not isinstance(payload, list):
+            return None, "keywords is not a list", "parse"
+        if not all(isinstance(x, str) for x in payload):
+            return None, "keywords must be strings", "parse"
+        seen, out = set(), []
+        for k in payload:
+            k = k.strip()
+            if k and k.lower() not in seen:
+                seen.add(k.lower()); out.append(k)
+        return out, None, None
+
     if layer == "rel":
         if not isinstance(payload, list):
             return None, "triples is not a list", "parse"

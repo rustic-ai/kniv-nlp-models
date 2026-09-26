@@ -155,6 +155,39 @@ COREF_SCHEMA = _envelope("coref_clusters", {
     ),
 })
 
+# CLS: six ISO 24617-2-derived general-purpose communicative functions,
+# flattened across dimensions. Multi-label — every function that applies
+# fires, and the EMPTY SET is legal, meaning none applied (filler,
+# stalling, fragments). There is deliberately no SKIP class: a label that
+# means "no label" invites annotators to reach for it.
+# See CLS_TAXONOMY.md, which is the annotation contract.
+CLS_LABELS = ["Question", "Inform", "Directive", "Commissive",
+              "Feedback", "Social"]
+
+SENTIMENT_LABELS = ["positive", "negative", "neutral"]
+
+CLS_SCHEMA = _envelope("cls_labels", {
+    "labels": _array_of(
+        {"type": "string", "enum": CLS_LABELS},
+        "Every communicative function the sentence performs. Multi-label: "
+        "return all that apply, and an empty list when none does.",
+    ),
+})
+
+SENTIMENT_SCHEMA = _envelope("sentiment", {
+    "sentiment": {"type": "string", "enum": SENTIMENT_LABELS,
+                  "description": "Sentiment the sentence expresses."},
+})
+
+KEYWORDS_SCHEMA = _envelope("keywords", {
+    "keywords": _array_of(
+        {"type": "string"},
+        "Salient terms for the window, drawn from its own wording. Between "
+        "three and ten, ordered most to least salient.",
+    ),
+})
+
+
 def rel_schema(names: list[str]) -> dict:
     """Relation schema, built against the inventory in use.
 
@@ -186,6 +219,9 @@ def rel_schema(names: list[str]) -> dict:
 
 
 SCHEMAS = {
+    "cls": CLS_SCHEMA,
+    "sentiment": SENTIMENT_SCHEMA,
+    "keywords": KEYWORDS_SCHEMA,
     "ner": NER_SCHEMA,
     "coref": COREF_SCHEMA,
     "pos": POS_SCHEMA,
@@ -201,6 +237,7 @@ PAYLOAD_KEY = {
     "ner": "tags",
     "pos": "tags", "lemma": "lemmas", "morph": "feats",
     "dep": "arcs", "srl": "tags", "rel": "triples",
+    "cls": "labels", "sentiment": "sentiment", "keywords": "keywords",
 }
 
 

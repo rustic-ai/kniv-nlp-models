@@ -236,7 +236,9 @@ class LLMAnnotator:
             {"role": "system", "content": SYSTEM[layer]},
             {"role": "user", "content": user_message(
                 layer, item.tokens, item.predicate_idx,
-                getattr(item, "entities", None)) + self._json_hint(layer)},
+                getattr(item, "entities", None),
+                getattr(item, "context", None),
+                getattr(item, "target", None)) + self._json_hint(layer)},
         ]
 
     # ── one item ─────────────────────────────────────────────────

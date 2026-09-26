@@ -26,6 +26,10 @@ class GoldItem:
     # Relation extraction supplies pre-clustered entities; the annotator
     # classifies relations over them rather than finding mentions itself.
     entities: list[dict] | None = None
+    # Sentence-level layers (cls, sentiment) are labelled one sentence at a
+    # time with the surrounding window supplied as evidence.
+    context: str | None = None
+    target: str | None = None
 
 
 def _feats_to_string(feats: dict | None) -> str:

@@ -101,6 +101,52 @@ SYSTEM = {
         "Label roles ONLY for the indicated predicate, ignoring every other "
         "verb in the sentence."
     ),
+    "cls": (
+        "You label the communicative function of ONE sentence, shown in the "
+        "context of the surrounding message.\n"
+        "The six labels are ISO 24617-2 general-purpose communicative "
+        "functions, flattened across dimensions:\n"
+        "- Question: the speaker seeks information they do not have. "
+        "Rhetorical and checking questions count.\n"
+        "- Inform: propositional content is asserted. ANSWERS are Inform. "
+        "Agreement and disagreement about content are Inform, not Feedback.\n"
+        "- Directive: the speaker tries to get the ADDRESSEE to act — "
+        "request, instruct, suggest. Includes polite interrogative forms "
+        "like 'Can you send the report?'.\n"
+        "- Commissive: the SPEAKER commits to act — offer, promise, or "
+        "accepting/refusing a request. A bare 'Sure.' after a request is "
+        "Commissive.\n"
+        "- Feedback: the speaker signals their own uptake of what was said "
+        "— 'mm-hm', 'ok', 'sorry what?'.\n"
+        "- Social: a social obligation is discharged — greeting, goodbye, "
+        "thanking, apology, congratulation.\n"
+        "\n"
+        "Multi-label: return EVERY function the sentence performs. A tag "
+        "question over an assertion is Question AND Inform. 'Got it, "
+        "thanks.' is Feedback AND Social.\n"
+        "Return an EMPTY list when none applies — fillers and fragments "
+        "like 'um, so, yeah' have no general-purpose function. Do not "
+        "invent a label to avoid an empty answer.\n"
+        "\n"
+        "The distinction that matters most: Feedback is about the "
+        "COMMUNICATION, Inform (agreement) is about the CONTENT. 'Right.' "
+        "as a backchannel is Feedback; 'Right, it shipped Tuesday' is "
+        "Inform."
+    ),
+    "sentiment": (
+        "You label the sentiment ONE sentence expresses, shown in the "
+        "context of the surrounding message.\n"
+        "positive, negative, or neutral. Judge the sentiment the speaker "
+        "conveys, not the subject matter: a calm factual report of bad news "
+        "is neutral, and sarcasm is negative however positive its wording."
+    ),
+    "keywords": (
+        "You extract the salient terms of a passage.\n"
+        "Between three and ten, ordered most to least salient. Use the "
+        "passage's OWN wording — do not translate, generalise, or introduce "
+        "terms it does not contain. Prefer multi-word terms where the "
+        "passage uses them. Skip function words and boilerplate."
+    ),
     "rel": (
         "You are an expert annotator extracting a relation graph from a "
         "document.\n"
@@ -141,8 +187,22 @@ def render_entities(entities: list[dict]) -> str:
 
 def user_message(layer: str, tokens: list[str],
                  predicate_idx: int | None = None,
-                 entities: list[dict] | None = None) -> str:
+                 entities: list[dict] | None = None,
+                 context: str | None = None,
+                 target: str | None = None) -> str:
     n = len(tokens)
+    if layer in ("cls", "sentiment"):
+        # One sentence at a time, with its window as context. The v5 CLS head
+        # reads 0.951 in-domain and 0.613 in the wild partly because it saw
+        # one utterance plus at most one predecessor; the label is still per
+        # sentence, but the evidence is the whole message.
+        parts = []
+        if context:
+            parts.append(f"Context (the surrounding message):\n{context}\n")
+        parts.append(f"Sentence to label:\n{target or ' '.join(tokens)}")
+        return "\n".join(parts)
+    if layer == "keywords":
+        return f"Passage:\n{' '.join(tokens)}\n\nReturn its salient terms."
     if layer == "rel":
         if not entities:
             raise ValueError("rel prompts require entities")

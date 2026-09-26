@@ -32,6 +32,7 @@ from .annotate.base import CacheStore, validate_payload
 from .config import DATA_DIR, RUNS_DIR, load_annotators
 from .gold.ud_ewt import GoldItem
 from .prompts import PROMPT_VERSION
+from .entities import build_entities
 from .windows import build_windows, iter_documents, tokenize
 
 OUT = DATA_DIR / "v6-corpus"
@@ -44,6 +45,23 @@ DOMAINS = ("conversation", "narrative", "technical", "news", "encyclopedic")
 PER_SENTENCE = {"kniv-v5": ["pos", "ner", "dep", "srl"],
                 "stanza": ["lemma", "morph"]}
 PER_WINDOW = {"lingmess": ["coref"]}
+
+# Relations are not annotated by an LLM or by a toolkit: they come from the
+# ATLOP checkpoint retrained on Re-DocRED (0.790 test F1), which needs entity
+# clusters supplied rather than finding them itself. So the layer is two
+# stages either side of an external process:
+#
+#   --stage entities   NER + coref -> DocRED-format clusters
+#   (ATLOP_INPUT=... python -m v6.experiments.atlop_runner)
+#   --stage assemble   reads the predictions back in
+#
+# Yield is sparse by inventory, not by failure: 4.4 triples/window measured,
+# against 27.1 on Re-DocRED, because Wikidata properties describe
+# encyclopedic facts and most of this corpus is not encyclopedic. Windows
+# with no relation carry a masked layer, since absence of an extractable
+# triple is not evidence that none exists.
+ENTITIES_FILE = OUT / "entities_docred.json"
+RELATIONS_FILE = OUT / "relations_atlop.json"
 
 
 def stage_windows(limit: int | None, per_domain: int | None) -> None:
@@ -144,6 +162,45 @@ def is_tree(heads: list[int], start: int, end: int) -> bool:
     return True
 
 
+def stage_entities(windows: list[dict], cache_dir: Path) -> None:
+    cache = CacheStore(cache_dir, CACHE_VERSION)
+    docs, skipped = [], 0
+    for w in windows:
+        ner = []
+        for si, (s, e) in enumerate(w["sentence_spans"]):
+            ner.append(_get(cache, "kniv-v5", "ner", f"{w['window_id']}:{si}", e - s))
+        coref = _get(cache, "lingmess", "coref", w["window_id"], w["n_tokens"])
+        sents, vertex = build_entities(w["tokens"], w["sentence_spans"], ner, coref)
+        if vertex is None:
+            skipped += 1
+            continue
+        docs.append({"title": w["window_id"], "sents": sents,
+                     "vertexSet": vertex, "labels": []})
+    OUT.mkdir(parents=True, exist_ok=True)
+    ENTITIES_FILE.write_text(json.dumps(docs))
+    ents = sum(len(d["vertexSet"]) for d in docs)
+    print(f"wrote {len(docs)} documents -> {ENTITIES_FILE}")
+    print(f"  {skipped} windows skipped (<2 entities); "
+          f"mean entities/doc {ents / max(len(docs), 1):.1f}")
+    print(f"  next: ATLOP_INPUT={ENTITIES_FILE} ATLOP_OUT={RELATIONS_FILE} "
+          f"uv run python -m v6.experiments.atlop_runner")
+
+
+def load_relations() -> dict[str, list]:
+    """ATLOP predictions keyed by window_id, as readable relation names."""
+    if not RELATIONS_FILE.exists():
+        return {}
+    from .gold.redocred import relation_inventory
+    _, by_name = relation_inventory()
+    code2name = {c: n for n, c in by_name.items()}
+    out = {}
+    for rec in json.loads(RELATIONS_FILE.read_text()):
+        out[rec["title"]] = sorted({(h, t, code2name[c])
+                                    for h, t, c in rec["preds"]
+                                    if c in code2name})
+    return out
+
+
 def _get(cache, ann, layer, key, n):
     rec = cache.get(ann, layer, key)
     if not rec or rec.get("payload") is None:
@@ -154,6 +211,10 @@ def _get(cache, ann, layer, key, n):
 
 def stage_assemble(windows: list[dict], cache_dir: Path,
                    shard_size: int = 2000) -> None:
+    relations = load_relations() or None
+    if relations is None:
+        print("  NOTE: no ATLOP predictions found; relations will be masked",
+              flush=True)
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -213,6 +274,20 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
                     mask[layer] = True            # absent, not wrong
                     stats[f"missing_{layer}"] += 1
 
+        if relations is not None:
+            rel = relations.get(w["window_id"])
+            # struct, not a mixed list: [h, t, r] is (int, int, str) and
+            # Arrow cannot infer a type for that. The spec specifies a struct
+            # for this reason.
+            row["relations"] = ([{"head": h, "tail": t, "relation": r}
+                                 for h, t, r in rel] if rel else None)
+            if rel:
+                provenance["relations"] = "atlop-redocred"
+                stats["relation_triples"] += len(rel)
+            else:
+                mask["relations"] = True
+                stats["windows_without_relations"] += 1
+
         p = _get(cache, "lingmess", "coref", w["window_id"], n)
         row["coref"] = p
         if p is None:
@@ -249,7 +324,7 @@ def _write(rows, shard, pa, pq):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--stage", required=True,
-                    choices=["windows", "annotate", "assemble"])
+                    choices=["windows", "annotate", "entities", "assemble"])
     ap.add_argument("--annotator")
     ap.add_argument("--layers", help="comma-separated subset")
     ap.add_argument("--limit", type=int)
@@ -262,6 +337,9 @@ def main() -> int:
         return 0
     windows = load_windows(args.limit)
     print(f"{len(windows)} windows", flush=True)
+    if args.stage == "entities":
+        stage_entities(windows, args.cache_dir)
+        return 0
     if args.stage == "annotate":
         if not args.annotator:
             raise SystemExit("--annotator required")

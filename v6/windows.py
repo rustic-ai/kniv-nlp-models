@@ -96,6 +96,27 @@ _CODEY = re.compile(r"""
 """, re.VERBOSE | re.MULTILINE)
 
 
+# Model-artifact cleaning. v6 reads raw/ directly and skips
+# preprocess.py — correctly, because that is where document structure was
+# destroyed — but preprocess.py also cleaned text, and that was lost with
+# it. Measured on the collected conversation domain: 8.4% of utterances
+# carry <|endoftext|> markers and 2.5% contain function-call JSON, all from
+# the glaive source. A CLS smoke test duly labelled a tool-call payload
+# "Directive", which is meaningless.
+_ARTIFACT = re.compile(r"""
+      <\|[a-z_]+\|>                        # <|endoftext|>, <|im_start|>
+    | <\s*/?\s*functioncall\s*>            # tool-call wrapper
+""", re.VERBOSE | re.IGNORECASE)
+_JSON_BLOB = re.compile(r"""\{\s*"[^"]+"\s*:.*?\}""", re.DOTALL)
+
+
+def clean_text(text: str) -> str:
+    """Strip model artifacts and inline JSON payloads."""
+    text = _ARTIFACT.sub(" ", text)
+    text = _JSON_BLOB.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def looks_like_prose(text: str, min_words: int = 5) -> bool:
     """True if a unit reads as natural language rather than code or markup."""
     words = text.split()
@@ -124,6 +145,11 @@ class Document:
     speakers: list[str | None] = field(default_factory=list)
 
     def __post_init__(self):
+        keep = [i for i, u in enumerate(self.units) if u and u.strip()]
+        if len(keep) != len(self.units):
+            self.units = [self.units[i] for i in keep]
+            if self.speakers:
+                self.speakers = [self.speakers[i] for i in keep]
         if not self.speakers:
             self.speakers = [None] * len(self.units)
 
@@ -153,7 +179,7 @@ def _conversation(domain_dir: Path):
             yield Document(
                 doc_id=cid, domain="conversation",
                 source=turns[0].get("source", f.parent.name),
-                units=[t["text"] for t in turns],
+                units=[clean_text(t["text"]) for t in turns],
                 speakers=[t.get("speaker") for t in turns],
             )
 
@@ -167,8 +193,8 @@ def _articles(domain_dir: Path, domain: str):
             if not text:
                 continue
             key = r.get("title") or r.get("path") or r.get("id") or f"{f.stem}-{i}"
-            units = [p for p in (q.strip() for q in text.split("\n\n"))
-                     if p and looks_like_prose(p)]
+            units = [c for c in (clean_text(q) for q in text.split("\n\n"))
+                     if c and looks_like_prose(c)]
             if not units:
                 continue
             yield Document(
@@ -187,9 +213,9 @@ def _narrative(domain_dir: Path, chunk_paragraphs: int = 40):
     for f in sorted(domain_dir.glob("*.txt")):
         if f.stem == "all_books":
             continue
-        paras = [p for p in (q.strip() for q in
+        paras = [c for c in (clean_text(q) for q in
                              f.read_text(errors="replace").split("\n\n"))
-                 if p and looks_like_prose(p)]
+                 if c and looks_like_prose(c)]
         for c in range(0, len(paras), chunk_paragraphs):
             block = paras[c:c + chunk_paragraphs]
             yield Document(doc_id=f"{f.stem}-{c // chunk_paragraphs:04d}",
