@@ -667,6 +667,28 @@ at. Assembly writes `srl_frames: [{predicate_idx, tags}, ...]` in window
 coordinates, which is the shape a single-pass v6 head would also train from
 (`MODEL_CHANGES.md` §1).
 
+### 4.1d Cache keys must be content-addressed
+
+Annotations are cached by `(annotator, layer, prompt_version, item_id)`, and
+the item id was originally `window_id:sentence_index`. That is
+**content-blind, and window ids are reused**: `window_id` is
+`hash(doc_id, window_index)`, so any change to how documents pack into
+windows re-points an existing id at different text.
+
+Artifact cleaning did exactly that. Measured afterwards, **29.7% of cached
+POS entries had a different token count than the sentence they were now
+attached to**, and the remainder matched in length without necessarily
+matching in content. Length mismatches are discarded by validation; the
+rest would have entered the corpus as plausible wrong labels.
+
+**No quality gate catches this.** Every gate checks shape and inventory —
+correct length, valid UPOS tags — and stale labels satisfy all of them.
+
+The item id now carries a digest of the sentence text, so different text is
+a different key and staleness becomes a cache miss instead of a silent
+mismatch. Any change to tokenization, cleaning or windowing now invalidates
+exactly the affected entries and nothing else.
+
 ### 4.2 Environment isolation
 
 The annotators need mutually incompatible dependency stacks — v5 pins

@@ -344,6 +344,60 @@ class KnivV5Annotator:
     # batching only adds allocation and a slower kernel path. Do not retry
     # without measuring on the target device.
 
+    async def annotate_batch_and_cache(self, layer: str, items: list,
+                                       batch_size: int = 32) -> list:
+        """Cache-aware batched annotation.
+
+        Batching the encoder is worth 9.6x on POS and ~3.7x on NER and DEP
+        (114.2/s against 11.9, 55.5 against 15.3, 56.7 against 15.1). POS
+        reaches the encoder ceiling because its decode is an argmax; NER and
+        DEP cap lower because Viterbi and the biaffine gather stay per item.
+
+        Cache semantics are preserved exactly: hits are returned without
+        touching the model, only misses are batched, and every result is
+        written individually so an interrupted run resumes at item
+        granularity rather than batch granularity.
+        """
+        if layer not in ("pos", "ner", "dep"):
+            # srl is predicate-conditioned and batches differently; see the
+            # reverted experiment noted above.
+            return [await self.annotate_and_cache(layer, it) for it in items]
+
+        results: dict[str, AnnotationResult] = {}
+        pending = []
+        for it in items:
+            cached = self.cache.get(self.name, layer, it.id)
+            if cached is not None:
+                pay = cached["payload"]
+                results[it.id] = AnnotationResult(
+                    item_id=it.id, layer=layer, annotator=self.name, ok=True,
+                    payload=pay, cached=True,
+                    well_formed=(tree_is_wellformed(pay["heads"])
+                                 if layer == "dep" else None))
+            else:
+                pending.append(it)
+
+        for i in range(0, len(pending), batch_size):
+            chunk = pending[i:i + batch_size]
+            t0 = time.time()
+            try:
+                payloads = self.predict_batch(layer, [c.tokens for c in chunk])
+            except Exception as exc:                            # noqa: BLE001
+                # Fall back per item: one bad sentence must not fail a batch.
+                for c in chunk:
+                    results[c.id] = await self.annotate_and_cache(layer, c)
+                continue
+            dt = (time.time() - t0) * 1000 / max(len(chunk), 1)
+            for c, pay in zip(chunk, payloads):
+                self.cache.put(self.name, layer, c.id,
+                               {"payload": pay, "repairs": 0})
+                results[c.id] = AnnotationResult(
+                    item_id=c.id, layer=layer, annotator=self.name, ok=True,
+                    payload=pay, latency_ms=dt,
+                    well_formed=(tree_is_wellformed(pay["heads"])
+                                 if layer == "dep" else None))
+        return [results[it.id] for it in items]
+
     async def annotate_and_cache(self, layer: str, item) -> AnnotationResult:
         if layer not in ("pos", "ner", "dep", "srl"):
             return AnnotationResult(

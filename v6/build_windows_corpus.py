@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -113,11 +114,30 @@ def load_windows(limit: int | None = None) -> list[dict]:
     return out
 
 
+def item_key(window_id: str, index: int, tokens: list[str]) -> str:
+    """Cache key bound to the TEXT, not just its position.
+
+    Keying on window_id:index alone is content-blind, and window ids are
+    reused: window_id is hash(doc_id, window_index), so any change to how
+    documents pack into windows re-points an existing id at different text.
+    Artifact cleaning did exactly that, and 29.7% of cached entries ended up
+    attached to sentences with a different token count — the rest matched in
+    length but not in content, and would have flowed into the corpus as
+    plausible wrong labels that no gate checks for.
+
+    The digest makes staleness impossible: different text is a different
+    key, so it is a cache miss rather than a silent mismatch.
+    """
+    digest = hashlib.sha1(" ".join(tokens).encode("utf-8")).hexdigest()[:10]
+    return f"{window_id}:{index}:{digest}"
+
+
 def sentence_items(w: dict) -> list[GoldItem]:
     items = []
     for si, (s, e) in enumerate(w["sentence_spans"]):
-        items.append(GoldItem(id=f"{w['window_id']}:{si}",
-                              tokens=w["tokens"][s:e], layers={}))
+        toks = w["tokens"][s:e]
+        items.append(GoldItem(id=item_key(w["window_id"], si, toks),
+                              tokens=toks, layers={}))
     return items
 
 
@@ -143,10 +163,10 @@ async def stage_llm(name: str, windows: list[dict], cache_dir: Path,
             if per_sentence:
                 ctx = " ".join(w["tokens"])[:2000]
                 for si, (s, e) in enumerate(w["sentence_spans"]):
+                    toks = w["tokens"][s:e]
                     items.append(GoldItem(
-                        id=f"{w['window_id']}:{si}", tokens=w["tokens"][s:e],
-                        layers={}, context=ctx,
-                        target=" ".join(w["tokens"][s:e])))
+                        id=item_key(w["window_id"], si, toks), tokens=toks,
+                        layers={}, context=ctx, target=" ".join(toks)))
             else:
                 items.append(GoldItem(id=w["window_id"], tokens=w["tokens"],
                                       layers={}))
@@ -185,18 +205,26 @@ async def stage_annotate(name: str, windows: list[dict], cache_dir: Path,
     for layer in todo:
         logger = RunLogger(RUNS_DIR / f"corpus-{name}-{layer}", every=200)
         n_ok = n = 0
+        pend = []
         try:
             for w in windows:
                 units = sentence_items(w) if per_sentence else [
                     GoldItem(id=w["window_id"], tokens=w["tokens"], layers={})]
-                for it in units:
-                    res = await ann.annotate_and_cache(layer, it)
-                    # Total is the number of ANNOTATED UNITS, not windows:
-                    # a window expands to ~17.7 sentences, and reporting
+                pend.extend(units)
+                if len(pend) >= 256 or w is windows[-1]:
+                    # Total is the number of ANNOTATED UNITS, not windows: a
+                    # window expands to ~17.7 sentences, and reporting
                     # progress against the window count made the rate and
                     # ETA meaningless.
-                    logger.record(res, (0, 0), total_units)
-                    n += 1; n_ok += res.ok
+                    if hasattr(ann, "annotate_batch_and_cache"):
+                        out = await ann.annotate_batch_and_cache(layer, pend)
+                    else:
+                        out = [await ann.annotate_and_cache(layer, it)
+                               for it in pend]
+                    for res in out:
+                        logger.record(res, (0, 0), total_units)
+                        n += 1; n_ok += res.ok
+                    pend = []
         finally:
             logger.close()
         print(f"{name}/{layer}: {n_ok}/{n} ok", flush=True)
@@ -243,7 +271,7 @@ async def stage_srl(windows: list[dict], cache_dir: Path) -> None:
     items, no_pos = [], 0
     for w in windows:
         for si, (s, e) in enumerate(w["sentence_spans"]):
-            key = f"{w['window_id']}:{si}"
+            key = item_key(w["window_id"], si, w["tokens"][s:e])
             pos = _get(cache, "kniv-v5", "pos", key, e - s)
             if pos is None:
                 no_pos += 1
@@ -276,7 +304,8 @@ def stage_entities(windows: list[dict], cache_dir: Path) -> None:
     for w in windows:
         ner = []
         for si, (s, e) in enumerate(w["sentence_spans"]):
-            ner.append(_get(cache, "kniv-v5", "ner", f"{w['window_id']}:{si}", e - s))
+            ner.append(_get(cache, "kniv-v5", "ner",
+                            item_key(w["window_id"], si, w["tokens"][s:e]), e - s))
         coref = _get(cache, "lingmess", "coref", w["window_id"], w["n_tokens"])
         sents, vertex = build_entities(w["tokens"], w["sentence_spans"], ner, coref)
         if vertex is None:
@@ -344,7 +373,8 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
                     continue                      # structured; handled below
                 merged, heads, ok = [], [], True
                 for si, (s, e) in enumerate(w["sentence_spans"]):
-                    p = _get(cache, ann, layer, f"{w['window_id']}:{si}", e - s)
+                    p = _get(cache, ann, layer,
+                             item_key(w["window_id"], si, w["tokens"][s:e]), e - s)
                     if p is None:
                         ok = False; break
                     if layer == "dep":
@@ -385,7 +415,7 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
         # srl_frames: one entry per predicate, tags in window coordinates.
         frames = []
         for si, (s2, e2) in enumerate(w["sentence_spans"]):
-            key = f"{w['window_id']}:{si}"
+            key = item_key(w["window_id"], si, w["tokens"][s2:e2])
             pos = _get(cache, "kniv-v5", "pos", key, e2 - s2)
             if pos is None:
                 continue
