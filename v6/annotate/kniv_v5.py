@@ -127,6 +127,12 @@ class KnivV5Annotator:
         self._loaded = False
 
     def _load(self) -> None:
+        # Idempotent. The guard used to live at the single call site; the
+        # batched paths added later called _load() directly and reloaded the
+        # whole checkpoint per item — 75 reloads in two minutes, which looked
+        # like a stall rather than an error.
+        if self._loaded:
+            return
         from transformers import AutoModel, AutoTokenizer
 
         ckpt = self.model_dir / "model.pt"
