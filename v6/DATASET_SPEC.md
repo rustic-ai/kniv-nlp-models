@@ -874,6 +874,26 @@ The v6 `test` split exists for corpus QA and ablation only. **Headline
 numbers are reported on public gold** (§6) — training and testing on our
 own annotations would measure agreement with our annotators, not accuracy.
 
+The 5% targets are measured in **windows**, not documents: that is what
+training sees, and document sizes differ by an order of magnitude across
+domains. Documents are ordered by a hash of their id and taken whole until
+the domain's quota is met, so the assignment is deterministic, reproducible
+from the ids alone, and never splits a document. Measured 5.0/5.0/89.9.
+
+**Splitting on `doc_id` is necessary but not sufficient.** It prevents one
+document spanning splits; it cannot prevent two *different* documents from
+containing identical text. Measured corpus-wide: 291 of 30,364 windows
+(0.96%) are exact duplicates in 107 groups, and **18 of those groups spanned
+splits — 64 windows (0.21%) of identical text in both train and test**,
+mostly templated openings in synthetic assistant dialogue (`Hi, I need a new
+password`). Gate 16 passes on all of them, because the documents genuinely
+differ and only the content does not.
+
+Exact duplicates are therefore dropped before the split is assigned, which
+keeps the quotas exact and closes the leak. This is the dedup threshold gate
+5 asks to be set from the observed distribution: exact token-sequence match,
+justified by the measured 0.96%.
+
 ---
 
 ## 6. Evaluation
