@@ -144,12 +144,27 @@ class FastCorefAnnotator:
                 preds = self._pipe.predict(
                     texts=[r[0] for r in rendered],
                     max_tokens_in_batch=self.MAX_TOKENS_IN_BATCH)
-            except Exception as exc:                    # noqa: BLE001
+            except Exception:                           # noqa: BLE001
                 # One bad document fails the whole call, so fall back to
                 # per-item analysis to isolate it rather than losing the batch.
-                for it in todo:
-                    results[it.id] = await self.annotate_and_cache(layer, it)
                 preds = None
+            if preds is not None and len(preds) != len(todo):
+                # fastcoref DROPS a document that exceeds max_doc_len rather
+                # than returning a placeholder ("Skipping doc with len 4841").
+                # Results are positional, so one dropped document shifts every
+                # later result onto the wrong window -- silently wrong coref,
+                # which becomes wrong entity clusters and wrong relations. The
+                # count is the only signal, so a mismatch invalidates the
+                # whole call: fall back to per-item, where a skipped document
+                # raises and is recorded as a failure and masked.
+                print(f"  [{self.name}] batch returned {len(preds)} for "
+                      f"{len(todo)} documents; falling back to per-item",
+                      flush=True)
+                preds = None
+            if preds is None and todo:
+                for it in todo:
+                    if it.id not in results:
+                        results[it.id] = await self.annotate_and_cache(layer, it)
             if preds is not None:
                 per = (time.time() - t0) * 1000 / max(len(todo), 1)
                 for it, (_, start_of, end_of), pred in zip(todo, rendered, preds):
@@ -160,7 +175,10 @@ class FastCorefAnnotator:
                         item_id=it.id, layer=layer, annotator=self.name,
                         ok=True, payload=payload, latency_ms=per)
 
-        return [results[it.id] for it in items]
+        return [results.get(it.id) or AnnotationResult(
+            item_id=it.id, layer=layer, annotator=self.name, ok=False,
+            error="no result returned for this item", error_kind="length")
+            for it in items]
 
     async def annotate_and_cache(self, layer: str, item) -> AnnotationResult:
         if layer != "coref":
