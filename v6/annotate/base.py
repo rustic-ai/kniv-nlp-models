@@ -76,6 +76,24 @@ def tree_is_wellformed(heads: list[int]) -> bool:
     return True
 
 
+def stamp_version(cache, annotator: str, version: str) -> None:
+    """Record an annotator's resolved version beside its cache entries.
+
+    The annotators run in three mutually incompatible venvs and assembly runs
+    in a fourth, so assembly cannot import stanza or fastcoref to ask them
+    what version they are. The cache is already the seam between the
+    environments (DATASET_SPEC 4.2), so the version travels the same way the
+    annotations do -- written where the package IS importable, read later
+    where it is not. Gate 17.
+    """
+    try:
+        p = Path(cache.root) / annotator / "VERSION"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(version.strip() + "\n")
+    except Exception:                                       # noqa: BLE001
+        pass                                                # never fail a run
+
+
 def validate_payload(layer: str, payload: object, n: int,
                      n_entities: int | None = None) -> tuple[object, str | None, str | None]:
     """Return ``(normalised_payload, error, error_kind)``.

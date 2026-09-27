@@ -179,6 +179,10 @@ class StanzaAnnotator(_ToolkitAnnotator):
                 lang="en", processors=self.PROCESSORS,
                 tokenize_pretokenized=True, logging_level="WARN")
         print(f"  [{self.name}] stanza pipeline ready", flush=True)
+        from .base import stamp_version
+        stamp_version(self.cache, self.name,
+                      f"stanza=={getattr(stanza, '__version__', '?')} "
+                      f"processors={self.PROCESSORS}")
 
     def analyse_bulk(self, items: list) -> None:
         """One pipeline call for the whole chunk; results land in the memo."""

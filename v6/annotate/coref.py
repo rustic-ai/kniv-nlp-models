@@ -69,6 +69,14 @@ class FastCorefAnnotator:
         with _eager_attention():
             self._pipe = cls(device=self.device)
         print(f"  [{self.name}] fastcoref ({self.model_kind}) ready", flush=True)
+        from .base import stamp_version
+        try:
+            import importlib.metadata as md
+            ver = md.version("fastcoref")
+        except Exception:                                   # noqa: BLE001
+            ver = "?"
+        stamp_version(self.cache, self.name,
+                      f"fastcoref=={ver} model={self.model_kind}")
 
     @staticmethod
     def _offsets(tokens: list[str]) -> tuple[str, dict, dict]:

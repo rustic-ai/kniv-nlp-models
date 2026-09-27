@@ -63,6 +63,11 @@ PER_WINDOW = {"lingmess": ["coref"]}
 # 100-item human overlap (CLS_TAXONOMY.md) — a sample, not the corpus.
 LLM_PER_SENTENCE = ["cls", "sentiment"]
 LLM_PER_WINDOW = ["keywords"]
+# Production ran one annotator for these, not the five-family ensemble of
+# DATASET_SPEC 4.3; assembly reads that one. Widening this to a consensus
+# means reading several annotators here and adjudicating, not changing the
+# schema -- the row shape is the same either way.
+LLM_ANNOTATOR = "astra"
 
 # Relations are not annotated by an LLM or by a toolkit: they come from the
 # ATLOP checkpoint retrained on Re-DocRED (0.790 test F1), which needs entity
@@ -403,6 +408,7 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
 
     cache = CacheStore(cache_dir, CACHE_VERSION)
     rows, shard, stats = [], 0, defaultdict(int)
+    sources: dict[str, set[str]] = {}
     OUT.mkdir(parents=True, exist_ok=True)
 
     for w in windows:
@@ -497,6 +503,44 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
                 mask["relations"] = True
                 stats["windows_without_relations"] += 1
 
+        # LLM layers. These were annotated and cached but never assembled,
+        # so the corpus silently shipped without CLS -- one of the three
+        # stated v6 goals. cls and sentiment are per sentence, keywords per
+        # window (LLM_PER_SENTENCE / LLM_PER_WINDOW).
+        #
+        # An empty cls list is a VALID value ("no dialogue-act function"), so
+        # it cannot also mean "not annotated". Missing sentences are recorded
+        # in a per-sentence mask instead, the same way a non-tree sentence is
+        # masked in dep_tokens rather than deleted.
+        for layer in LLM_PER_SENTENCE:
+            vals, miss = [], []
+            for si, (s2, e2) in enumerate(w["sentence_spans"]):
+                q = _get(cache, LLM_ANNOTATOR, layer,
+                         item_key(w["window_id"], si, w["tokens"][s2:e2]),
+                         e2 - s2)
+                miss.append(q is None)
+                vals.append(([] if layer == "cls" else None) if q is None else q)
+            if all(miss):
+                row[layer] = None
+                mask[layer] = True
+                stats[f"missing_{layer}"] += 1
+            else:
+                row[layer] = vals
+                provenance[layer] = LLM_ANNOTATOR
+                if any(miss):
+                    mask[f"{layer}_sentences"] = miss
+                    stats[f"{layer}_sentences_masked"] += sum(miss)
+            stats[f"{layer}_sentences_total"] += len(w["sentence_spans"])
+
+        for layer in LLM_PER_WINDOW:
+            q = _get(cache, LLM_ANNOTATOR, layer, w["window_id"], n)
+            row[layer] = q
+            if q is None:
+                mask[layer] = True
+                stats[f"missing_{layer}"] += 1
+            else:
+                provenance[layer] = LLM_ANNOTATOR
+
         p = _get(cache, "lingmess", "coref", w["window_id"], n)
         row["coref"] = p
         if p is None:
@@ -504,6 +548,8 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
         else:
             provenance["coref"] = "lingmess"
 
+        for lyr, a in provenance.items():
+            sources.setdefault(lyr, set()).add(a)
         row["provenance"] = json.dumps(provenance)
         row["loss_mask"] = json.dumps(mask)
         rows.append(row)
@@ -514,14 +560,95 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
     if rows:
         _write(rows, shard, pa, pq)
 
+    # layer_source was built from PER_SENTENCE/PER_WINDOW, which describe the
+    # annotate stage and not what actually landed in the rows: srl is handled
+    # separately and the LLM layers are not in either table, so all four were
+    # missing from the manifest. Deriving it from the provenance the rows
+    # carry means a layer cannot go unrecorded -- gate 17.
     (OUT / "MANIFEST.json").write_text(json.dumps({
         "windows": stats["rows"], "shards": shard + (1 if rows else 0),
-        "layer_source": {**{l: a for a, ls in PER_SENTENCE.items() for l in ls},
-                         **{l: a for a, ls in PER_WINDOW.items() for l in ls}},
+        "git_sha": _git_sha(),
+        "layer_source": {l: sorted(a) for l, a in sorted(sources.items())},
+        "annotator_versions": _annotator_versions(sources),
         "stats": dict(stats),
     }, indent=2))
     print(f"assembled {stats['rows']} rows -> {OUT}")
     print(f"  {dict(stats)}")
+
+
+def _git_sha() -> str:
+    """The working-tree commit, or 'unknown' outside a checkout."""
+    import subprocess
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                             text=True, timeout=10)
+        sha = out.stdout.strip()
+        if out.returncode != 0 or not sha:
+            return "unknown"
+        dirty = subprocess.run(["git", "status", "--porcelain"],
+                               capture_output=True, text=True, timeout=10)
+        return sha + ("-dirty" if dirty.stdout.strip() else "")
+    except Exception:                                       # noqa: BLE001
+        return "unknown"
+
+
+def _annotator_versions(sources: dict[str, set[str]]) -> dict[str, str]:
+    """A resolvable version for every annotator that produced a layer.
+
+    Gate 17 asks for versions, not names: 'kniv-v5' does not say which
+    checkpoint and 'stanza' does not say which release. Where a version
+    cannot be resolved this records "unresolved" rather than echoing the
+    annotator's own name back, which would look like an answer.
+
+    Best-effort by construction: assembly runs in one venv and the
+    annotators ran in three, so an annotator's package may not be importable
+    here. A local checkpoint is identified by its weights -- size and mtime,
+    which distinguish retrained weights at the same path -- because the
+    directory name alone does not change when the model is retrained.
+    """
+    import importlib.metadata as md
+    PKG = {"stanza": "stanza", "lingmess": "fastcoref"}
+    CKPT = {"kniv-v5": Path("models/kniv-deberta-nlp-base-en-large/model.pt"),
+            "atlop-redocred": Path("data/re-docred/atlop-run/best.pt")}
+    # The ATLOP run writes the selected dev F1 beside the weights, which
+    # identifies the checkpoint far better than a path does.
+    F1 = {"atlop-redocred": Path("data/re-docred/atlop-run/best.f1")}
+    out = {}
+    for a in sorted({x for aa in sources.values() for x in aa}):
+        # A stamp written by the annotator's own venv beats anything we can
+        # infer from here.
+        stamp = Path(RUNS_DIR) / "_cache" / a / "VERSION"
+        if stamp.exists():
+            txt = stamp.read_text().strip()
+            if txt:
+                out[a] = txt
+                continue
+        try:
+            spec = load_annotators([a]).get(a)
+        except Exception:                                   # noqa: BLE001
+            spec = None
+        # A hosted model names its deployment, which is the version.
+        model = getattr(spec, "model", "") or ""
+        if model and a not in PKG:
+            out[a] = model
+            continue
+        if a in PKG:
+            try:
+                out[a] = f"{PKG[a]}=={md.version(PKG[a])}"
+                continue
+            except Exception:                               # noqa: BLE001
+                pass
+        ck = CKPT.get(a)
+        if ck is not None and ck.exists():
+            st = ck.stat()
+            desc = f"{ck.as_posix()} ({st.st_size} bytes, mtime {int(st.st_mtime)})"
+            f1 = F1.get(a)
+            if f1 is not None and f1.exists():
+                desc += f" dev_f1={f1.read_text().strip()}"
+            out[a] = desc
+            continue
+        out[a] = "unresolved"
+    return out
 
 
 def _write(rows, shard, pa, pq):
