@@ -17,6 +17,8 @@ a different venv still lands in the same report.
 """
 from __future__ import annotations
 
+import os
+
 import time
 
 from ..schemas import DEPRELS
@@ -138,7 +140,18 @@ class StanzaAnnotator(_ToolkitAnnotator):
 
     # Stanza's English NER model uses the OntoNotes 18-type inventory — the
     # same schema v5's head was trained on, so the two are directly comparable.
-    PROCESSORS = "tokenize,pos,lemma,depparse,ner"
+    # The bake-off scored Stanza on pos/lemma/morph/dep/ner, so it needed the
+    # full pipeline. The CORPUS only consumes lemma and morph — DECISIONS.md
+    # gives pos, dep and ner to kniv-v5 — and depparse/ner were two thirds of
+    # the runtime for output that was thrown away. Measured: 5.6 -> 16.4
+    # sent/s, with lemma and feats identical on 200/200 sentences.
+    #
+    # pos stays because it is a prerequisite for lemma and is what produces
+    # feats. Set KNIV_STANZA_FULL=1 to restore the full pipeline for a
+    # bake-off run.
+    PROCESSORS = ("tokenize,pos,lemma,depparse,ner"
+                  if os.environ.get("KNIV_STANZA_FULL") else
+                  "tokenize,pos,lemma")
 
     def _load(self):
         import stanza
