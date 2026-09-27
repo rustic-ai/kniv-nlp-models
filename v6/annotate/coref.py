@@ -97,9 +97,19 @@ class FastCorefAnnotator:
         a cluster left with fewer than two mentions is not a cluster.
         """
         clusters = []
-        for cl in pred.get_clusters(as_strings=False):
+        for cl in pred.get_clusters(as_strings=False) or []:
             spans = []
-            for cs, ce in cl:
+            for m in (cl or []):
+                # fastcoref yields None for a mention it could not resolve to
+                # character offsets, and the pair unpacking used to raise on
+                # it -- which killed a 16,600-window run. Dropping the mention
+                # is the same contract already applied to a span whose offsets
+                # miss a token boundary: dropped, never approximated.
+                if not isinstance(m, (tuple, list)) or len(m) != 2:
+                    continue
+                cs, ce = m
+                if cs is None or ce is None:
+                    continue
                 s, e = start_of.get(cs), end_of.get(ce)
                 if s is not None and e is not None and e >= s:
                     spans.append([s, e])
