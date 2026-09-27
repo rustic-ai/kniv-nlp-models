@@ -153,16 +153,39 @@ annotator had the full window as context (0 of 3,814 fell beyond the
 2,000-character cut), the prompt states the rule verbatim ("A bare 'Sure.'
 after a request is Commissive"), and it still does not fire.
 
-That leaves a genuine boundary dispute rather than a bug. The taxonomy's
-example accepts a request to *act*; SGD's `SELECT` accepts a *choice*, which
-is arguably agreement with an evaluation and therefore `Inform`. Whether the
-corpus is under-labelling Commissive or this benchmark over-claims it **is
-exactly what the adjudicated gold set should settle**, and it says where to
-spend that sample: accept-type utterances, not a uniform draw.
+That leaves a genuine boundary dispute rather than a bug, and a second
+human-annotated corpus settles which way it leans. **MultiWOZ 2.2 — already a
+source in this corpus, annotated independently of SGD — has no user-side
+accept or affirm act at all.** Of 3,021 acceptance-shaped user turns ("yes…",
+"sure…", "that works…"), its gold labels are `Inform` 48.3%, `thank` 24.8%,
+`Request` 19.2%, `bye` 3.8%; none are any kind of commitment. The annotator
+agrees with MultiWOZ's treatment and disagrees with SGD's.
+
+That evidence has a limit worth stating: MultiWOZ's inventory *lacks* the
+category, so it could not mark an accept even if its annotators wanted to.
+Absence of a category is not a considered judgement against it. What the two
+corpora jointly establish is weaker but more useful — **the Commissive/accept
+boundary is treated inconsistently across major human-annotated dialogue
+corpora**, SGD giving accepts their own act and MultiWOZ having no room for
+them.
+
+So this is not the annotator failing to apply a rule; it is the rule being
+underdetermined at exactly this boundary. The taxonomy should **decide
+explicitly** whether accepting an offered *option* (as distinct from accepting
+a request to act) is `Commissive` or `Inform`, and say so in the label table,
+rather than leaving each annotator to resolve it. Until it does, the number
+above measures SGD's convention as much as our annotation.
+
+The adjudicated gold set should settle it, and this says where to spend that
+sample: **accept-type utterances, not a uniform draw.**
 
 This matters because Commissive is one of the two thin classes Taskmaster-2
-and SGD were added to raise. If the annotator does not label accepts, adding
-accept-dense data does not raise it.
+and SGD were added to raise. Whichever way the boundary is decided, it decides
+whether that addition worked: if accepting an option is `Commissive`, the
+corpus is under-labelling it on thousands of sentences and adding
+accept-dense data did not raise the class; if it is `Inform`, Commissive is
+genuinely rare in task-oriented dialogue and the thinness is a property of the
+data rather than of the annotation.
 
 **What this does not measure.** SGD is task-oriented human/assistant dialogue:
 dense in Directive, Commissive and Social, with no argumentative or narrative

@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -153,14 +154,79 @@ def evaluate(pairs: list[tuple[set, set]]) -> dict:
                       "f1": 2 * mp * mr / max(mp + mr, 1e-9)}}
 
 
+def _norm(t: str) -> str:
+    """Whitespace- and case-insensitive key for matching a turn to a sentence.
+
+    Our tokenizer re-spaces punctuation, so the corpus sentence and the SGD
+    utterance differ by whitespace even when the text is identical.
+    """
+    return re.sub(r"\s+", "", t.lower())
+
+
+def score(annotator: str, gold_file: Path) -> dict:
+    """Score one annotator's cached CLS against the gold turns.
+
+    Matches on exact text so nothing is scored against a turn it is not: a
+    sentence that does not correspond to a whole SGD turn is skipped rather
+    than aligned approximately.
+    """
+    from ..annotate.base import CacheStore
+    from ..config import RUNS_DIR
+    from ..build_windows_corpus import (CACHE_VERSION, _get, item_key,
+                                        load_windows)
+    gold: dict[str, set] = {}
+    with gold_file.open() as f:
+        for line in f:
+            g = json.loads(line)
+            gold.setdefault(_norm(g["text"]), set(g["cls"]))
+
+    cache = CacheStore(RUNS_DIR / "_cache", CACHE_VERSION)
+    pairs, matched = [], 0
+    for w in load_windows():
+        if w["source"] != "sgd":
+            continue
+        for si, (a, b) in enumerate(w["sentence_spans"]):
+            toks = w["tokens"][a:b]
+            g = gold.get(_norm(" ".join(toks)))
+            if g is None:
+                continue
+            matched += 1
+            p = _get(cache, annotator, "cls",
+                     item_key(w["window_id"], si, toks), b - a)
+            if p is not None:
+                pairs.append((set(p), g))
+    out = evaluate(pairs)
+    out["matched_turns"] = matched
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--score", metavar="ANNOTATOR",
+                    help="score this annotator's cached cls against the gold")
     ap.add_argument("--split", default="validation",
                     choices=["train", "validation", "test"])
     ap.add_argument("--limit", type=int)
     ap.add_argument("--out", type=Path,
                     default=Path("data/v6-corpus/gold/cls/sgd_gold.jsonl"))
     args = ap.parse_args()
+
+    if args.score:
+        r = score(args.score, args.out)
+        print(f"{args.score} vs {args.out.name}: n={r['n']} "
+              f"(of {r['matched_turns']} matched turns)")
+        print(f"  exact set match {r['exact']:.1%}  "
+              f"mean Jaccard {r['jaccard']:.3f}")
+        print(f"  {'label':12s} {'P':>6s} {'R':>6s} {'F1':>6s} "
+              f"{'gold':>7s} {'pred':>7s}")
+        for l, v in r["per_label"].items():
+            tag = "  unscorable: no gold in SGD" if l in UNSCORABLE else ""
+            print(f"  {l:12s} {v['p']:6.3f} {v['r']:6.3f} {v['f1']:6.3f} "
+                  f"{v['gold']:7d} {v['pred']:7d}{tag}")
+        m = r["micro"]
+        print(f"  micro (excluding {', '.join(UNSCORABLE)}): "
+              f"P {m['p']:.3f} R {m['r']:.3f} F1 {m['f1']:.3f}")
+        return 0
 
     gold = load_gold(args.split, args.limit)
     args.out.parent.mkdir(parents=True, exist_ok=True)
