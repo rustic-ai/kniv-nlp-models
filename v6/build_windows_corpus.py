@@ -409,6 +409,7 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
     cache = CacheStore(cache_dir, CACHE_VERSION)
     rows, shard, stats = [], 0, defaultdict(int)
     sources: dict[str, set[str]] = {}
+    tok = _encoder_tokenizer()
     OUT.mkdir(parents=True, exist_ok=True)
 
     for w in windows:
@@ -418,6 +419,20 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
                "tokens": w["tokens"], "sentence_spans": w["sentence_spans"],
                "n_tokens": n}
         provenance, mask = {}, {}
+
+        # The window builder packs to 512 WORDS; the encoder's limit is 512
+        # SUBWORDS, and the mean ratio on this corpus is 1.079. So a third of
+        # windows carry a tail the encoder never sees, and supervising a
+        # position that has no representation is not something a shape gate
+        # can notice. Recording where the encoder stops makes the loss
+        # explicit: 3.33% of word positions corpus-wide, and no window loses
+        # all of its tokens.
+        n_sub, limit = _encoder_extent(tok, w["tokens"], n)
+        row["n_subword_tokens"] = n_sub
+        row["encoder_word_limit"] = limit
+        if limit < n:
+            stats["windows_truncated_by_encoder"] += 1
+            stats["word_positions_past_encoder"] += n - limit
 
         for ann, layers in PER_SENTENCE.items():
             for layer in layers:
@@ -574,6 +589,43 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
     }, indent=2))
     print(f"assembled {stats['rows']} rows -> {OUT}")
     print(f"  {dict(stats)}")
+
+
+def _encoder_tokenizer():
+    """The DeBERTa tokenizer the model will actually use, or None.
+
+    Gate 3 is specified against this tokenizer and not a whitespace proxy,
+    which is the whole reason the overflow went unnoticed.
+    """
+    try:
+        from transformers import AutoTokenizer
+        return AutoTokenizer.from_pretrained(
+            "models/kniv-deberta-nlp-base-en-large")
+    except Exception as exc:                                # noqa: BLE001
+        print(f"  NOTE: encoder tokenizer unavailable ({type(exc).__name__}); "
+              f"n_subword_tokens and encoder_word_limit will be null",
+              flush=True)
+        return None
+
+
+# 512 positions minus [CLS] and [SEP].
+ENCODER_BUDGET = 510
+
+
+def _encoder_extent(tok, tokens: list[str], n: int) -> tuple[int | None, int]:
+    """``(subword length, first word index the encoder cannot reach)``.
+
+    The limit is ``n`` when the whole window fits, so a consumer can always
+    mask ``[limit, n)`` without special-casing.
+    """
+    if tok is None:
+        return None, n
+    enc = tok(list(tokens), add_special_tokens=False, is_split_into_words=True)
+    wid = enc.word_ids()
+    if len(wid) <= ENCODER_BUDGET:
+        return len(wid) + 2, n
+    first = wid[ENCODER_BUDGET]
+    return len(wid) + 2, (n if first is None else first)
 
 
 def _git_sha() -> str:

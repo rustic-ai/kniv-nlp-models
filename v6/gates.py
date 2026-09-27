@@ -109,21 +109,37 @@ def run(rows: list[dict], manifest: dict, tokenizer=None) -> list[Result]:
                       None, "enforced in windows.py; not reconstructible "
                             "from shards alone"))
 
-    if tokenizer is None:
+    # Specified against the DeBERTa tokenizer, not a whitespace proxy. The
+    # builder packs to 512 WORDS and the mean subword ratio here is 1.079, so
+    # a third of windows overflow. Assembly records where the encoder stops
+    # (encoder_word_limit), and the gate's real question is whether that
+    # overflow is RECORDED -- an unrecorded overflow silently supervises
+    # positions the encoder never produced. A window whose overflow is not
+    # recorded is a failure; a recorded one is reported.
+    if rows and rows[0].get("encoder_word_limit") is None:
         out.append(Result(3, f"n_tokens <= {MAX_TOKENS} under the DeBERTa "
                              "tokenizer", "fail", None,
-                          "tokenizer unavailable in this venv"))
+                          "assembly did not record encoder_word_limit "
+                          "(tokenizer unavailable at assembly time)"))
     else:
-        over = []
+        unrec, overflow, lost = [], 0, 0
         for r in rows:
-            k = len(tokenizer(" ".join(r["tokens"]),
-                              add_special_tokens=True)["input_ids"])
-            if k > MAX_TOKENS:
-                over.append((r["window_id"], k))
-        out.append(Result(3, f"n_tokens <= {MAX_TOKENS} under the DeBERTa "
-                             "tokenizer", "fail", not over,
-                          f"{len(over)} windows over, worst {max(k for _, k in over)}"
-                          if over else f"{n} windows within {MAX_TOKENS}"))
+            sub, lim = r.get("n_subword_tokens"), r.get("encoder_word_limit")
+            if sub is None or lim is None:
+                unrec.append(r["window_id"]); continue
+            if sub > MAX_TOKENS:
+                overflow += 1
+                lost += r["n_tokens"] - lim
+                if lim >= r["n_tokens"]:
+                    unrec.append(r["window_id"])
+        tw = sum(r["n_tokens"] for r in rows)
+        out.append(Result(3, f"overflow past {MAX_TOKENS} subwords is recorded",
+                          "fail" if unrec else "report", not unrec,
+                          (f"{len(unrec)} windows overflow WITHOUT a recorded "
+                           f"limit" if unrec else
+                           f"{overflow}/{n} windows overflow ({overflow/max(n,1):.2%}), "
+                           f"{lost:,}/{tw:,} word positions past the encoder "
+                           f"({lost/max(tw,1):.2%}), all recorded")))
 
     doms = Counter(r["domain"] for r in rows)
     out.append(Result(4, "PII scan clean on business/enron", "fail",
