@@ -35,6 +35,33 @@ TYPE_MAP = {
 }
 MERGEABLE = {"PER", "ORG", "LOC", "MISC"}
 
+# OntoNotes tags every bare count and rank -- "two", "12", "first" -- as
+# CARDINAL or ORDINAL. DocRED does not annotate those as entities at all, and
+# they are not relation arguments: across Re-DocRED train, NUM appears in 30 of
+# 85,932 gold relations (0.03%), and those few look like mistyped entities. So
+# ATLOP has effectively never seen a NUM argument and cannot predict one.
+#
+# They are not rare here. Share of all mentions, measured over the full corpus
+# (NER is complete for all 583,824 sentences):
+#
+#   domain          PER    ORG    LOC   TIME    NUM   MISC   bare CARDINAL/ORDINAL
+#   conversation   5.2%   8.8%  20.1%  27.6%  27.6%  10.7%   21.4%
+#   news          17.6%  16.5%  22.3%  17.3%  13.9%  12.5%   10.2%
+#   technical     10.9%  14.3%   2.8%  10.0%  31.5%  30.4%   28.4%
+#   encyclopedic  20.5%   8.5%  21.7%  15.9%  16.8%  16.5%   13.7%
+#   narrative     47.4%   3.3%  11.1%  13.7%  19.0%   5.5%   17.4%
+#   Re-DocRED     15.6%  13.5%  29.3%  19.3%   6.4%  15.9%
+#
+# Dropping them leaves NUM at roughly Re-DocRED's 6.4% -- the remaining MONEY,
+# PERCENT and QUANTITY are the DocRED-like members and stay. Pairs grow with
+# the square of the vertex count, so this is also most of the ATLOP cost.
+#
+# The inflation is worse per VERTEX than per mention, because MERGEABLE excludes
+# NUM: PER/ORG/LOC/MISC mentions collapse by string match while every bare
+# numeral stays its own vertex. On the conversation prefix that turns 27.6% of
+# mentions into 43.3% of vertices.
+DROP_TYPES = {"CARDINAL", "ORDINAL"}
+
 
 def bio_spans(tags: list[str]) -> list[tuple[str, int, int]]:
     """(type, start, end_exclusive) from BIO tags."""
@@ -64,6 +91,8 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
         if not tags:
             continue
         for ty, a, b in bio_spans(tags):
+            if ty in DROP_TYPES:
+                continue
             spans.append((TYPE_MAP.get(ty, "MISC"), s + a, s + b))
     if len(spans) < 2:
         return None, None
