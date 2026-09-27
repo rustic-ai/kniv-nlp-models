@@ -109,6 +109,68 @@ best one".
 | "Sorry, what?" | `Feedback` | negative auto-feedback, not `Social` apology |
 | "um, so, yeah" | ∅ | stalling; ISO Time Management, out of scope |
 
+## External benchmark: SGD gold dialogue acts
+
+CLS had **no gold at all** — produced by an LLM, evaluated against nothing,
+so "CLS quality" was a claim rather than a number. Schema-Guided Dialogue
+carries human dialogue-act annotation (CC-BY-SA-4.0) whose 18 acts map onto
+these six functions, giving the one external reference available without
+commissioning annotation. `v6/gold/sgd_cls.py` builds it; 55,377 corpus
+sentences match an SGD turn exactly.
+
+| label | P | R | F1 | gold | predicted |
+|---|---|---|---|---|---|
+| Social | 0.929 | 0.844 | **0.884** | 10,296 | 9,351 |
+| Question | 0.761 | 0.844 | **0.801** | 14,189 | 15,738 |
+| Inform | 0.833 | 0.759 | **0.794** | 28,547 | 26,013 |
+| Directive | 0.436 | 0.577 | 0.496 | 6,113 | 8,093 |
+| Commissive | 0.724 | **0.180** | 0.289 | 9,625 | 2,395 |
+| Feedback | — | — | — | 0 | 2,176 |
+
+Exact set match 60.1%, mean Jaccard 0.701, **micro F1 0.730** excluding
+Feedback.
+
+**Feedback is unscorable here.** No SGD act maps to it: task-oriented dialogue
+annotated for slot-filling does not mark backchannels. Its 2,176 predictions
+are counted as false positives however correct they are, which is why it is
+excluded from the aggregate rather than reported as 0.000. The thinnest class
+in the corpus is the one this benchmark cannot measure.
+
+**The mapping is the dominant source of error, not the annotator.** A first
+pass scored micro F1 0.618 and Commissive F1 0.131; both were artifacts of
+mapping SGD's `OFFER` — 38,270 acts, third most common — onto Commissive.
+SGD's `OFFER` presents an *entity* ("I found a good restaurant in Milpitas"),
+which is Inform; the taxonomy's Commissive "offer" is offering to *act*, which
+is SGD's `OFFER_INTENT`. Reading utterances per act instead of trusting act
+names moved micro F1 to 0.730. Anyone extending this mapping should read
+examples first.
+
+**Commissive recall 0.180 is a taxonomy-boundary question, not a settled
+defect.** It concentrates almost entirely in `SELECT` (n=3,814, recall
+**0.017**), where SGD marks accepting an offered option — "Yes, it seems good
+for me" — and the annotator says `Inform`. Three things are established: the
+annotator had the full window as context (0 of 3,814 fell beyond the
+2,000-character cut), the prompt states the rule verbatim ("A bare 'Sure.'
+after a request is Commissive"), and it still does not fire.
+
+That leaves a genuine boundary dispute rather than a bug. The taxonomy's
+example accepts a request to *act*; SGD's `SELECT` accepts a *choice*, which
+is arguably agreement with an evaluation and therefore `Inform`. Whether the
+corpus is under-labelling Commissive or this benchmark over-claims it **is
+exactly what the adjudicated gold set should settle**, and it says where to
+spend that sample: accept-type utterances, not a uniform draw.
+
+This matters because Commissive is one of the two thin classes Taskmaster-2
+and SGD were added to raise. If the annotator does not label accepts, adding
+accept-dense data does not raise it.
+
+**What this does not measure.** SGD is task-oriented human/assistant dialogue:
+dense in Directive, Commissive and Social, with no argumentative or narrative
+text. It is evidence about CLS on task-oriented dialogue — a large part of the
+conversation domain and none of the other four — and it is a benchmark, not
+the human ceiling. An annotator and a human can agree with each other and both
+differ from SGD's conventions.
+
 ## Relationship to the three label sets in the repo
 
 None of the three is a subset of another; all three are superseded.
