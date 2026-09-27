@@ -977,6 +977,8 @@ Every gate is a build failure, not a warning, unless marked *report*.
 | `label_vocabs.json` in the published model repos lists 9 CLS labels against 8 output units | HF repos | **not fixed** |
 | four model cards relicensed Apache-2.0 locally; HuggingFace still shows CC-BY-SA | HF repos | **not pushed** |
 | NER and DEP documented as gold-trained when trained on SpanMarker / spaCy silver | docs, model cards | **not corrected** |
+| `windows.py` packs to 512 **words** while the encoder's limit is 512 **subwords** (mean ratio 1.079), so 10,095/30,364 windows (33.25%) carry a tail the encoder cannot reach — 328,322/9,873,557 word positions (3.33%), no window losing all of its tokens. Per domain: technical 70.5%, encyclopedic 67.4%, narrative 63.9%, news 53.0%, conversation 5.75% | `v6/windows.py` | **recorded, not recovered** — assembly writes `n_subword_tokens` and `encoder_word_limit` so training masks `[limit, n_tokens)`; packing by subwords needs a tokenizer inside a builder §4.1 keeps dependency-free, and re-packing invalidates every window-keyed annotation, so it belongs to a rebuild |
+| Junk text that `looks_like_prose` does not reject: 190 windows of random base64-like tokens (one expands to 160 subwords), 125 with URLs over 40 chars, 5 of lorem ipsum. 319 windows total, 1.05%, mostly technical | `v6/windows.py` `clean_text` | **not fixed** — small enough to leave, large enough to record |
 
 ---
 
@@ -985,14 +987,25 @@ Every gate is a build failure, not a warning, unless marked *report*.
 | # | step | blocks | status |
 |---|------|--------|--------|
 | 1 | Restate domain targets in **tokens**, rebalance the mix away from 69% business (§2.4) | 2 | open decision |
-| 2 | **Window builder** over `corpus/output/raw/` with per-domain adapters (§2.3) | everything | not started |
+| 2 | **Window builder** over `corpus/output/raw/` with per-domain adapters (§2.3) | everything | **done** — 30,364 windows, 583,824 sentences, 9.87M tokens, 5 domains |
 | 3 | PII gate on Enron (§2.2) | annotation of business | not started |
-| 4 | Extend `build_corpus.py` sentence → window: `sentence_spans`, multi-predicate SRL, per-sentence CLS | 5 | partial |
-| 5 | Annotate: v5, Stanza, LingMess over windows; LLM ensemble for CLS/sentiment/keywords | 6 | harness proven on bake-off |
+| 4 | Extend `build_corpus.py` sentence → window: `sentence_spans`, multi-predicate SRL, per-sentence CLS | 5 | **done** — `build_windows_corpus.py` |
+| 5 | Annotate: v5, Stanza, LingMess over windows; LLM ensemble for CLS/sentiment/keywords | 6 | **in progress** — POS/NER/DEP complete (583,824 each, zero failures), CLS/sentiment ~581k, keywords 30,209/30,364; SRL, lemma/morph and coref running |
 | 5b | Annotate relations — **after** NER and coref are final, since arguments are clusters | 6 | bake-off harness built (§3A.5) |
-| 6 | Assemble + run the §7 gates; publish `MANIFEST.json` and `DATA_CARD.md` | training | not started |
+| 6 | Assemble + run the §7 gates; publish `MANIFEST.json` and `DATA_CARD.md` | training | **gates implemented** (`v6/gates.py`, 19 checks); assemble runs; `DATA_CARD.md` not written |
 | 7 | Build CLS adjudicated gold (400–600 items) and measure the human ceiling | CLS eval | `locomo50_gold_labels.csv` at n=50 |
 | 8 | Fix §8 defects — cheap, and they actively mislead | — | open |
 
-Steps 1 and 2 are the critical path. Nothing downstream can start until
-documents have structure again.
+Steps 1 and 2 were the critical path and are done. The critical path is now
+step 5: coref is the slowest layer, and `--stage entities` cannot run until
+it finishes, which in turn blocks relations and assembly.
+
+**The gates are not optional bookkeeping.** They were specified and left
+unimplemented, and in that window four defects reached the corpus: the LLM
+layers were never assembled at all, the manifest was missing four of eleven
+layers, a third of windows overflowed the encoder unrecorded, and a batched
+coref path could attach one window's clusters to another. Only the last of
+those announced itself, and it did so by crashing rather than by being
+caught. Gates 6 and 10 are annotated in `v6/gates.py` as structurally unable
+to catch a value attached to the wrong unit, which is why the content
+addressing of §4.1d carries that weight instead.
