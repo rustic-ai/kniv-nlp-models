@@ -69,6 +69,36 @@ config.transformer_type = "roberta"
 # does not materialise attention weights, so eager is required.
 enc = AutoModel.from_pretrained(name, config=config, attn_implementation="eager")
 
+
+# ATLOP's process_long_input reads the attention maps positionally, as
+# `output[-1][-1]`, which was correct when a transformers 3.x encoder returned
+# (last_hidden_state, pooler_output, attentions). transformers 5.x appends
+# `cross_attentions`, so `output[-1]` is now that field -- an EMPTY tuple for a
+# model without cross-attention, which is the only reason this raises
+# IndexError instead of silently pooling over the wrong tensor.
+#
+# Patched on the INSTANCE, not by wrapping the module: a wrapper inserts a
+# level into the parameter names ("model.inner.embeddings..." against the
+# checkpoint's "model.embeddings..."), and because the checkpoint is loaded
+# non-strictly that does not fail -- it silently runs an untrained model and
+# reports zero relations. Assigning forward leaves the module tree untouched.
+# Named access is used so a further reordering upstream cannot reintroduce the
+# original bug.
+_enc_forward = enc.forward
+
+
+def _forward_old_style(*a, **kw):
+    kw["output_attentions"] = True
+    out = _enc_forward(*a, **kw)
+    if not out.attentions:
+        raise RuntimeError(
+            "encoder returned no attention maps; ATLOP's localized context "
+            "pooling cannot run (is attn_implementation still eager?)")
+    return (out.last_hidden_state, out.pooler_output, out.attentions)
+
+
+enc.forward = _forward_old_style
+
 if LIMIT:                       # featurise a prefix only, for a smoke test
     docs = json.load(open(TEST))[:LIMIT]
     tmp = "/tmp/_redocred_slice.json"; json.dump(docs, open(tmp, "w")); src = tmp
