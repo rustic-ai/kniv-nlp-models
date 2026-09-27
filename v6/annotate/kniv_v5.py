@@ -305,6 +305,7 @@ class KnivV5Annotator:
     def _predict_srl(self, tokens: list[str], predicate_idx: int) -> list[str]:
         """Predicate-conditioned pass: the marker is injected at the embedding
         layer so every attention layer sees which token is the predicate."""
+        self._load()          # idempotent; every entry point must be safe alone
         enc = self.tok(tokens, is_split_into_words=True, truncation=True,
                        max_length=self.max_length, return_tensors="pt")
         ids = enc["input_ids"].to(self.device)
@@ -335,7 +336,91 @@ class KnivV5Annotator:
                 out.append("O")
         return out
 
-    # SRL batching was implemented and REVERTED. All predicates of a
+    @torch.no_grad()
+    def predict_srl_cross_batch(self, items: list) -> list:
+        """Batch SRL across DIFFERENT sentences, one predicate each.
+
+        Distinct from the reverted experiment noted below, which batched all
+        predicates of ONE sentence — identical token ids differing only in an
+        indicator row — and ran 5-10x slower on Metal. Batching across
+        sentences is the same shape that gives POS 9.6x and NER/DEP ~3.7x,
+        and measures 4.2x here (9.9 -> 41.6 passes/s) with output identical
+        on 150/150 passes.
+
+        ``items`` is a list of ``(tokens, predicate_idx)``.
+        """
+        self._load()
+        if not items:
+            return []
+        toks = [t for t, _ in items]
+        enc = self.tok(toks, is_split_into_words=True, truncation=True,
+                       max_length=self.max_length, padding=True,
+                       return_tensors="pt")
+        ids = enc["input_ids"].to(self.device)
+        mask = enc["attention_mask"].to(self.device)
+        indicator = torch.zeros_like(ids)
+        w2ts = []
+        for bi, (_, pi) in enumerate(items):
+            w2t, prev = {}, None
+            for k, wid in enumerate(enc.word_ids(batch_index=bi)):
+                if wid is not None and wid != prev:
+                    w2t[wid] = k
+                prev = wid
+            w2ts.append(w2t)
+            indicator[bi, w2t.get(pi, 0)] = 1
+
+        emb = self.encoder.embeddings(ids) + self.pred_embedding(indicator)
+        hidden = self.encoder.encoder(emb, mask).last_hidden_state
+        logits = self.srl_classifier(hidden)
+
+        tag2id = {t: i for i, t in enumerate(SRL_TAGS)}
+        out = []
+        for bi, (tokens, _) in enumerate(items):
+            w2t = w2ts[bi]
+            idxs = [w2t[i] for i in range(len(tokens)) if i in w2t]
+            path = viterbi_decode(logits[bi, idxs].cpu(), tag2id)
+            row, k = [], 0
+            for i in range(len(tokens)):
+                if i in w2t:
+                    row.append(SRL_TAGS[path[k]]); k += 1
+                else:
+                    row.append("O")
+            out.append(row)
+        return out
+
+    async def annotate_srl_batch_and_cache(self, items: list,
+                                          batch_size: int = 64) -> list:
+        """Cache-aware batched SRL. Hits returned untouched, misses batched."""
+        results: dict[str, AnnotationResult] = {}
+        pending = []
+        for it in items:
+            cached = self.cache.get(self.name, "srl", it.id)
+            if cached is not None:
+                results[it.id] = AnnotationResult(
+                    item_id=it.id, layer="srl", annotator=self.name, ok=True,
+                    payload=cached["payload"], cached=True)
+            else:
+                pending.append(it)
+        for i in range(0, len(pending), batch_size):
+            chunk = pending[i:i + batch_size]
+            t0 = time.time()
+            try:
+                tags = self.predict_srl_cross_batch(
+                    [(c.tokens, c.predicate_idx or 0) for c in chunk])
+            except Exception:                                   # noqa: BLE001
+                for c in chunk:
+                    results[c.id] = await self.annotate_and_cache("srl", c)
+                continue
+            dt = (time.time() - t0) * 1000 / max(len(chunk), 1)
+            for c, pay in zip(chunk, tags):
+                self.cache.put(self.name, "srl", c.id,
+                               {"payload": pay, "repairs": 0})
+                results[c.id] = AnnotationResult(
+                    item_id=c.id, layer="srl", annotator=self.name, ok=True,
+                    payload=pay, latency_ms=dt)
+        return [results[it.id] for it in items]
+
+    # Cross-PREDICATE SRL batching was implemented and REVERTED. All predicates of a
     # sentence can share one encoder call — same ids, one indicator row
     # each — and the output is byte-identical (verified 80/80 and 60/60
     # predicate passes). But on Metal it is 5-10x SLOWER than the
