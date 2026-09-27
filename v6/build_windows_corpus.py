@@ -432,6 +432,7 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
               f"windows of {len(windows)}", flush=True)
     windows = deduped
     splits = assign_splits(windows)
+    attrib = attribution()
     # Accumulated as rows are built, because rows are flushed per shard and
     # the full list is never held in memory.
     split_windows: dict[str, int] = defaultdict(int)
@@ -443,6 +444,8 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
         row = {"window_id": w["window_id"], "doc_id": w["doc_id"],
                "split": splits[w["window_id"]],
                "domain": w["domain"], "source": w["source"],
+               "source_url": source_url(w["source"], w["doc_id"], attrib),
+               "license": source_license(w["source"], attrib),
                "tokens": w["tokens"], "sentence_spans": w["sentence_spans"],
                "n_tokens": n}
         provenance, mask = {}, {}
@@ -623,6 +626,76 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
     }, indent=2))
     print(f"assembled {stats['rows']} rows -> {OUT}")
     print(f"  {dict(stats)}")
+
+
+def attribution() -> dict[str, dict[str, str]]:
+    """``{source: {"license": ..., "dataset": ...}}`` from the domain configs.
+
+    Section 2.1 makes attribution mandatory rather than optional provenance:
+    CC-BY and CC-BY-SA material requires it, and CC-BY-SA text is in this
+    corpus. Read from the collectors' own config so the corpus cannot claim a
+    licence the collector did not use.
+    """
+    import yaml
+    out: dict[str, dict[str, str]] = {}
+    base = Path("corpus/domains")
+    for cfg in sorted(base.glob("*/config.yaml")):
+        try:
+            doc = yaml.safe_load(cfg.read_text()) or {}
+        except Exception:                                   # noqa: BLE001
+            continue
+        for name, spec in (doc.get("sources") or {}).items():
+            if not isinstance(spec, dict):
+                continue
+            rec = {}
+            if spec.get("license"):
+                rec["license"] = str(spec["license"])
+            if spec.get("dataset"):
+                rec["dataset"] = str(spec["dataset"])
+            if rec:
+                out[name] = rec
+            # A source collected from several datasets records them as a list
+            # and the collector tags rows "<name>/<sub>", so register each sub
+            # under that key. The sub-name is the dataset id the collector
+            # passed to load_dataset.
+            for sub in (spec.get("datasets") or []):
+                sub = str(sub)
+                out[f"{name}/{sub}"] = {**rec, "dataset": sub}
+    return out
+
+
+def source_url(source: str, doc_id: str, attrib: dict) -> str | None:
+    """A per-row link back to the material, for attribution.
+
+    doc_id already carries what is needed -- article titles, Gutenberg ids,
+    documentation paths -- so this needs no rebuild and no new collection.
+    """
+    from urllib.parse import quote
+    tail = doc_id.split("/", 1)[1] if "/" in doc_id else doc_id
+    if source == "wikipedia":
+        return f"https://en.wikipedia.org/wiki/{quote(tail.replace(' ', '_'))}"
+    if source == "wikinews":
+        return f"https://en.wikinews.org/wiki/{quote(tail.replace(' ', '_'))}"
+    if source == "python_docs":
+        return ("https://docs.python.org/3/"
+                + quote(tail[:-4] + ".html" if tail.endswith(".rst") else tail))
+    if source.startswith("gutenberg/pg"):
+        return f"https://www.gutenberg.org/ebooks/{source.split('/pg')[1]}"
+    # Everything else is a HuggingFace dataset named by the collector config;
+    # the base name is the key for a source collected in several parts.
+    for key in (source, source.split("/")[0]):
+        ds = (attrib.get(key) or {}).get("dataset")
+        if ds:
+            return f"https://huggingface.co/datasets/{ds}"
+    return None
+
+
+def source_license(source: str, attrib: dict) -> str | None:
+    for key in (source, source.split("/")[0]):
+        lic = (attrib.get(key) or {}).get("license")
+        if lic:
+            return lic
+    return None
 
 
 def assign_splits(windows: list[dict], dev_frac: float = 0.05,

@@ -337,6 +337,23 @@ def run(rows: list[dict], manifest: dict, tokenizer=None) -> list[Result]:
     out.append(Result(17, "MANIFEST records annotator versions and git sha for "
                           "every layer", "fail", ok17, "; ".join(detail)))
 
+    # Gate 19: section 2.1 makes attribution mandatory rather than optional
+    # provenance, because CC-BY-SA text is in the corpus and share-alike
+    # applies to the dataset if it is published. A row that cannot say where
+    # it came from cannot be attributed.
+    nourl = Counter(); nolic = Counter()
+    for r in rows:
+        if not r.get("source_url"):
+            nourl[r["source"]] += 1
+        if not r.get("license"):
+            nolic[r["source"]] += 1
+    lic = sorted({r.get("license") for r in rows if r.get("license")})
+    out.append(Result(19, "every row carries source_url and license", "fail",
+                      not nourl and not nolic,
+                      (f"no url: {dict(nourl)} no licence: {dict(nolic)}"
+                       if (nourl or nolic) else
+                       f"{n} rows attributed; licences: {', '.join(lic)}")))
+
     # Gate 18: absence must be recorded, not silent. A layer that is None
     # without a mask entry is indistinguishable downstream from a layer that
     # is legitimately empty.
