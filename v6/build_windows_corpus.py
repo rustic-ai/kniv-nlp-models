@@ -437,6 +437,9 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
     # the full list is never held in memory.
     split_windows: dict[str, int] = defaultdict(int)
     split_docs: dict[str, set[str]] = defaultdict(set)
+    domain_stats: dict[str, dict] = defaultdict(lambda: defaultdict(int))
+    domain_docs: dict[str, set[str]] = defaultdict(set)
+    domain_sources: dict[str, set[str]] = defaultdict(set)
     OUT.mkdir(parents=True, exist_ok=True)
 
     for w in windows:
@@ -597,6 +600,12 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
             sources.setdefault(lyr, set()).add(a)
         split_windows[row["split"]] += 1
         split_docs[row["split"]].add(w["doc_id"])
+        dstat = domain_stats[w["domain"]]
+        dstat["windows"] += 1
+        dstat["tokens"] += n
+        dstat["sentences"] += len(w["sentence_spans"])
+        domain_docs[w["domain"]].add(w["doc_id"])
+        domain_sources[w["domain"]].add(w["source"])
         row["provenance"] = json.dumps(provenance)
         row["loss_mask"] = json.dumps(mask)
         rows.append(row)
@@ -622,6 +631,9 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
                                        / max(sum(split_windows.values()), 1), 4),
                         "documents": len(split_docs[sp])}
                    for sp in sorted(split_windows)},
+        "domains": {d: {**dict(v), "documents": len(domain_docs[d]),
+                        "sources": sorted(domain_sources[d])}
+                    for d, v in sorted(domain_stats.items())},
         "stats": dict(stats),
     }, indent=2))
     print(f"assembled {stats['rows']} rows -> {OUT}")
