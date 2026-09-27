@@ -300,8 +300,24 @@ def run(rows: list[dict], manifest: dict, tokenizer=None) -> list[Result]:
     out.append(Result(15, "label distribution per layer per domain (report)",
                       "report", True, " | ".join(lines)))
 
-    out.append(Result(16, "no doc_id appears in more than one split", "fail",
-                      None, "splits not yet materialised (sequencing step 6)"))
+    # The reason splits are on doc_id (5.1): windows from one document share
+    # entities, coref chains and topic, so a window-level split leaks.
+    if not rows or rows[0].get("split") is None:
+        out.append(Result(16, "no doc_id appears in more than one split",
+                          "fail", None, "rows carry no split column"))
+    else:
+        where = defaultdict(set)
+        for r in rows:
+            where[r["doc_id"]].add(r["split"])
+        leaked = {d: sorted(v) for d, v in where.items() if len(v) > 1}
+        share = Counter(r["split"] for r in rows)
+        out.append(Result(16, "no doc_id appears in more than one split",
+                          "fail", not leaked,
+                          f"{len(leaked)} documents span splits: "
+                          f"{list(leaked.items())[:3]}" if leaked else
+                          " ".join(f"{k} {v/max(n,1):.1%}"
+                                   for k, v in sorted(share.items()))
+                          + f" over {len(where)} documents"))
 
     layers_in_rows = {l for p in prov for l in p}
     recorded = set(manifest.get("layer_source", {}))
@@ -337,14 +353,23 @@ def run(rows: list[dict], manifest: dict, tokenizer=None) -> list[Result]:
 
 def load(shard: int | None) -> tuple[list[dict], dict]:
     import pyarrow.parquet as pq
-    files = sorted(OUT.glob("shard_*.parquet"))
+    # Section 5 layout: corpus/split=<s>/domain=<d>/part-*.parquet. Flat
+    # shard_*.parquet is the pre-split layout and is still read so an older
+    # build can be gated.
+    files = sorted((OUT / "corpus").glob("split=*/domain=*/part-*.parquet"))
+    if not files:
+        files = sorted(OUT.glob("shard_*.parquet"))
     if shard is not None:
-        files = [OUT / f"shard_{shard:03d}.parquet"]
+        files = [f for f in files if f"{shard:03d}" in f.name]
     if not files:
         raise SystemExit(f"no shards in {OUT}; run --stage assemble first")
     rows = []
     for f in files:
-        rows.extend(pq.read_table(f).to_pylist())
+        # ParquetFile, not read_table: the split= and domain= directory names
+        # are ALSO stored as columns, and dataset discovery infers them as
+        # dictionary-typed partition keys that will not merge with the stored
+        # string columns. Reading the file directly takes the stored values.
+        rows.extend(pq.ParquetFile(f).read().to_pylist())
     mf = OUT / "MANIFEST.json"
     return rows, (json.loads(mf.read_text()) if mf.exists() else {})
 

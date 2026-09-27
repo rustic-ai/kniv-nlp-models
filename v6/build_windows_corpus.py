@@ -410,11 +410,38 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
     rows, shard, stats = [], 0, defaultdict(int)
     sources: dict[str, set[str]] = {}
     tok = _encoder_tokenizer()
+    # Exact-duplicate windows, deduplicated BEFORE the split so the 5%
+    # targets stay exact. Measured corpus-wide: 291 of 30,364 windows (0.96%)
+    # in 107 groups, and 18 of those groups spanned splits -- 64 windows of
+    # identical text in both train and test. Gate 16 cannot see that, because
+    # the documents differ; only the content does not. Mostly templated
+    # openings in synthetic assistant dialogue ("Hi, I need a new password").
+    # Gate 5 asks for a dedup threshold set from the observed distribution;
+    # exact token-sequence match is that threshold.
+    seen_tokens: set[tuple] = set()
+    deduped = []
+    for w in windows:
+        k = tuple(w["tokens"])
+        if k in seen_tokens:
+            stats["duplicate_windows_dropped"] += 1
+            continue
+        seen_tokens.add(k)
+        deduped.append(w)
+    if stats["duplicate_windows_dropped"]:
+        print(f"  dropped {stats['duplicate_windows_dropped']} exact-duplicate "
+              f"windows of {len(windows)}", flush=True)
+    windows = deduped
+    splits = assign_splits(windows)
+    # Accumulated as rows are built, because rows are flushed per shard and
+    # the full list is never held in memory.
+    split_windows: dict[str, int] = defaultdict(int)
+    split_docs: dict[str, set[str]] = defaultdict(set)
     OUT.mkdir(parents=True, exist_ok=True)
 
     for w in windows:
         n = w["n_tokens"]
         row = {"window_id": w["window_id"], "doc_id": w["doc_id"],
+               "split": splits[w["window_id"]],
                "domain": w["domain"], "source": w["source"],
                "tokens": w["tokens"], "sentence_spans": w["sentence_spans"],
                "n_tokens": n}
@@ -565,6 +592,8 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
 
         for lyr, a in provenance.items():
             sources.setdefault(lyr, set()).add(a)
+        split_windows[row["split"]] += 1
+        split_docs[row["split"]].add(w["doc_id"])
         row["provenance"] = json.dumps(provenance)
         row["loss_mask"] = json.dumps(mask)
         rows.append(row)
@@ -585,10 +614,57 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
         "git_sha": _git_sha(),
         "layer_source": {l: sorted(a) for l, a in sorted(sources.items())},
         "annotator_versions": _annotator_versions(sources),
+        "splits": {sp: {"windows": split_windows[sp],
+                        "share": round(split_windows[sp]
+                                       / max(sum(split_windows.values()), 1), 4),
+                        "documents": len(split_docs[sp])}
+                   for sp in sorted(split_windows)},
         "stats": dict(stats),
     }, indent=2))
     print(f"assembled {stats['rows']} rows -> {OUT}")
     print(f"  {dict(stats)}")
+
+
+def assign_splits(windows: list[dict], dev_frac: float = 0.05,
+                  test_frac: float = 0.05) -> dict[str, str]:
+    """Map window_id -> split, splitting on doc_id and stratified by domain.
+
+    Split on doc_id, never window_id (5.1): windows from one document share
+    entities, coref chains and topic, so a window-level split leaks the test
+    set into training.
+
+    The 5% targets are measured in WINDOWS, not documents, because that is
+    what training sees and document sizes vary by an order of magnitude
+    across domains. Documents are ordered by a hash of their id and taken
+    whole until the domain's window quota is met, so the assignment is
+    deterministic, reproducible from the ids alone, and never splits a
+    document.
+    """
+    by_domain: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for w in windows:
+        by_domain[w["domain"]][w["doc_id"]] += 1
+
+    out: dict[str, str] = {}
+    doc_split: dict[str, str] = {}
+    for domain, docs in by_domain.items():
+        total = sum(docs.values())
+        # A document's position is fixed by its id, so adding a domain or
+        # re-running the build cannot reshuffle an existing split.
+        order = sorted(docs, key=lambda d: hashlib.sha1(
+            f"split:{d}".encode()).hexdigest())
+        quota = {"test": total * test_frac, "dev": total * dev_frac}
+        filled = {"test": 0, "dev": 0}
+        for d in order:
+            for sp in ("test", "dev"):
+                if filled[sp] < quota[sp]:
+                    doc_split[d] = sp
+                    filled[sp] += docs[d]
+                    break
+            else:
+                doc_split[d] = "train"
+    for w in windows:
+        out[w["window_id"]] = doc_split[w["doc_id"]]
+    return out
 
 
 def _encoder_tokenizer():
@@ -704,9 +780,21 @@ def _annotator_versions(sources: dict[str, set[str]]) -> dict[str, str]:
 
 
 def _write(rows, shard, pa, pq):
-    tbl = pa.Table.from_pylist(rows)
-    pq.write_table(tbl, OUT / f"shard_{shard:03d}.parquet")
-    print(f"  wrote shard_{shard:03d}.parquet ({len(rows)} rows)", flush=True)
+    """One part file per (split, domain), as section 5 lays out.
+
+    A flat shard mixed splits and domains together, so a consumer had to read
+    the whole corpus to train on one split.
+    """
+    groups: dict[tuple[str, str], list] = defaultdict(list)
+    for r in rows:
+        groups[(r["split"], r["domain"])].append(r)
+    for (sp, dom), part in sorted(groups.items()):
+        d = OUT / "corpus" / f"split={sp}" / f"domain={dom}"
+        d.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.Table.from_pylist(part), d / f"part-{shard:03d}.parquet")
+    print(f"  wrote shard {shard:03d}: " + ", ".join(
+        f"{sp}/{dom} {len(p)}" for (sp, dom), p in sorted(groups.items())),
+        flush=True)
 
 
 def main() -> int:
