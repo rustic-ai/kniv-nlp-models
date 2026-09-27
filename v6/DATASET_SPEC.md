@@ -549,6 +549,54 @@ removed **293 duplicate triples, 28% of the raw output**.
 NUM and TIME are deliberately excluded: two occurrences of `1` or
 `Monday` are not the same entity.
 
+### 3A.5e Bare cardinals and ordinals are not entities
+
+OntoNotes tags every bare count and rank as CARDINAL or ORDINAL — `two`,
+`12`, `4`, `first`. DocRED does not annotate these as entities at all, and
+they are not relation arguments: across Re-DocRED train, **NUM appears in
+30 of 85,932 gold relations (0.03%)**, and those few look like mistyped
+entities. ATLOP has effectively never seen a NUM argument, so it cannot
+predict one — these vertices add cost and false-positive surface, nothing
+else. Since ordered pairs grow with the square of the vertex count, they
+are also a large part of the ATLOP bill.
+
+They are not rare. Share of all mentions, measured over the whole corpus
+(NER is complete for all 583,824 sentences):
+
+| domain | PER | ORG | LOC | TIME | NUM | MISC | bare CARDINAL/ORDINAL |
+|---|---|---|---|---|---|---|---|
+| conversation | 5.2% | 8.8% | 20.1% | 27.6% | 27.6% | 10.7% | **21.4%** |
+| news | 17.6% | 16.5% | 22.3% | 17.3% | 13.9% | 12.5% | 10.2% |
+| technical | 10.9% | 14.3% | 2.8% | 10.0% | 31.5% | 30.4% | **28.4%** |
+| encyclopedic | 20.5% | 8.5% | 21.7% | 15.9% | 16.8% | 16.5% | 13.7% |
+| narrative | 47.4% | 3.3% | 11.1% | 13.7% | 19.0% | 5.5% | 17.4% |
+| *Re-DocRED* | *15.6%* | *13.5%* | *29.3%* | *19.3%* | *6.4%* | *15.9%* | *—* |
+
+News and encyclopedic are already close to Re-DocRED; the distortion is
+concentrated in technical and conversation. Dropping bare cardinals and
+ordinals (`DROP_TYPES` in `v6/entities.py`) leaves NUM near Re-DocRED's own
+6.4%. The remaining MONEY, PERCENT and QUANTITY are the DocRED-like members
+and stay.
+
+The distortion is worse per **vertex** than per mention, and §3A.5d is why:
+`MERGEABLE` excludes NUM, so PER/ORG/LOC/MISC mentions collapse by string
+match while every bare numeral remains its own vertex. On the conversation
+prefix that turns 27.6% of mentions into **43.3% of vertices**.
+
+Measured on that prefix: entities/doc 7.75 → 6.04, ordered pairs 475,714 →
+239,958, NUM vertex share 43.3% → 12.8%. Windows clearing the two-entity
+floor fall from 80.5% to 65.1% — but that coverage was nominal. The windows
+now skipped are ones whose only entities were numerals, so the only
+relations they could ever have produced are the NUM pairs gold almost never
+contains.
+
+**Caveat on these numbers.** The coref layer was still filling when they
+were taken, and it fills in corpus order, so the prefix is 100%
+conversation — the domain with the second-worst distortion. The per-domain
+mention table above is off the complete NER layer and is corpus-wide; the
+entity-assembly figures are not, and are to be re-measured per domain once
+coref completes.
+
 ### 3A.6 What relations do not cover
 
 Two structural limits, worth stating before the knowledge-graph design
@@ -622,8 +670,10 @@ padded**.
 
 ### 4.1b Scale: this is a GPU job
 
-Measured over the built corpus — 23,106 windows, 409,741 sentences,
-8.17M tokens — at kniv-v5's observed 6.7 sentences/s on this laptop's CPU:
+Measured over the pilot corpus — 23,106 windows, 409,741 sentences,
+8.17M tokens; the corpus as finally built is 30,364 windows, 583,824
+sentences, 9.87M tokens, so scale these up by ~1.4x — at kniv-v5's observed
+6.7 sentences/s on this laptop's CPU:
 
 | layer | passes | CPU hours |
 |---|---|---|
@@ -656,6 +706,51 @@ the fallback for larger runs, and if used the job must run *inside the
 kernel* — a detached process leaves the kernel idle and the VM is
 reclaimed within the hour regardless of keep-alive, which cost five runs
 during relation training. See `v6/experiments/atlop_colab.sh`.
+
+### 4.1b-bis The other annotators needed their own batching
+
+kniv-v5 was not the only annotator running one item per forward pass.
+
+**Stanza.** Two independent problems, both found by reading the run rather
+than the code. First, `PROCESSORS` ran `depparse,ner` whose output the
+corpus discards — DECISIONS.md gives pos, dep and ner to kniv-v5 — and
+those two processors were two thirds of the runtime: **5.6 → 16.4
+sentences/s**, lemma and feats identical on 200/200. `pos` stays, because
+it is a prerequisite for `lemma` and is what produces `feats`; set
+`KNIV_STANZA_FULL=1` to restore the full pipeline for a bake-off run.
+
+Second, iteration was **layer-major** — the whole corpus for `lemma`, then
+the whole corpus for `morph`. The pipeline produces both in one pass and
+memoises the result, but the memo is bounded at 4096 entries, so by the
+time `morph` asked for a sentence its entry was long evicted and the
+pipeline ran over the corpus **twice**. Item-major iteration fills every
+layer while the sentence is still in the memo. Stanza also accepts a list
+of pre-tokenized sentences per call: **22.3 → 75.2 sentences/s** at 128 per
+call, identical on 200/200. Together, **20 → ~90 sentences/s** on the live
+build.
+
+**Coref.** fastcoref packs several documents into one forward pass, and we
+passed one window at a time. Measured same-process and back-to-back, so
+both paths see identical machine load:
+
+| window length | single | batched (4096 tok) | clusters identical |
+|---|---|---|---|
+| mean 136 tokens | 0.68 win/s | 0.95 win/s | 24/24 |
+| mean 415 tokens | 0.53 win/s | 0.77 win/s | 24/24 |
+
+A 16384-token batch is **slower** than 4096 in both slices (0.55, 0.45), so
+the batch size is pinned rather than maximised. Also checked against the
+4,800 entries the single-document path had already written: 60/60
+identical, order preserved.
+
+**Two lessons for anyone re-running this.** Rates must be compared
+same-process and same-moment: coref's apparent throughput *fell* from 0.90
+to 0.67 win/s after batching, purely because the 0.90 was recorded while
+Stanza was crawling in a broken state and Stanza then got 4.4x faster and
+competed for the CPU. And a fully-cached layer hides failures in the layer
+beside it — a Stanza run reported `ok` on every `lemma` item, served from
+cache, while **every `morph` item failed**, because only `morph` reached
+the pipeline. Check `cached=` against `ok=`, not just `ok=`.
 
 ### 4.1c SRL needs POS first
 
@@ -855,7 +950,15 @@ Every gate is a build failure, not a warning, unless marked *report*.
 
 **Corpus**
 13. Coverage per layer ≥ 98% of tokens after masking — *report* below that,
-    fail below 90%.
+    fail below 90%. **Relations are exempt from the 90% floor**: §3A.5c
+    accepts sparse relations as a property of the Wikidata inventory rather
+    than an annotator failure, and §3A.5e lowers the eligible-window share
+    further on purpose. Applying this gate to relations would fail the build
+    on the one layer the spec has already decided to accept.
+13a. Relation coverage — *report*, three numbers so a regression is
+    distinguishable from the known sparsity: share of windows clearing the
+    two-entity floor, triples per document, and triples per ordered pair,
+    each per domain, against the §3A.5c baseline.
 14. Morph mask rate per domain — *report*; a domain above ~5% needs
     investigation, not acceptance.
 15. Label distribution per layer per domain — *report*, against the v5
