@@ -649,7 +649,6 @@ def collect_s2orc(config: dict):
 
 COLLECTORS = {
     "sec_edgar": collect_sec_edgar,
-    "enron": collect_enron,
     "openstax": collect_openstax,
     "odoo": collect_odoo,
     "wikipedia": collect_wikipedia,

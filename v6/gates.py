@@ -141,11 +141,19 @@ def run(rows: list[dict], manifest: dict, tokenizer=None) -> list[Result]:
                            f"{lost:,}/{tw:,} word positions past the encoder "
                            f"({lost/max(tw,1):.2%}), all recorded")))
 
-    doms = Counter(r["domain"] for r in rows)
-    out.append(Result(4, "PII scan clean on business/enron", "fail",
-                      None if "business" in doms else True,
-                      "business domain not present in this corpus"
-                      if "business" not in doms else "business present: scan required"))
+    # Keyed on the SOURCE, not the domain. Enron was the only business source
+    # carrying non-consensual personal data and it is dropped (§2.2); the rest
+    # of the domain is filings, textbooks, documentation, contracts and papers.
+    # Gating on "business is present" would demand a PII scan for text that has
+    # no personal-data question, and would go quiet if Enron were ever added
+    # under another domain.
+    srcs = {r["source"] for r in rows}
+    enron = sorted(x for x in srcs if "enron" in x.lower())
+    out.append(Result(4, "no non-consensual personal-data source without a PII scan",
+                      "fail", None if enron else True,
+                      f"enron sources present, §2.2 scan required: {enron}"
+                      if enron else
+                      "enron absent; no business source carries personal correspondence"))
 
     seen, dup = {}, 0
     for r in rows:

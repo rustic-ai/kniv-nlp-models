@@ -100,7 +100,7 @@ All sources are already collected by `corpus/domains/*/collect.py` into
 | technical | Wikipedia, Python docs | CC-BY-SA-3.0, PSF |
 | news | Wikinews, Wikipedia | CC-BY-2.5, CC-BY-SA-3.0 |
 | encyclopedic | Wikipedia | CC-BY-SA-3.0 |
-| business | SEC EDGAR, Enron, OpenStax, Wikipedia, CUAD | public domain, CC-BY-4.0, CC-BY-SA-3.0, ODC-BY |
+| business | SEC EDGAR, OpenStax, Odoo docs, Wikipedia, CUAD, S2ORC | public domain, CC-BY-4.0, CC-BY-SA-3.0, ODC-BY |
 
 Two licence consequences, neither affecting the trained model:
 
@@ -113,14 +113,37 @@ Two licence consequences, neither affecting the trained model:
 
 ### 2.2 Personal data
 
-The business domain includes the **Enron email corpus**, which contains
-real names, addresses and phone numbers of real people who did not consent.
-It is public and widely used, but it is personal data, and it is going into
-a corpus we may publish and into weights we will publish.
+**The Enron email corpus is not in this corpus, and that is the whole of the
+personal-data position.**
 
-**Gate before any business-domain window is annotated:** run PII detection
-over Enron documents and either redact or drop. This is a hard gate in the
-QA list (§7), not a recommendation.
+Enron was the one source carrying personal data about people who did not
+consent to publication: real names, addresses and phone numbers in private
+internal mail, disclosed by a regulator and now widely redistributed. It was
+to be gated behind PII detection with redaction or dropping before any
+business window was annotated. It is dropped instead.
+
+The reasoning is that the gate was the expensive half and never reached zero
+residual risk. Automated PII detection on thirty-year-old email misses names
+in signature blocks, numbers in free text and addresses inside forwarded
+threads, and the corpus and the weights are both intended for publication.
+Against that, Enron was **15,000 of 185,000 business sentences** — 8% of one
+domain.
+
+What is lost is a **register, not volume**: Enron was the domain's only
+informal workplace correspondence, and every remaining source is formal
+published text (filings, textbooks, documentation, contracts, papers,
+encyclopedia). The conversational register is carried by the conversation
+domain, which is 37% of the corpus. Public mailing-list archives were
+considered as a substitute and not pursued; they would reintroduce real named
+individuals, self-published rather than disclosed, which is a different
+consent position but not an empty one.
+
+The remaining business sources are corporate filings (US government work),
+open textbooks, product documentation, public contracts and academic
+abstracts. None is personal correspondence. **No PII gate is required for the
+business domain as built**, and gate 4 keys off the presence of the Enron
+source rather than the presence of the business domain, so re-adding Enron
+re-arms it automatically.
 
 ### 2.3 Document structure — the upstream blocker
 
