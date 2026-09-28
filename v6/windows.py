@@ -192,7 +192,15 @@ def _articles(domain_dir: Path, domain: str):
             text = (r.get("text") or "").strip()
             if not text:
                 continue
-            key = r.get("title") or r.get("path") or r.get("id") or f"{f.stem}-{i}"
+            # A filing has no title or path, and falling through to
+            # "filings-0" loses the only thing that identifies it: without the
+            # CIK there is no way to link back to the document, and §2.1 makes
+            # attribution mandatory rather than optional.
+            key = (r.get("title") or r.get("path") or r.get("id")
+                   or ("-".join(str(r[k]) for k in ("cik", "form", "date")
+                                if r.get(k))
+                       if r.get("cik") else None)
+                   or f"{f.stem}-{i}")
             units = [c for c in (clean_text(q) for q in text.split("\n\n"))
                      if c and looks_like_prose(c)]
             if not units:

@@ -26,6 +26,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -39,7 +40,8 @@ from .windows import build_windows, iter_documents, tokenize
 OUT = DATA_DIR / "v6-corpus"
 WINDOWS = OUT / "windows.jsonl"
 CACHE_VERSION = f"{PROMPT_VERSION}-corpus"
-DOMAINS = ("conversation", "narrative", "technical", "news", "encyclopedic")
+DOMAINS = ("conversation", "narrative", "technical", "news", "encyclopedic",
+           "business")
 
 # Which layers each annotator owns, and at which granularity. Per
 # DECISIONS.md; every entry is a measured choice, not a preference.
@@ -87,24 +89,94 @@ ENTITIES_FILE = OUT / "entities_docred.json"
 RELATIONS_FILE = OUT / "relations_atlop.json"
 
 
-def stage_windows(limit: int | None, per_domain: int | None) -> None:
+def _source_budgets(domain: str, total_tokens: int) -> dict[str, int]:
+    """Split a domain's token budget across its sources.
+
+    The proportions come from the domain config's own ``sampling`` block, which
+    is where the intended mix is already written down, so the budget cannot
+    drift from it. A domain with no such block gets an empty mapping and falls
+    back to a single cap.
+    """
+    import yaml
+    cfg = Path("corpus/domains") / domain / "config.yaml"
+    if not cfg.exists():
+        return {}
+    try:
+        doc = yaml.safe_load(cfg.read_text()) or {}
+    except Exception:                                       # noqa: BLE001
+        return {}
+    weights = {k: v for k, v in (doc.get("sampling") or {}).items()
+               if isinstance(v, (int, float)) and v > 0}
+    if not weights:
+        return {}
+    tot = sum(weights.values())
+    return {k: int(total_tokens * v / tot) for k, v in weights.items()}
+
+
+def stage_windows(limit: int | None, per_domain: int | None,
+                  domains: list[str] | None = None,
+                  out: Path | None = None,
+                  per_domain_tokens: int | None = None) -> None:
+    """Build windows, optionally for a subset of domains into a separate file.
+
+    ``--domains`` exists so a domain can be added without regenerating the
+    others. Regenerating them would be deterministic today, but the item id
+    carries a digest of the sentence text (§4.1d) and a rebuild is the one
+    operation that can invalidate 30,180 windows' worth of annotation. Not
+    touching them is cheaper than verifying they came back identical.
+
+    ``--per-domain-tokens`` caps by TOKENS rather than window count, which is
+    what §2.4 asks the domain targets to be restated in.
+    """
     OUT.mkdir(parents=True, exist_ok=True)
+    target = out or WINDOWS
     n = 0
     counts: dict[str, int] = defaultdict(int)
-    with WINDOWS.open("w") as fh:
-        for domain in DOMAINS:
+    toks: dict[str, int] = defaultdict(int)
+    stoks: dict[tuple[str, str], int] = defaultdict(int)
+    with target.open("w") as fh:
+        for domain in (domains or DOMAINS):
+            # A single per-domain cap fills in whatever order the adapter
+            # reads files, which is alphabetical. On business that spent the
+            # whole budget inside cuad/odoo/openstax and collected no SEC
+            # filings, Wikipedia or abstracts at all -- close to the inverse
+            # of the configured mix. The budget is therefore split per source
+            # in the proportions the domain's own config asks for.
+            budget = (_source_budgets(domain, per_domain_tokens)
+                      if per_domain_tokens else {})
+            stop = False
             for doc in iter_documents(domain):
+                if stop:
+                    break
                 for w in build_windows(doc, tokenize):
+                    src = w["source"]
                     if per_domain and counts[domain] >= per_domain:
+                        stop = True
                         break
+                    if per_domain_tokens:
+                        cap = budget.get(src)
+                        if cap is not None:
+                            if stoks[(domain, src)] >= cap:
+                                break              # this source is full
+                        elif toks[domain] >= per_domain_tokens:
+                            stop = True
+                            break
                     fh.write(json.dumps(w) + "\n")
                     counts[domain] += 1; n += 1
+                    toks[domain] += w["n_tokens"]
+                    stoks[(domain, src)] += w["n_tokens"]
                     if limit and n >= limit:
+                        stop = True
                         break
-                if limit and n >= limit:
-                    break
-    print(f"wrote {n} windows -> {WINDOWS}")
-    print(f"  {dict(counts)}")
+            # The cap used to break only the inner loop, so every remaining
+            # document was still read and windowed with its output discarded.
+            # On business that is 2.6 GB of text for nothing.
+    print(f"wrote {n} windows -> {target}")
+    print(f"  windows {dict(counts)}")
+    print(f"  tokens  {dict(toks)}")
+    if stoks:
+        for (d, src), v in sorted(stoks.items()):
+            print(f"    {d}/{src:14s} {v:10,d}")
 
 
 def load_windows(limit: int | None = None) -> list[dict]:
@@ -733,6 +805,27 @@ def source_url(source: str, doc_id: str, attrib: dict) -> str | None:
                 + quote(tail[:-4] + ".html" if tail.endswith(".rst") else tail))
     if source.startswith("gutenberg/pg"):
         return f"https://www.gutenberg.org/ebooks/{source.split('/pg')[1]}"
+    if source == "sec_edgar":
+        # doc_id is "<cik>-<form>-<date>"; the CIK identifies the filer.
+        cik = tail.split("-")[0]
+        return ("https://www.sec.gov/cgi-bin/browse-edgar"
+                f"?action=getcompany&CIK={quote(cik)}&type=10-K") if cik.isdigit() \
+            else "https://www.sec.gov/edgar"
+    if source == "odoo":
+        # doc_id is the documentation source path, e.g.
+        # "content/administration/hosting.rst".
+        t = tail[len("content/"):] if tail.startswith("content/") else tail
+        if t.endswith(".rst"):
+            t = t[:-4] + ".html"
+        return "https://www.odoo.com/documentation/master/" + quote(t)
+    if source == "openstax":
+        slug = re.sub(r"[^a-z0-9]+", "-", tail.lower()).strip("-")
+        return f"https://openstax.org/details/books/{slug}"
+    if source == "s2orc":
+        # Abstracts come from the OpenAlex API and carry no work id, so this
+        # is source-level attribution, not document-level. Recorded as such
+        # rather than fabricating a link that would not resolve.
+        return "https://openalex.org/"
     # Everything else is a HuggingFace dataset named by the collector config;
     # the base name is the key for a source collected in several parts.
     for key in (source, source.split("/")[0]):
@@ -931,11 +1024,19 @@ def main() -> int:
     ap.add_argument("--layers", help="comma-separated subset")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--per-domain", type=int)
+    ap.add_argument("--per-domain-tokens", type=int,
+                    help="cap each domain by tokens rather than window count")
+    ap.add_argument("--domains", help="comma-separated subset to build")
+    ap.add_argument("--out", type=Path, help="write windows here instead of "
+                                             "the canonical windows.jsonl")
     ap.add_argument("--cache-dir", type=Path, default=RUNS_DIR / "_cache")
     args = ap.parse_args()
 
     if args.stage == "windows":
-        stage_windows(args.limit, args.per_domain)
+        stage_windows(args.limit, args.per_domain,
+                      domains=(args.domains.split(",") if args.domains else None),
+                      out=args.out,
+                      per_domain_tokens=args.per_domain_tokens)
         return 0
     windows = load_windows(args.limit)
     print(f"{len(windows)} windows", flush=True)
