@@ -188,15 +188,31 @@ def run(rows: list[dict], manifest: dict, tokenizer=None) -> list[Result]:
                       {k: dict(v.most_common(4)) for k, v in invbad.items()}
                       if invbad else "pos, ner, dep, sentiment, srl all in inventory"))
 
+    # Checked PER SENTENCE for NER, because that is the unit the model
+    # annotated: an I-X opening a sentence is ill-formed even though the
+    # window-level sequence before it may end in a matching tag. Malformed
+    # sequences are masked in assembly rather than repaired, so the gate's
+    # question -- as with gate 9 -- is whether any survive UNMASKED.
     bio = Counter()
-    for r in rows:
+    unmasked = Counter()
+    for r, m in zip(rows, mask):
         if r.get("ner"):
-            bio["ner"] += _bio_wellformed(r["ner"])
+            nm = m.get("ner_tokens")
+            for s2, e2 in r["sentence_spans"]:
+                if _bio_wellformed(r["ner"][s2:e2]):
+                    bio["ner"] += 1
+                    if not (nm and all(nm[s2:e2])):
+                        unmasked["ner"] += 1
         for f in (r.get("srl_frames") or []):
-            bio["srl"] += _bio_wellformed(f["tags"])
-    out.append(Result(8, "NER and SRL BIO sequences well-formed", "fail",
-                      not sum(bio.values()), dict(bio) if sum(bio.values())
-                      else "no I-X without a matching B-X/I-X"))
+            if _bio_wellformed(f["tags"]):
+                bio["srl"] += 1
+                unmasked["srl"] += 1      # a malformed frame should not be here
+    out.append(Result(8, "NER and SRL BIO sequences well-formed or masked",
+                      "fail", not sum(unmasked.values()),
+                      (f"UNMASKED malformed: {dict(unmasked)}" if sum(unmasked.values())
+                       else (f"{dict(bio)} malformed, all masked or dropped"
+                             if sum(bio.values()) else
+                             "no I-X without a matching B-X/I-X"))))
 
     tot = badtree = masked = 0
     for r, m in zip(rows, mask):

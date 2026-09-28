@@ -245,6 +245,29 @@ async def stage_annotate(name: str, windows: list[dict], cache_dir: Path,
         print(f"{name}/{layer}: {n_ok}/{n} ok", flush=True)
 
 
+def bio_malformed(tags: list[str]) -> bool:
+    """True when an ``I-X`` does not follow a ``B-X`` or ``I-X`` of the same type.
+
+    The NER head is a BiLSTM with no CRF constraint and the SRL head is
+    per-token, so neither is structurally prevented from opening a span with
+    ``I-``. It is rare -- 1 of 583,824 NER sequences and 5 of 1,542,923 SRL
+    frames -- and it happens where the sentence splitter cuts through a name,
+    so the model sees a sentence that begins mid-span.
+
+    Such a sequence is masked rather than repaired. Promoting the leading
+    ``I-`` to ``B-`` would invent a span boundary the model did not predict,
+    which is the same objection as padding a short annotation to fit: an
+    ill-formed span carries no usable supervision, and guessing its start is
+    not evidence.
+    """
+    prev = "O"
+    for t in tags:
+        if t.startswith("I-") and prev[2:] != t[2:]:
+            return True
+        prev = t
+    return False
+
+
 def is_tree(heads: list[int], start: int, end: int) -> bool:
     """Exactly one root and no cycle, over window-absolute heads.
 
@@ -504,6 +527,17 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
                             mask["dep_tokens"] = dm
                             stats["dep_sentences_masked"] += bad
                         stats["dep_sentences_total"] += len(w["sentence_spans"])
+                    if layer == "ner":
+                        nm = [False] * n
+                        bad = 0
+                        for s2, e2 in w["sentence_spans"]:
+                            if bio_malformed(merged[s2:e2]):
+                                for i in range(s2, e2):
+                                    nm[i] = True
+                                bad += 1
+                        if bad:
+                            mask["ner_tokens"] = nm
+                            stats["ner_sentences_masked"] += bad
                     provenance[layer] = ann
                 else:
                     row[layer] = None
@@ -524,6 +558,12 @@ def stage_assemble(windows: list[dict], cache_dir: Path,
                     continue
                 tags = _get(cache, "kniv-v5", "srl", f"{key}:p{pi}", e2 - s2)
                 if tags is None:
+                    continue
+                # Checked on the sentence's own tags, not the window-padded
+                # array: the padding is O, so a frame whose sentence opens with
+                # I-X would otherwise look like an I-X following an O.
+                if bio_malformed(tags):
+                    stats["srl_frames_malformed"] += 1
                     continue
                 full = ["O"] * n
                 full[s2:e2] = tags
