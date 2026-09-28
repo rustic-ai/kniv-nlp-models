@@ -873,13 +873,29 @@ def assign_splits(windows: list[dict], dev_frac: float = 0.05,
         quota = {"test": total * test_frac, "dev": total * dev_frac}
         filled = {"test": 0, "dev": 0}
         for d in order:
+            size = docs[d]
             for sp in ("test", "dev"):
-                if filled[sp] < quota[sp]:
+                # Must FIT, not merely be under quota when we look. Checking
+                # before adding lets one oversized document blow the split
+                # open: business has a 727-window textbook against a 327-window
+                # quota, which put 12.9% of the domain in test. A document is
+                # never split, so a document that cannot fit goes to train and
+                # the scan continues with smaller ones.
+                if filled[sp] + size <= quota[sp]:
                     doc_split[d] = sp
-                    filled[sp] += docs[d]
+                    filled[sp] += size
                     break
             else:
                 doc_split[d] = "train"
+        # A domain whose documents are all larger than the quota would leave
+        # dev or test empty; give each the smallest document rather than
+        # nothing, so no split of a present domain is unrepresented.
+        for sp in ("test", "dev"):
+            if filled[sp] == 0 and docs:
+                smallest = min(order, key=lambda d: (docs[d], d))
+                if doc_split.get(smallest) == "train":
+                    doc_split[smallest] = sp
+                    filled[sp] += docs[smallest]
     for w in windows:
         out[w["window_id"]] = doc_split[w["doc_id"]]
     return out
