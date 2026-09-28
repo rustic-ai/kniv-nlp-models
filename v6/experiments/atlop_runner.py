@@ -124,31 +124,104 @@ def collate(batch):
             [f["entity_pos"] for f in batch],
             [f["hts"] for f in batch])
 
-loader = DataLoader(features, batch_size=2, shuffle=False, collate_fn=collate)
-preds = []
-with torch.no_grad():
-    for bi, (ids, mask, ep, hts) in enumerate(loader):
-        out = model(input_ids=ids.to(device), attention_mask=mask.to(device),
-                    entity_pos=ep, hts=hts)
-        logits = out[0] if isinstance(out, (tuple, list)) else out
-        preds.append(logits.float().cpu().numpy())
-        if bi % 25 == 0:
-            print(f"  batch {bi}/{len(loader)}", flush=True)
-preds = np.concatenate(preds, axis=0)
-np.save("/tmp/atlop_preds.npy", preds)
+# Checkpointed inference.
+#
+# The first full run over the corpus died at batch 10,400 of 12,463 after
+# holding roughly 47 GB: swap went from 55.9 GB used to 8.4 GB the moment it
+# was killed, though its RSS read 108 MB because the pages were all swapped
+# out. RSS understates a swapped process, which is why it looked innocent.
+#
+# Three things were wrong, and checkpointing alone would have fixed none of
+# them:
+#   * every batch's logits were accumulated in a list and concatenated at the
+#     end -- about 2 GB at the point it stalled, and doubled by the concat;
+#   * the MPS caching allocator is never emptied, and 12,463 batches of
+#     varying sequence length and pair count fragment it without bound;
+#   * nothing was written until the very end, so eleven hours of work left no
+#     output at all.
+#
+# Results are now appended per document as JSONL and flushed, so a stall costs
+# one chunk rather than the run; a restart skips documents already written.
+# RSS is logged so growth is visible while it happens instead of afterwards.
+CKPT_PATH = OUT + ".partial.jsonl"
+EMPTY_CACHE_EVERY = int(os.environ.get("ATLOP_EMPTY_CACHE_EVERY", "50"))
 
-# map back to (doc, h, t, relation-code)
+
+def _rss_gb() -> float:
+    """Peak RSS in GB. ru_maxrss is BYTES on macOS and KILOBYTES on Linux."""
+    import resource
+    import sys
+    n = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return n / (1024 ** 3) if sys.platform == "darwin" else n / (1024 ** 2)
+
+
+done: set[str] = set()
+if os.path.exists(CKPT_PATH):
+    with open(CKPT_PATH) as fh:
+        for line in fh:
+            try:
+                done.add(json.loads(line)["title"])
+            except Exception:                              # truncated tail
+                continue
+    print(f"resuming: {len(done)} documents already written to {CKPT_PATH}",
+          flush=True)
+
+pending = [f for f in features if f["title"] not in done]
+print(f"{len(pending)} documents to score "
+      f"({len(features) - len(pending)} skipped)", flush=True)
+
 rel2id = json.load(open("meta/rel2id.json"))
 id2rel = {v: k for k, v in rel2id.items()}
-res, k = [], 0
-for f in features:
-    doc_preds = []
-    for (h, t) in f["hts"]:
-        row = preds[k]; k += 1
-        for r in np.nonzero(row)[0]:
-            if r != 0:
-                doc_preds.append([int(h), int(t), id2rel[int(r)]])
-    res.append({"title": f["title"], "preds": doc_preds})
+
+loader = DataLoader(pending, batch_size=2, shuffle=False, collate_fn=collate)
+titles = [f["title"] for f in pending]
+ti = 0
+written = 0
+with open(CKPT_PATH, "a") as ckpt:
+    with torch.no_grad():
+        for bi, (ids, mask, ep, hts) in enumerate(loader):
+            out = model(input_ids=ids.to(device), attention_mask=mask.to(device),
+                        entity_pos=ep, hts=hts)
+            logits = out[0] if isinstance(out, (tuple, list)) else out
+            rows = logits.float().cpu().numpy()
+            # Split the batch's rows back per document: the model returns one
+            # row per pair, concatenated over the batch in document order.
+            off = 0
+            for doc_hts in hts:
+                n = len(doc_hts)
+                sub = rows[off:off + n]
+                off += n
+                triples = []
+                for (h, t), row in zip(doc_hts, sub):
+                    for r in np.nonzero(row)[0]:
+                        if r != 0:
+                            triples.append([int(h), int(t), id2rel[int(r)]])
+                ckpt.write(json.dumps({"title": titles[ti], "preds": triples})
+                           + "\n")
+                ti += 1
+                written += len(triples)
+            if off != rows.shape[0]:
+                raise RuntimeError(
+                    f"batch {bi}: consumed {off} rows of {rows.shape[0]}; "
+                    "pair counts and logits are out of step")
+            ckpt.flush()
+            del out, logits, rows
+            if EMPTY_CACHE_EVERY and bi % EMPTY_CACHE_EVERY == 0:
+                if device == "mps":
+                    torch.mps.empty_cache()
+            if bi % 25 == 0:
+                print(f"  batch {bi}/{len(loader)} docs={ti} "
+                      f"triples={written} rss={_rss_gb():.2f}GB", flush=True)
+
+# Assemble reads a JSON array, so the durable JSONL is converted once at the
+# end. The JSONL is kept: it is the only thing that survives a kill.
+res = []
+with open(CKPT_PATH) as fh:
+    for line in fh:
+        try:
+            res.append(json.loads(line))
+        except Exception:
+            continue
 json.dump(res, open(OUT, "w"))
 print(f"\nwrote {OUT}: {sum(len(d['preds']) for d in res)} predicted triples "
-      f"over {len(res)} documents", flush=True)
+      f"over {len(res)} documents (checkpoint {CKPT_PATH})", flush=True)
