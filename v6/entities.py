@@ -104,8 +104,22 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
             for i, (ty, a, b) in enumerate(spans):
                 if i not in used and a <= ce and cs <= b - 1:
                     members.append(i); used.add(i)
-        if members:
-            groups.append(members)
+        # A coref chain is not evidence that two mentions are the same ENTITY
+        # when the NER head calls them different things. LingMess merges
+        # across types -- ("tomorrow" TIME, "Team Meeting" MISC),
+        # ("2010" TIME, "Toyota" ORG, "Camry" MISC) -- and the vertex then
+        # took the FIRST mention's type and wore it for all of them.
+        # Measured before this split: 4.71% of entities had mentions
+        # disagreeing on type, and 9.51% of relation triples touched one.
+        #
+        # Splitting by type keeps the coref evidence where the two annotators
+        # agree and discards it only where they contradict each other, which
+        # is the same principle as masking a sentence whose parse is not a
+        # tree rather than repairing it.
+        bytype: dict[str, list[int]] = {}
+        for i in members:
+            bytype.setdefault(spans[i][0], []).append(i)
+        groups.extend(bytype.values())
     for i in range(len(spans)):
         if i not in used:
             groups.append([i])
