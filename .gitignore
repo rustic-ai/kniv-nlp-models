@@ -90,3 +90,12 @@ cache/
 # weights; 5+ GB). Re-DocRED is MIT and re-downloadable — see
 # v6/experiments/atlop_colab.sh. best.pt is the trained annotator.
 data/re-docred/
+
+# v6 corpus build artifacts. Regenerable from corpus/domains/*/collect.py plus
+# v6/build_windows_corpus.py, and large: 455 MB. The generators are tracked,
+# the output is not, which is how every other data/ directory here works.
+# DATA_CARD.md and MANIFEST.json are generated per assemble and say so in
+# their own text; committing them invites the hand-editing they forbid.
+data/v6-corpus/
+# Third-party ATLOP clone, fetched by v6/experiments/atlop_colab.sh.
+data/atlop-work/
