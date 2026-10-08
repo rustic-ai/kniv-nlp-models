@@ -1,0 +1,52 @@
+# v6 annotator registry.
+#
+# Copy to annotators.yaml and fill in your deployments. Secrets are NEVER
+# stored here: write ${ENV_VAR} and the value is read from the environment at
+# load time. A referenced variable that is unset is a hard error, not an
+# empty string.
+#
+#   family  -- model lineage. Consensus only decorrelates errors across
+#              DIFFERENT families; two entries sharing a family should be
+#              treated as one vote.
+#   kind    -- "azure" for Azure OpenAI deployments, "openai" for any other
+#              OpenAI-compatible endpoint (xAI, MAI, self-hosted).
+#   model   -- Azure: the *deployment* name. Others: the model id.
+#   price_* -- USD per 1M tokens, used only for the cost column.
+
+annotators:
+
+  luna:
+    kind: azure
+    family: openai
+    model: ${V6_LUNA_DEPLOYMENT}
+    base_url: ${V6_LUNA_ENDPOINT}
+    api_key: ${V6_LUNA_API_KEY}
+    api_version: "2024-10-21"
+    max_concurrency: 16
+    price_in: 0.0
+    price_out: 0.0
+
+  sol:
+    kind: azure
+    family: openai
+    model: ${V6_SOL_DEPLOYMENT}
+    base_url: ${V6_SOL_ENDPOINT}
+    api_key: ${V6_SOL_API_KEY}
+    api_version: "2024-10-21"
+    max_concurrency: 16
+
+  terra:
+    kind: openai
+    family: microsoft
+    model: ${V6_TERRA_MODEL}
+    base_url: ${V6_TERRA_ENDPOINT}
+    api_key: ${V6_TERRA_API_KEY}
+    max_concurrency: 8
+
+  grok:
+    kind: openai
+    family: xai
+    model: ${V6_GROK_MODEL}
+    base_url: https://api.x.ai/v1
+    api_key: ${V6_GROK_API_KEY}
+    max_concurrency: 8

@@ -43,6 +43,11 @@ def download_ontonotes_ner():
     try:
         ds = load_dataset("tner/ontonotes5")
         # Tag mapping (empirically verified)
+        # Verified against tner/ontonotes5's own label2id. The previous map
+        # had 36 entries where the dataset has 37: index 35 was labelled
+        # I-LANGUAGE when it is I-ORDINAL, and I-LANGUAGE (36) was absent.
+        # Every I-ORDINAL token was therefore relabelled I-LANGUAGE, and every
+        # I-LANGUAGE token fell through to "O".
         TNER_TAGS = {
             0: "O", 1: "B-CARDINAL", 2: "B-DATE", 3: "I-DATE",
             4: "B-PERSON", 5: "I-PERSON", 6: "B-NORP", 7: "B-GPE", 8: "I-GPE",
@@ -53,13 +58,17 @@ def download_ontonotes_ner():
             23: "B-LOC", 24: "B-QUANTITY", 25: "I-QUANTITY", 26: "I-NORP",
             27: "I-LOC", 28: "B-PRODUCT", 29: "I-TIME",
             30: "B-EVENT", 31: "I-EVENT", 32: "I-FAC",
-            33: "B-LANGUAGE", 34: "I-PRODUCT", 35: "I-LANGUAGE",
+            33: "B-LANGUAGE", 34: "I-PRODUCT", 35: "I-ORDINAL",
+            36: "I-LANGUAGE",
         }
         examples = []
         for ex in ds["test"]:
             examples.append({
                 "words": ex["tokens"],
-                "ner_tags": [TNER_TAGS.get(t, "O") for t in ex["tags"]],
+                # Not .get(t, "O"): defaulting turned a gap in the map into
+                # plausible wrong labels that scored as real predictions. An
+                # id the map does not cover is a bug, so it stops the build.
+                "ner_tags": [TNER_TAGS[t] for t in ex["tags"]],
             })
         dst = BENCHMARK_DIR / "ontonotes_ner_test.json"
         with open(dst, "w") as f:

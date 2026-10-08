@@ -1,58 +1,56 @@
-# Conversation domain configuration
-# Agentic, task-oriented conversations — all commercially licensed
-
 target_sentences: 135000
-
 sources:
   taskmaster:
     datasets:
-      - "taskmaster1"
-      - "taskmaster2"
-      - "taskmaster3"
-    license: "CC BY-4.0"
+    - taskmaster1
+    - taskmaster2
+    - taskmaster3
+    license: CC BY-4.0
     max_utterances: 30000
-
   oasst:
-    dataset: "OpenAssistant/oasst1"
-    license: "Apache 2.0"
+    dataset: OpenAssistant/oasst1
+    license: Apache 2.0
     max_utterances: 30000
-
   multiwoz:
-    dataset: "multi_woz_v22"
-    license: "Apache 2.0"
+    dataset: multi_woz_v22
+    license: Apache 2.0
     max_utterances: 20000
-
   abcd:
-    dataset: "abcd"
-    license: "MIT"
+    dataset: abcd
+    license: MIT
     max_utterances: 15000
-
   airdialogue:
-    dataset: "air_dialogue"
-    license: "Apache 2.0"
+    dataset: air_dialogue
+    license: Apache 2.0
     max_utterances: 15000
-
   glaive:
-    dataset: "glaiveai/glaive-function-calling-v2"
-    license: "Apache 2.0"
+    dataset: glaiveai/glaive-function-calling-v2
+    license: Apache 2.0
     max_utterances: 15000
-
   agent_flan:
-    dataset: "THUDM/Agent-FLAN"
-    license: "Apache 2.0"
+    dataset: THUDM/Agent-FLAN
+    license: Apache 2.0
     max_utterances: 10000
-
   discord:
-    dataset: "mookiezi/Discord-Dialogues"
-    license: "Apache 2.0"
+    dataset: mookiezi/Discord-Dialogues
+    license: Apache 2.0
     max_utterances: 30000
-
+  taskmaster2:
+    dataset: google-research-datasets/taskmaster2
+    license: CC BY-4.0
+    max_utterances: 60000
+    note: entirely spoken two-person Wizard-of-Oz; added to raise Feedback/Commissive
+  sgd:
+    dataset: google-research-datasets/schema_guided_dstc8
+    license: CC BY-SA-4.0
+    max_utterances: 60000
+    note: 17 domains; carries gold dialogue acts usable as CLS evaluation
 filtering:
   min_words: 5
   max_words: 100
   min_chars: 15
   deduplicate: true
   skip_patterns:
-    - "^\\[.*\\]$"
-    - "^<.*>$"
-    - "^\\{.*\\}$"
+  - ^\[.*\]$
+  - ^<.*>$
+  - ^\{.*\}$

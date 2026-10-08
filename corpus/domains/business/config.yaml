@@ -1,7 +1,22 @@
 # Business domain configuration
 # ERP, finance, supply chain, management, marketing, enterprise text
 
-target_sentences: 200000
+# Restated for v6 (DATASET_SPEC 2.4 asks for this before collection resumes).
+# 200,000 sentences was 69% of a mix sized for sentence-level training; the
+# v6 corpus is token-budgeted and conversational. 130,000 sentences is roughly
+# 2.7M tokens, which puts business at parity with technical and second to
+# conversation.
+#
+# Enron is REMOVED, not merely untargeted. It was the only source carrying
+# personal data about people who did not consent to publication -- real names,
+# addresses and phone numbers in private internal mail disclosed by a
+# regulator -- and 2.2 made a redact-or-drop gate blocking on it. Dropping it
+# removes the gate, the residual risk that automated PII detection never
+# reaches zero on 30-year-old email, and the consent question for publishing
+# the dataset. What is lost is a REGISTER, not volume: it was 15,000 of
+# 185,000 sentences, and it was the domain's only informal workplace
+# correspondence. The remaining sources are all formal published text.
+target_sentences: 130000
 
 sources:
   sec_edgar:
@@ -53,10 +68,6 @@ sources:
       - 1594805    # Shopify
     user_agent: "kniv-nlp-models research@dragonscale.ai"
     max_filings_per_company: 2   # most recent 10-K filings
-
-  enron:
-    url: "https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz"
-    license: "Public domain (FERC)"
 
   openstax:
     # CC BY-4.0 college textbooks from openstax.org
@@ -121,13 +132,12 @@ sources:
 # Sampling weights for annotation (subsample from raw pool)
 # Higher weight = more sentences selected from this source
 sampling:
-  sec_edgar: 55000
-  openstax: 50000
-  wikipedia: 30000
-  odoo: 25000
-  enron: 15000
-  s2orc: 15000
-  cuad: 10000
+  sec_edgar: 38000
+  openstax: 35000
+  wikipedia: 21000
+  odoo: 17000
+  s2orc: 11000
+  cuad: 8000
 
 filtering:
   min_words: 5
