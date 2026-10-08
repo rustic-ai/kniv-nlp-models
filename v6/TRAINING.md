@@ -61,9 +61,17 @@ script** — strip `k` characters from the end, append `s`, optionally lowercase
 and covers the overwhelming majority of tokens; anything uncovered is masked
 out of training rather than approximated, and falls back to the token itself.
 
-Vocabularies for morph and lemma come from the **corpus**, not from
-`label_vocabs.json`, which is stale: it lists 9 CLS labels against the
-checkpoint's 8 units and 1,440 DEP labels against 53 (see DATASET_SPEC §8).
+Vocabularies for morph and lemma come from the **corpus**, and the canonical
+label sets for the existing heads come from `models/label_maps.json`, whose
+list position *is* the class index.
+
+Not from `label_vocabs.json`. That filename belongs to the dep2label
+generation — a linear DEP head over ~1,411 `{offset}@{deprel}@{head_UPOS}`
+composites and a 9-unit CLS head — and the v5 student it was found beside is
+biaffine over 53 deprels with 8 CLS units. It was not a stale copy of our
+labels but another architecture's, which is why it was deleted rather than
+corrected; `scripts/verify_label_maps.py` now fails if it reappears
+(DATASET_SPEC §8).
 
 ## 4. The exposure problem for relations
 

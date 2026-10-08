@@ -1,9 +1,21 @@
-"""Assert that ``models/label_maps.json`` matches ``models/student_loader.py``.
+"""Assert the v5 student label sets are internally consistent.
 
-The Python module is the source of truth; the JSON is the cross-language
-artifact (Rust uniko, the ONNX inference path, any future JS client). If
-the two ever drift the resulting bugs are silent and far from the
-mismatch — labels just decode to the wrong class.
+Two checks, both guarding the same failure mode: a label file that disagrees
+with the weights decodes to the wrong class, silently and far from the
+mismatch.
+
+1. ``models/label_maps.json`` matches ``models/student_loader.py``. The Python
+   module is the source of truth; the JSON is the cross-language artifact
+   (Rust uniko, the ONNX inference path, any future JS client).
+
+2. No ``label_vocabs.json`` sits in a student model directory. That filename
+   belongs to the dep2label generation (``deberta-v3-*``,
+   ``kniv-deberta-cascade-*``), whose DEP head is a linear classifier over
+   ~1,411 ``{offset}@{deprel}@{head_UPOS}`` composites and whose CLS head has
+   9 units. The student family is biaffine over 53 plain deprels with 8 CLS
+   units. One such file was found beside the v5 large checkpoint: decoding
+   with it read CLS index 1 as ``correction`` where the model means
+   ``request``, and only four of the nine names overlapped at all.
 
 Run this as part of CI, or manually after touching either file:
 
@@ -31,6 +43,25 @@ EXPECTED = {
     "cls": CLS_LABELS,
     "deprel": DEPREL_LIST,
 }
+
+
+# Student directories use label_maps.json; label_vocabs.json means dep2label.
+STUDENT_GLOB = "kniv-deberta-nlp-base-en-*"
+
+
+def check_no_stale_vocabs() -> int:
+    """Fail if a dep2label-era vocabulary file sits in a student directory."""
+    offenders = sorted((REPO / "models").glob(f"{STUDENT_GLOB}/label_vocabs.json"))
+    for p in offenders:
+        rel = p.relative_to(REPO)
+        print(f"ERROR: {rel} should not exist", file=sys.stderr)
+        print("  label_vocabs.json is the dep2label generation's file "
+              "(9 CLS units, ~1,411 composite DEP tags).", file=sys.stderr)
+        print("  This model family is 8 CLS units and 53 plain deprels; its "
+              "label file is label_maps.json.", file=sys.stderr)
+        print("  Decoding student output with it mislabels every CLS "
+              "prediction. Delete it.", file=sys.stderr)
+    return len(offenders)
 
 
 def main() -> int:
@@ -64,11 +95,19 @@ def main() -> int:
         else:
             print(f"  ✓ {key}: {len(actual)} labels")
 
-    if failures:
-        print(f"\n{failures} mismatch(es). Update one side to match the other.",
-              file=sys.stderr)
+    stale = check_no_stale_vocabs()
+    if not stale:
+        print(f"  ✓ no label_vocabs.json in {STUDENT_GLOB} directories")
+
+    if failures or stale:
+        if failures:
+            print(f"\n{failures} mismatch(es). "
+                  "Update one side to match the other.", file=sys.stderr)
+        if stale:
+            print(f"{stale} stale vocabulary file(s).", file=sys.stderr)
         return 1
-    print(f"\nAll 5 label sets in {path.name} match student_loader.py.")
+    print(f"\nAll 5 label sets in {path.name} match student_loader.py, "
+          "and no stale vocabulary files are present.")
     return 0
 
 
