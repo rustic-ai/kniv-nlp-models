@@ -407,15 +407,20 @@ def cmd_sweep(a) -> int:
     SWEEP_DIR.mkdir(parents=True, exist_ok=True)
     results_f = SWEEP_DIR / f"{spec.name}.json"
     results = json.loads(results_f.read_text()) if results_f.exists() else {}
-    prepare(sess, token=bool(a.hf_repo))
     sha = sh(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"], quiet=True).stdout.strip()
-    rc = 0
+    todo = [lr for lr in lrs if a.rerun or results.get(
+        f"{spec.name}-lr{lr:g}", {}).get("state") != "done"]
+    for lr in lrs:
+        if lr not in todo:
+            print(f"{spec.name}-lr{lr:g}: already done, skipping (--rerun to repeat)")
+    if todo:
+        prepare(sess, token=bool(a.hf_repo))
+    rc, retries = 0, a.retries
     try:
-        for lr in lrs:
+        queue = list(todo)
+        while queue:
+            lr = queue.pop(0)
             name = f"{spec.name}-lr{lr:g}"
-            if results.get(name, {}).get("state") == "done" and not a.rerun:
-                print(f"{name}: already done, skipping (--rerun to repeat)")
-                continue
             out = f"{VM_RUNS}/{name}"
             argv = ["--encoder", spec.name, "--run-name", name, "--out", out,
                     "--encoder-lr", f"{lr:g}", "--max-steps", str(a.steps),
@@ -427,15 +432,38 @@ def cmd_sweep(a) -> int:
                 results[name] = {"lr": lr, "state": "failed to start", "sha": sha}
                 rc = 1
                 continue
-            st = None
+            st, lost = None, False
             while True:
                 time.sleep(60)
                 st = _vm_status(sess, out) or st
                 if st and st["state"] in TERMINAL:
                     break
+                # Colab reclaims VMs server-side without warning: on the first
+                # sweep two of three A100s vanished 25 minutes in. Notice within
+                # a poll rather than waiting out a stale heartbeat.
+                if sess not in colab("sessions", check=False, quiet=True).stdout:
+                    lost = True
+                    break
                 if st and time.time() - st["heartbeat"] > STALE_MINUTES * 60:
                     print(f"{name}: STALE heartbeat; abandoning this rate")
                     break
+            if lost:
+                print(f"{name}: VM {sess} was reclaimed at step "
+                      f"{(st or {}).get('step', '?')}", flush=True)
+                if retries > 0:
+                    retries -= 1
+                    print(f"  allocating a fresh VM and retrying this rate "
+                          f"({a.retries - retries}/{a.retries})", flush=True)
+                    colab("stop", "-s", sess, check=False, quiet=True)
+                    prepare(sess, token=bool(a.hf_repo))
+                    queue.insert(0, lr)
+                    continue
+                results[name] = {"lr": lr, "sha": sha, "state": "vm lost",
+                                 "steps": (st or {}).get("step")}
+                results_f.write_text(json.dumps(results, indent=1))
+                print(f"  no retries left; stopping this sweep", flush=True)
+                rc = 1
+                break
             ev = (st or {}).get("last_eval") or {}
             results[name] = {
                 "lr": lr, "sha": sha, "state": (st or {}).get("state"),
@@ -725,6 +753,8 @@ def main() -> int:
     s.add_argument("--session")
     s.add_argument("--keep", action="store_true", help="do not release the VM at the end")
     s.add_argument("--rerun", action="store_true", help="repeat rates already done")
+    s.add_argument("--retries", type=int, default=2,
+                   help="fresh VMs to allocate if Colab reclaims the current one")
     s.add_argument("extra", nargs=argparse.REMAINDER, help="passed to v6.train.loop, after --")
     w = sub.add_parser("watch")
     w.add_argument("runs", nargs="*", help="run names (default: the three encoders)")
