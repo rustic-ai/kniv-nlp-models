@@ -6,9 +6,11 @@
     uv run python -m v6.train.colab watch                          # report changes until done
     uv run python -m v6.train.colab stop   --run-name ettin-1b --release
 
-Run this yourself: it allocates billable VMs, and it copies your local
-HuggingFace token to each VM (as a 0600 file) so checkpoints can be pushed to
-the private repo. The token never appears in a command line or a log.
+It allocates billable VMs. A run that mirrors to the hub (the default for
+``launch``) has your local HuggingFace token copied to its VM as a 0600 file,
+so checkpoints can be pushed to the private repo; the token never appears in a
+command line or a log. ``probe``, and ``launch --hf-repo ''``, copy no token:
+the models are public.
 
 What it does, per encoder (TRAINING.md §7 says why each step is this way):
 
@@ -153,10 +155,12 @@ import torch
 name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none"
 if "A100" not in name:
     raise SystemExit(f"expected an A100, got {{name}}")
-os.chmod("/content/.hf_token", 0o600)
-os.environ["HF_TOKEN"] = open("/content/.hf_token").read().strip()
-from huggingface_hub import whoami
-user = whoami()["name"]
+user = None
+if os.path.exists("/content/.hf_token"):        # only when the run mirrors to the hub
+    os.chmod("/content/.hf_token", 0o600)
+    os.environ["HF_TOKEN"] = open("/content/.hf_token").read().strip()
+    from huggingface_hub import whoami
+    user = whoami()["name"]
 print(json.dumps({{"gpu": name, "gpu_gb": round(torch.cuda.get_device_properties(0).total_memory / 2**30, 1),
                   "torch": torch.__version__, "hf_user": user}}))
 '''
@@ -165,7 +169,8 @@ START = r'''
 import os, sys, runpy, threading
 os.chdir("{repo}")
 sys.path.insert(0, "{repo}")
-os.environ["HF_TOKEN"] = open("/content/.hf_token").read().strip()
+if os.path.exists("/content/.hf_token"):
+    os.environ["HF_TOKEN"] = open("/content/.hf_token").read().strip()
 os.makedirs("{out}", exist_ok=True)
 
 class _Tee:
@@ -208,7 +213,9 @@ def _upload_token(sess: str) -> None:
         os.unlink(path)
 
 
-def prepare(sess: str) -> str:
+def prepare(sess: str, token: bool) -> str:
+    """Bundle, allocate, upload, set up. ``token``: copy the local HF token
+    to the VM -- only for a run that mirrors to the hub; models are public."""
     code, data, sha = build_bundles()
     existing = colab("sessions", check=False, quiet=True).stdout
     if sess not in existing:
@@ -216,7 +223,8 @@ def prepare(sess: str) -> str:
         colab("new", "-s", sess, "--gpu", "A100")
     for b in (code, data):
         colab("upload", "-s", sess, str(b), f"/content/{b.name}", quiet=True)
-    _upload_token(sess)
+    if token:
+        _upload_token(sess)
     print("setting up the VM (pip, GPU check, HF auth)...")
     vm_exec(sess, SETUP.format(repo=VM_REPO, code=f"/content/{code.name}",
                                data=f"/content/{data.name}", pip=PIP), timeout=900)
@@ -250,7 +258,7 @@ def _record(name: str, a, **more) -> dict:
 def cmd_launch(a) -> int:
     spec, name = encoders.get(a.encoder), run_name(a)
     _record(name, a, launched_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
-    sess = prepare(a.session or session(name))
+    sess = prepare(a.session or session(name), token=bool(a.hf_repo))
     out = f"{VM_RUNS}/{name}"
     argv = ["--encoder", spec.name, "--run-name", name, "--out", out, *a.extra]
     if a.hf_repo:
@@ -268,7 +276,7 @@ def cmd_probe(a) -> int:
     """The A100 fit check, run synchronously: batch size, gradient
     checkpointing and bf16 are measured, not assumed."""
     spec, name = encoders.get(a.encoder), run_name(a)
-    sess = prepare(a.session or session(name))
+    sess = prepare(a.session or session(name), token=False)
     out = f"{VM_RUNS}/{name}-probe"
     argv = ["--encoder", spec.name, "--out", out, "--probe", str(a.steps), *a.extra]
     code = START.format(repo=VM_REPO, out=out, argv=argv)
