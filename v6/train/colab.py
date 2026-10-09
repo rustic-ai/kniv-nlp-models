@@ -47,7 +47,9 @@ the hub shows the run stopped -- which the loop writes only after
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import os
 import shlex
 import subprocess
@@ -93,15 +95,56 @@ def sh(cmd: list[str], check: bool = True, timeout: float | None = None,
               "[colab] To silence this check")
     noise = [l for l in r.stderr.splitlines() if l.strip() and not l.startswith(notice)]
     if not quiet and r.stdout.strip():
-        print(r.stdout.rstrip())
+        print(redact(r.stdout.rstrip()))
     if r.returncode and check:
-        print("\n".join(noise), file=sys.stderr)
+        # The CLI reports some failures on stdout, so show both streams.
+        print(redact("\n".join(noise + r.stdout.strip().splitlines())), file=sys.stderr)
         raise SystemExit(f"failed ({r.returncode}): {' '.join(cmd[:4])} ...")
     return r
 
 
+def redact(text: str) -> str:
+    """Colab error URLs carry a runtime proxy token; never print one."""
+    return re.sub(r"(token=)[A-Za-z0-9._-]+", r"\1<redacted>", text)
+
+
 def colab(*args: str, **kw) -> subprocess.CompletedProcess:
     return sh(["colab", *args], **kw)
+
+
+CHUNK = 16 << 20     # the VM's file API rejects a 96 MB upload with a 500
+
+
+def upload_big(sess: str, local: Path, remote: str) -> None:
+    """Upload in chunks of at most ``CHUNK`` and reassemble on the VM,
+    checking the SHA-256 against the local file."""
+    size = local.stat().st_size
+    if size <= CHUNK:
+        upload(sess, str(local), remote)
+        return
+    digest = hashlib.sha256(local.read_bytes()).hexdigest()
+    parts = []
+    with tempfile.TemporaryDirectory() as d, local.open("rb") as fh:
+        i = 0
+        while chunk := fh.read(CHUNK):
+            part = Path(d) / f"{local.name}.part{i:03d}"
+            part.write_bytes(chunk)
+            upload(sess, str(part), f"{remote}.part{i:03d}")
+            parts.append(f"{remote}.part{i:03d}")
+            i += 1
+    print(f"  {local.name}: {len(parts)} chunks uploaded; reassembling on the VM")
+    vm_exec(sess, f"""
+import hashlib, os
+parts = {parts!r}
+h = hashlib.sha256()
+with open({remote!r}, "wb") as out:
+    for p in parts:
+        b = open(p, "rb").read(); h.update(b); out.write(b); os.remove(p)
+if h.hexdigest() != {digest!r}:
+    os.remove({remote!r})
+    raise SystemExit("reassembled {local.name} does not match its SHA-256")
+print("reassembled {local.name}: sha256 ok")
+""", timeout=600)
 
 
 def upload(sess: str, local: str, remote: str, attempts: int = 4) -> None:
@@ -236,7 +279,7 @@ def prepare(sess: str, token: bool) -> str:
         print(f"allocating {sess} (A100)...")
         colab("new", "-s", sess, "--gpu", "A100")
     for b in (code, data):
-        upload(sess, str(b), f"/content/{b.name}")
+        upload_big(sess, b, f"/content/{b.name}")
     if token:
         _upload_token(sess)
     print("setting up the VM (pip, GPU check, HF auth)...")
