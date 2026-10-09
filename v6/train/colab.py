@@ -560,10 +560,14 @@ def cmd_sweep(a) -> int:
                     lost = True
                     break
                 if st and time.time() - st["heartbeat"] > STALE_MINUTES * 60:
-                    print(f"{name}: STALE heartbeat; abandoning this rate")
+                    # A VM can stop answering while Colab still lists it: one
+                    # DeBERTa check went silent at step 560 and stayed listed
+                    # for 15 minutes. Dead is dead; recover it the same way.
+                    print(f"{name}: STALE heartbeat (VM unreachable or run hung)", flush=True)
+                    lost = True
                     break
             if lost:
-                print(f"{name}: VM {sess} was reclaimed at step "
+                print(f"{name}: VM {sess} was lost at step "
                       f"{(st or {}).get('step', '?')}", flush=True)
                 if retries > 0:
                     retries -= 1
