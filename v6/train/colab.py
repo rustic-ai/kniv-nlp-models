@@ -312,17 +312,44 @@ def prepare(sess: str, token: bool) -> str:
     return sess
 
 
-def start(sess: str, out: str, argv: list[str]) -> None:
+def start(sess: str, out: str, argv: list[str], wait_minutes: float = 25) -> bool:
+    """Start the loop in the kernel and confirm it is training.
+
+    ``colab status`` is no evidence either way: it reports the CLI's own
+    bookkeeping, and showed IDLE while the kernel trained. The evidence is the
+    run itself -- a ``status.json`` written after this launch, in state
+    training. Featurising takes ~9 minutes on a fresh VM, hence the wait.
+    """
     print(f"starting in-kernel: python -m v6.train.loop {shlex.join(argv)}")
+    t0 = time.time()
     # The client times out; the kernel keeps running the cell.
-    vm_exec(sess, START.format(repo=VM_REPO, out=out, argv=argv, RUN_MARKER=RUN_MARKER), timeout=90,
-            check=False)
-    st = colab("status", "-s", sess, check=False, quiet=True).stdout
-    busy = "BUSY" in st.upper()
-    print(f"kernel {'BUSY: training is running' if busy else 'NOT BUSY'}")
-    if not busy:
-        print(f"check {out}/train.log on the VM:  "
-              f"colab download -s {sess} {out}/train.log ./train.log")
+    vm_exec(sess, START.format(repo=VM_REPO, out=out, argv=argv, RUN_MARKER=RUN_MARKER),
+            timeout=90, check=False)
+    with tempfile.TemporaryDirectory() as d:
+        while time.time() - t0 < wait_minutes * 60:
+            r = colab("download", "-s", sess, f"{out}/status.json", f"{d}/s.json",
+                      check=False, quiet=True)
+            if r.returncode == 0:
+                st = json.loads(Path(f"{d}/s.json").read_text())
+                if st.get("started_at", 0) >= t0 - 60 and st.get("state") in (
+                        "training", "evaluating"):
+                    print(f"running: step {st['step']}/{st['total_steps']}, "
+                          f"heartbeat {time.time() - st['heartbeat']:.0f}s ago")
+                    return True
+            r = colab("download", "-s", sess, f"{out}/train.log", f"{d}/t.log",
+                      check=False, quiet=True)
+            if r.returncode == 0:
+                lines = Path(f"{d}/t.log").read_text().splitlines()
+                starts = [i for i, l in enumerate(lines) if l.startswith(RUN_MARKER)]
+                mine = lines[starts[-1]:] if starts else []
+                if any(l.startswith("loop exited") for l in mine):
+                    print("the loop exited before training; last lines of train.log:")
+                    print(redact("\n".join(mine[-15:])))
+                    return False
+            time.sleep(30)
+    print(f"no heartbeat within {wait_minutes} minutes; inspect train.log:\n"
+          f"  colab download -s {sess} {out}/train.log ./train.log")
+    return False
 
 
 # ── commands ────────────────────────────────────────────────────────
@@ -346,7 +373,8 @@ def cmd_launch(a) -> int:
         argv += ["--hf-repo", a.hf_repo]
     else:
         print("WARNING: no --hf-repo; checkpoints die with the VM")
-    start(sess, out, argv)
+    if not start(sess, out, argv):
+        return 1
     print(f"watch:  uv run python -m v6.train.colab status --run-name {name}"
           + (f" --session {a.session}" if a.session else "")
           + (f" --hf-repo {a.hf_repo}" if a.hf_repo else ""))
