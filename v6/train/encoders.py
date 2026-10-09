@@ -45,7 +45,8 @@ class EncoderSpec:
 
 # Effective batch is 32 windows (~11k words) for every encoder, so the three
 # runs take the same number of optimiser steps over the same data. Per-device
-# batch is an unmeasured guess until the A100 fit check (`loop --probe`).
+# batch is measured: on an A100-40GB the worst-case windows peak at 9.1 GB
+# (DeBERTa), 9.7 GB (Ettin-400M) and 20.0 GB (Ettin-1B) -- OPERATIONS.md §1.
 ENCODERS: dict[str, EncoderSpec] = {s.name: s for s in [
     EncoderSpec("deberta-v3-large", "microsoft/deberta-v3-large",
                 max_subwords=512, encoder_lr=8e-5),
