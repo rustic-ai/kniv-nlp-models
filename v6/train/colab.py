@@ -236,6 +236,11 @@ os.makedirs("{out}", exist_ok=True)
 # sys.stderr during a run. The tee is therefore created once per kernel and
 # only its target file changes: a handler holding it writes to the current
 # run's train.log, never to a closed file from an earlier one.
+# Output goes to the KERNEL's stream, not the process's raw stdout. A
+# training cell that writes only to raw stdout emits no kernel messages, and
+# Colab reclaimed such VMs about 20 minutes into a run with no client
+# attached -- three times in one sweep -- while VMs whose launcher reconnected
+# every few minutes survived.
 if "_KNIV_TEE" not in globals():
     class _Tee:
         """Copy output to the current train.log. Anything else -- isatty,
@@ -250,13 +255,24 @@ if "_KNIV_TEE" not in globals():
             self.base.flush()
             if self.log is not None: self.log.flush()
         def __getattr__(self, name): return getattr(self.base, name)
-    _KNIV_TEE = (_Tee(sys.__stdout__), _Tee(sys.__stderr__))
+    _KNIV_TEE = (_Tee(sys.stdout), _Tee(sys.stderr))
 
 _log = open("{out}/train.log", "a", buffering=1)
 for _t in _KNIV_TEE:
     _t.log = _log
 _prev = (sys.stdout, sys.stderr)     # the kernel's own streams, to restore
 sys.stdout, sys.stderr = _KNIV_TEE
+
+# Featurising and evaluation can be silent for minutes; a keepalive line to
+# the kernel stream (not train.log) every 5 minutes covers them.
+import threading as _threading
+_alive = _threading.Event()
+def _keepalive():
+    import time as _t
+    while not _alive.wait(300):
+        _KNIV_TEE[0].base.write(f"[kniv keepalive {{_t.strftime('%H:%M:%S')}}]\n")
+        _KNIV_TEE[0].base.flush()
+_threading.Thread(target=_keepalive, daemon=True).start()
 # The kernel caches imports. Without this, a run after a code upload imports
 # the previous run's v6 modules -- on the A100 it ran a new loop.py against
 # an old model.py.
@@ -270,6 +286,7 @@ try:
 except SystemExit as e:
     print(f"loop exited: {{e.code}}")
 finally:
+    _alive.set()
     # Restore the kernel's streams, not the process's raw stdout, or every
     # later cell's output disappears.
     sys.stdout, sys.stderr = _prev
