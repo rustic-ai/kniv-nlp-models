@@ -222,6 +222,8 @@ print(json.dumps({{"gpu": name, "gpu_gb": round(torch.cuda.get_device_properties
                   "torch": torch.__version__, "hf_user": user}}))
 '''
 
+RUN_MARKER = "=== kniv run start"
+
 START = r'''
 import os, sys, runpy, threading
 os.chdir("{repo}")
@@ -255,6 +257,13 @@ for _t in _KNIV_TEE:
     _t.log = _log
 _prev = (sys.stdout, sys.stderr)     # the kernel's own streams, to restore
 sys.stdout, sys.stderr = _KNIV_TEE
+# The kernel caches imports. Without this, a run after a code upload imports
+# the previous run's v6 modules -- on the A100 it ran a new loop.py against
+# an old model.py.
+for _m in [m for m in sys.modules if m == "v6" or m.startswith("v6.")]:
+    del sys.modules[_m]
+import time as _time
+print(f"{RUN_MARKER} {{_time.strftime('%Y-%m-%dT%H:%M:%S')}} {argv}")
 sys.argv = ["v6.train.loop", *{argv}]
 try:
     runpy.run_module("v6.train.loop", run_name="__main__", alter_sys=True)
@@ -306,7 +315,7 @@ def prepare(sess: str, token: bool) -> str:
 def start(sess: str, out: str, argv: list[str]) -> None:
     print(f"starting in-kernel: python -m v6.train.loop {shlex.join(argv)}")
     # The client times out; the kernel keeps running the cell.
-    vm_exec(sess, START.format(repo=VM_REPO, out=out, argv=argv), timeout=90,
+    vm_exec(sess, START.format(repo=VM_REPO, out=out, argv=argv, RUN_MARKER=RUN_MARKER), timeout=90,
             check=False)
     st = colab("status", "-s", sess, check=False, quiet=True).stdout
     busy = "BUSY" in st.upper()
@@ -351,11 +360,14 @@ def cmd_probe(a) -> int:
     sess = prepare(a.session or session(name), token=False)
     out = f"{VM_RUNS}/{name}-probe"
     argv = ["--encoder", spec.name, "--out", out, "--probe", str(a.steps), *a.extra]
-    code = START.format(repo=VM_REPO, out=out, argv=argv)
+    code = START.format(repo=VM_REPO, out=out, argv=argv, RUN_MARKER=RUN_MARKER)
     vm_exec(sess, code, timeout=3600)
     with tempfile.TemporaryDirectory() as d:
         colab("download", "-s", sess, f"{out}/train.log", f"{d}/train.log", quiet=True)
         lines = Path(f"{d}/train.log").read_text().splitlines()
+    # train.log is appended across runs; report only the latest.
+    starts = [i for i, l in enumerate(lines) if l.startswith(RUN_MARKER)]
+    lines = lines[starts[-1]:] if starts else lines
     for l in lines:
         if "probe step" in l or l.startswith("PROBE") or "Error" in l:
             print(l)
