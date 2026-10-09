@@ -56,11 +56,18 @@ ACT_TO_CLS: dict[str, tuple[str, ...]] = {
     # Inform ("No, it was Wednesday." -> Inform), not Commissive.
     "AFFIRM": ("Inform",),
     "NEGATE": ("Inform",),
+    # SELECT accepts an OFFERED ENTITY -- "Yes, that works for me." after an
+    # OFFER of a restaurant. It is the user side of OFFER and gets the same
+    # treatment: choosing an option commits the speaker to no action, so it is
+    # Inform, as CLS_TAXONOMY.md now rules explicitly. MultiWOZ's independent
+    # gold agrees (acceptance-shaped user turns are Inform, never a
+    # commitment). Mapped to Commissive, SELECT alone held Commissive recall
+    # at 0.180 (n=3,814, recall 0.017).
+    "SELECT": ("Inform",),
     # The speaker commits to act, or accepts/declines a proposed action.
     "OFFER_INTENT": ("Commissive",),     # "shall i reserve a table for you?"
     "AFFIRM_INTENT": ("Commissive",),    # "Yes, please do so."
     "NEGATE_INTENT": ("Commissive",),
-    "SELECT": ("Commissive",),           # "Yes, that works for me."
     # Stating one's own goal both provides information and pushes the
     # addressee to act on it.
     "INFORM_INTENT": ("Inform", "Directive"),
