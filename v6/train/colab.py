@@ -329,6 +329,59 @@ def prepare(sess: str, token: bool) -> str:
     return sess
 
 
+HOLDERS = RUNS_DIR / "colab-holders"
+HOLDER_CODE = 'print("kniv holder: the training cell has finished")\n'
+
+
+def _holder_alive(sess: str) -> bool:
+    f = HOLDERS / f"{sess}.pid"
+    if not f.exists():
+        return False
+    try:
+        os.kill(int(f.read_text()), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def ensure_holder(sess: str) -> bool:
+    """Keep a client attached to the kernel for as long as the run cell runs.
+
+    Colab reclaims a VM once no client has been attached for ~20 minutes,
+    however busy its kernel: on the first sweep, six VMs died 22-26 minutes
+    into a run with no client attached, kernel output notwithstanding, while
+    a VM with one attached ran on. A holder is a ``colab exec`` of a trivial
+    cell with a long timeout: it queues behind the training cell, so its
+    connection stays open until training ends, then prints and exits.
+
+    It runs on this machine, so this machine must stay awake and online for
+    the run; ``watch`` re-attaches one if it drops. Returns True if one was
+    started.
+    """
+    if _holder_alive(sess):
+        return False
+    HOLDERS.mkdir(parents=True, exist_ok=True)
+    code = HOLDERS / "holder.py"
+    code.write_text(HOLDER_CODE)
+    log = (HOLDERS / f"{sess}.log").open("a")
+    proc = subprocess.Popen(["colab", "exec", "-s", sess, "-f", str(code),
+                             "--timeout", str(24 * 3600)],
+                            stdout=log, stderr=subprocess.STDOUT,
+                            start_new_session=True)     # survives this process
+    (HOLDERS / f"{sess}.pid").write_text(str(proc.pid))
+    return True
+
+
+def _kill_holder(sess: str) -> None:
+    f = HOLDERS / f"{sess}.pid"
+    if f.exists():
+        try:
+            os.kill(int(f.read_text()), 15)
+        except (OSError, ValueError):
+            pass
+        f.unlink()
+
+
 def start(sess: str, out: str, argv: list[str], wait_minutes: float = 25) -> bool:
     """Start the loop in the kernel and confirm it is training.
 
@@ -342,6 +395,10 @@ def start(sess: str, out: str, argv: list[str], wait_minutes: float = 25) -> boo
     # The client times out; the kernel keeps running the cell.
     vm_exec(sess, START.format(repo=VM_REPO, out=out, argv=argv, RUN_MARKER=RUN_MARKER),
             timeout=90, check=False)
+    # The training cell is now running; attach a holder before Colab's ~20
+    # minute no-client clock can run out.
+    _kill_holder(sess)           # one left from a previous run would not hold this one
+    ensure_holder(sess)
     with tempfile.TemporaryDirectory() as d:
         while time.time() - t0 < wait_minutes * 60:
             r = colab("download", "-s", sess, f"{out}/status.json", f"{d}/s.json",
@@ -455,6 +512,8 @@ def cmd_sweep(a) -> int:
                 st = _vm_status(sess, out) or st
                 if st and st["state"] in TERMINAL:
                     break
+                if st and st["state"] in ("training", "evaluating") and ensure_holder(sess):
+                    print(f"{name}: holder re-attached", flush=True)
                 # Colab reclaims VMs server-side without warning: on the first
                 # sweep two of three A100s vanished 25 minutes in. Notice within
                 # a poll rather than waiting out a stale heartbeat.
@@ -493,6 +552,7 @@ def cmd_sweep(a) -> int:
                   + " ".join(f"{k} {ev.get(k)}" for k in SWEEP_METRICS), flush=True)
     finally:
         if not a.keep:
+            _kill_holder(sess)
             colab("stop", "-s", sess, check=False)
             print(f"released {sess}")
     print(f"\n{spec.name} sweep ({a.steps} steps, dev {a.dev_limit} windows):")
@@ -694,6 +754,9 @@ def cmd_watch(a) -> int:
                 st["_stale"] = (now - st.get("heartbeat", 0)) / 60 > STALE_MINUTES
                 st["_alive"] = alive
                 prev[n] = st
+            if (st and st.get("state") in ("training", "evaluating") and alive
+                    and ensure_holder(sess)):
+                print(f"{stamp} {n}: holder re-attached", flush=True)
             if st and st.get("state") in TERMINAL:
                 print(f"{stamp} {n}: finished watching ({st['state']})", flush=True)
                 live.discard(n)
