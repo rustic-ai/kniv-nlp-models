@@ -98,11 +98,18 @@ class V6Model(nn.Module):
                  pretrained: bool = True):
         super().__init__()
         from transformers import AutoConfig, AutoModel
+        # fp32 master weights for every encoder; bf16 autocast does the
+        # compute. transformers 5 keeps a checkpoint's stored dtype by default,
+        # and DeBERTa-v3-large is stored as fp16 while Ettin is fp32: left to
+        # the default, DeBERTa trained fp16 weights with no fp32 copy, where
+        # AdamW updates at its learning rate are mostly lost to rounding -- a
+        # silent handicap in exactly the comparison these runs exist for.
         kw = {"attn_implementation": attn_implementation} if attn_implementation else {}
         if pretrained:
-            self.encoder = AutoModel.from_pretrained(hf_id, **kw)
+            self.encoder = AutoModel.from_pretrained(hf_id, dtype=torch.float32, **kw)
         else:
-            self.encoder = AutoModel.from_config(AutoConfig.from_pretrained(hf_id), **kw)
+            self.encoder = AutoModel.from_config(AutoConfig.from_pretrained(hf_id),
+                                                 dtype=torch.float32, **kw)
         H = self.encoder.config.hidden_size
         L = self.encoder.config.num_hidden_layers + 1
         self.sizes = dict(sizes)

@@ -253,6 +253,7 @@ if "_KNIV_TEE" not in globals():
 _log = open("{out}/train.log", "a", buffering=1)
 for _t in _KNIV_TEE:
     _t.log = _log
+_prev = (sys.stdout, sys.stderr)     # the kernel's own streams, to restore
 sys.stdout, sys.stderr = _KNIV_TEE
 sys.argv = ["v6.train.loop", *{argv}]
 try:
@@ -260,7 +261,9 @@ try:
 except SystemExit as e:
     print(f"loop exited: {{e.code}}")
 finally:
-    sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+    # Restore the kernel's streams, not the process's raw stdout, or every
+    # later cell's output disappears.
+    sys.stdout, sys.stderr = _prev
     for _t in _KNIV_TEE:
         _t.log = None
     _log.close()

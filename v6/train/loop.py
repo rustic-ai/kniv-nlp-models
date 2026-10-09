@@ -195,6 +195,9 @@ def main() -> int:
 
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
                     attn_implementation=spec.attn_implementation).to(device)
+    wrong = {str(p.dtype) for p in model.parameters()} - {"torch.float32"}
+    if wrong:
+        raise SystemExit(f"parameters must be fp32 master weights; found {wrong}")
     if spec.grad_checkpointing:
         model.encoder.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False})
