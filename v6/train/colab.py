@@ -514,14 +514,18 @@ def cmd_sweep(a) -> int:
     lrs = [float(x) for x in a.lrs.split(",")]
     sess = a.session or session(f"sweep-{spec.name}")
     SWEEP_DIR.mkdir(parents=True, exist_ok=True)
-    results_f = SWEEP_DIR / f"{spec.name}.json"
+    suffix = f"-{a.tag}" if a.tag else ""
+    results_f = SWEEP_DIR / f"{spec.name}{suffix}.json"
     results = json.loads(results_f.read_text()) if results_f.exists() else {}
     sha = sh(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"], quiet=True).stdout.strip()
+    def run_name_for(lr):
+        return f"{spec.name}-lr{lr:g}{suffix}"
+
     todo = [lr for lr in lrs if a.rerun or results.get(
-        f"{spec.name}-lr{lr:g}", {}).get("state") != "done"]
+        run_name_for(lr), {}).get("state") != "done"]
     for lr in lrs:
         if lr not in todo:
-            print(f"{spec.name}-lr{lr:g}: already done, skipping (--rerun to repeat)")
+            print(f"{run_name_for(lr)}: already done, skipping (--rerun to repeat)")
     if todo:
         prepare(sess, token=bool(a.hf_repo))
     rc, retries = 0, a.retries
@@ -529,7 +533,7 @@ def cmd_sweep(a) -> int:
         queue = list(todo)
         while queue:
             lr = queue.pop(0)
-            name = f"{spec.name}-lr{lr:g}"
+            name = run_name_for(lr)
             out = f"{VM_RUNS}/{name}"
             argv = ["--encoder", spec.name, "--run-name", name, "--out", out,
                     "--encoder-lr", f"{lr:g}", "--max-steps", str(a.steps),
@@ -590,7 +594,7 @@ def cmd_sweep(a) -> int:
             _kill_holder(sess)
             colab("stop", "-s", sess, check=False)
             print(f"released {sess}")
-    print(f"\n{spec.name} sweep ({a.steps} steps, dev {a.dev_limit} windows):")
+    print(f"\n{spec.name}{suffix} sweep ({a.steps} steps, dev {a.dev_limit} windows):")
     print(f"  {'lr':>8s} " + " ".join(f"{k:>12s}" for k in SWEEP_METRICS) + "  state")
     for name, r in sorted(results.items(), key=lambda kv: kv[1]["lr"]):
         ev = r.get("final_eval") or {}
@@ -868,6 +872,9 @@ def main() -> int:
     s.add_argument("--session")
     s.add_argument("--keep", action="store_true", help="do not release the VM at the end")
     s.add_argument("--rerun", action="store_true", help="repeat rates already done")
+    s.add_argument("--tag", default="",
+                   help="suffix for run names and the results file, e.g. s1000 for a "
+                        "longer-horizon check; without it, runs of the same rate collide")
     s.add_argument("--retries", type=int, default=2,
                    help="fresh VMs to allocate if Colab reclaims the current one")
     s.add_argument("extra", nargs=argparse.REMAINDER, help="passed to v6.train.loop, after --")
