@@ -230,20 +230,30 @@ if os.path.exists("/content/.hf_token"):
     os.environ["HF_TOKEN"] = open("/content/.hf_token").read().strip()
 os.makedirs("{out}", exist_ok=True)
 
-class _Tee:
-    """Copy output to train.log. Anything else -- isatty, fileno, encoding,
-    which transformers and tqdm query -- answers as the real stream does."""
-    def __init__(self, *s): self.s = s
-    def write(self, x):
-        for f in self.s: f.write(x); f.flush()
-        return len(x)
-    def flush(self):
-        for f in self.s: f.flush()
-    def __getattr__(self, name): return getattr(self.s[0], name)
+# The kernel outlives each run, and so do logging handlers that captured
+# sys.stderr during a run. The tee is therefore created once per kernel and
+# only its target file changes: a handler holding it writes to the current
+# run's train.log, never to a closed file from an earlier one.
+if "_KNIV_TEE" not in globals():
+    class _Tee:
+        """Copy output to the current train.log. Anything else -- isatty,
+        fileno, encoding -- answers as the real stream does."""
+        def __init__(self, base): self.base, self.log = base, None
+        def write(self, x):
+            self.base.write(x)
+            if self.log is not None:
+                self.log.write(x); self.log.flush()
+            return len(x)
+        def flush(self):
+            self.base.flush()
+            if self.log is not None: self.log.flush()
+        def __getattr__(self, name): return getattr(self.base, name)
+    _KNIV_TEE = (_Tee(sys.__stdout__), _Tee(sys.__stderr__))
 
 _log = open("{out}/train.log", "a", buffering=1)
-sys.stdout = _Tee(sys.__stdout__, _log)
-sys.stderr = _Tee(sys.__stderr__, _log)
+for _t in _KNIV_TEE:
+    _t.log = _log
+sys.stdout, sys.stderr = _KNIV_TEE
 sys.argv = ["v6.train.loop", *{argv}]
 try:
     runpy.run_module("v6.train.loop", run_name="__main__", alter_sys=True)
@@ -251,6 +261,8 @@ except SystemExit as e:
     print(f"loop exited: {{e.code}}")
 finally:
     sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+    for _t in _KNIV_TEE:
+        _t.log = None
     _log.close()
 '''
 
