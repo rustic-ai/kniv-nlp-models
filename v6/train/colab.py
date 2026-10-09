@@ -87,8 +87,11 @@ def sh(cmd: list[str], check: bool = True, timeout: float | None = None,
     """Run a command and surface its stderr. Several wrong conclusions this
     cycle came from commands whose failure output was discarded."""
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    noise = [l for l in r.stderr.splitlines() if not l.startswith("[colab] A new version")
-             and "update" not in l.lower() and "enable_update_check" not in l]
+    # Drop only the CLI's own version notice; anything else may be the error.
+    notice = ("[colab] A new version", "[colab] Run 'colab update'",
+              "[colab] Run 'uv tool install", "[colab] You can run 'colab update",
+              "[colab] To silence this check")
+    noise = [l for l in r.stderr.splitlines() if l.strip() and not l.startswith(notice)]
     if not quiet and r.stdout.strip():
         print(r.stdout.rstrip())
     if r.returncode and check:
@@ -99,6 +102,17 @@ def sh(cmd: list[str], check: bool = True, timeout: float | None = None,
 
 def colab(*args: str, **kw) -> subprocess.CompletedProcess:
     return sh(["colab", *args], **kw)
+
+
+def upload(sess: str, local: str, remote: str, attempts: int = 4) -> None:
+    """Upload with retries: the first upload to a freshly created session can
+    fail while the VM's file API is still coming up."""
+    for i in range(attempts):
+        r = colab("upload", "-s", sess, local, remote, check=False, quiet=True)
+        if r.returncode == 0:
+            return
+        time.sleep(15 * (i + 1))
+    colab("upload", "-s", sess, local, remote, quiet=True)   # last try raises
 
 
 def vm_exec(sess: str, code: str, timeout: float = 600, check: bool = True):
@@ -208,7 +222,7 @@ def _upload_token(sess: str) -> None:
         os.fchmod(fd, 0o600)
         os.write(fd, token.encode())
         os.close(fd)
-        colab("upload", "-s", sess, path, "/content/.hf_token", quiet=True)
+        upload(sess, path, "/content/.hf_token")
     finally:
         os.unlink(path)
 
@@ -222,7 +236,7 @@ def prepare(sess: str, token: bool) -> str:
         print(f"allocating {sess} (A100)...")
         colab("new", "-s", sess, "--gpu", "A100")
     for b in (code, data):
-        colab("upload", "-s", sess, str(b), f"/content/{b.name}", quiet=True)
+        upload(sess, str(b), f"/content/{b.name}")
     if token:
         _upload_token(sess)
     print("setting up the VM (pip, GPU check, HF auth)...")
@@ -345,7 +359,7 @@ def _put_flag(sess: str, name: str, flag: str, text: str) -> None:
     with tempfile.NamedTemporaryFile("w", delete=False) as f:
         f.write(text)
     try:
-        colab("upload", "-s", sess, f.name, f"{VM_RUNS}/{name}/{flag}", quiet=True)
+        upload(sess, f.name, f"{VM_RUNS}/{name}/{flag}")
     finally:
         os.unlink(f.name)
 
