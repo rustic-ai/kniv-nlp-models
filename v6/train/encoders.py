@@ -11,9 +11,13 @@ Ettin takes ~8k and sees whole windows. Scoring is on sentence-level public
 gold, so that difference does not tilt the evaluation -- it is the
 deployment difference being measured.
 
-Learning rates are starting points, not tuned values. ModernBERT-family
-encoders usually want a higher rate than DeBERTa, so one shared rate would be
-unfair to one side; the smoke runs sweep each before the full runs.
+Learning rates are chosen per encoder from a sweep (OPERATIONS.md §4.2, §7):
+400-step runs at doubling rates, then 1,000-step runs at the two best. At both
+horizons the higher of each pair won, but the margin shrank about 2.5x when
+the horizon grew 2.5x -- a short schedule that decays to zero rewards high
+rates -- so for a full 3,096-step run each encoder takes the 1,000-step winner
+(DeBERTa, whose margin was largest) or the geometric mean of the pair (Ettin,
+whose margins had nearly closed).
 
 The ``-xsmall`` / ``-17m`` siblings share their family's tokenizer and
 architecture and exist so the whole pipeline runs on a laptop.
@@ -44,11 +48,11 @@ class EncoderSpec:
 # batch is an unmeasured guess until the A100 fit check (`loop --probe`).
 ENCODERS: dict[str, EncoderSpec] = {s.name: s for s in [
     EncoderSpec("deberta-v3-large", "microsoft/deberta-v3-large",
-                max_subwords=512, encoder_lr=2e-5),
+                max_subwords=512, encoder_lr=8e-5),
     EncoderSpec("ettin-400m", "jhu-clsp/ettin-encoder-400m",
-                max_subwords=1024, encoder_lr=5e-5),
+                max_subwords=1024, encoder_lr=2.8e-4),
     EncoderSpec("ettin-1b", "jhu-clsp/ettin-encoder-1b",
-                max_subwords=1024, encoder_lr=3e-5,
+                max_subwords=1024, encoder_lr=1.7e-4,
                 batch_size=4, grad_accum=8),
     # Local siblings: same tokenizer and architecture, laptop-sized.
     EncoderSpec("deberta-v3-xsmall", "microsoft/deberta-v3-xsmall",
