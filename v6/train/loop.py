@@ -133,6 +133,8 @@ def main() -> int:
     ap.add_argument("--head-lr", type=float)
     ap.add_argument("--batch-size", type=int)
     ap.add_argument("--grad-accum", type=int)
+    ap.add_argument("--grad-checkpointing", choices=["on", "off"],
+                    help="override the encoder's default")
     ap.add_argument("--warmup", type=float, default=0.06)
     ap.add_argument("--weight-decay", type=float, default=0.01)
     ap.add_argument("--calib-steps", type=int, default=50)
@@ -150,7 +152,9 @@ def main() -> int:
     spec = encoders.get(args.encoder)
     over = {k: v for k, v in (("encoder_lr", args.encoder_lr), ("head_lr", args.head_lr),
                               ("batch_size", args.batch_size),
-                              ("grad_accum", args.grad_accum)) if v is not None}
+                              ("grad_accum", args.grad_accum),
+                              ("grad_checkpointing", None if args.grad_checkpointing is None
+                               else args.grad_checkpointing == "on")) if v is not None}
     spec = dataclasses.replace(spec, **over)
     run_name = args.run_name or spec.name
     out = args.out or RUNS_DIR / "train" / run_name

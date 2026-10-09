@@ -152,11 +152,15 @@ os.environ["HF_TOKEN"] = open("/content/.hf_token").read().strip()
 os.makedirs("{out}", exist_ok=True)
 
 class _Tee:
+    """Copy output to train.log. Anything else -- isatty, fileno, encoding,
+    which transformers and tqdm query -- answers as the real stream does."""
     def __init__(self, *s): self.s = s
     def write(self, x):
         for f in self.s: f.write(x); f.flush()
+        return len(x)
     def flush(self):
         for f in self.s: f.flush()
+    def __getattr__(self, name): return getattr(self.s[0], name)
 
 _log = open("{out}/train.log", "a", buffering=1)
 sys.stdout = _Tee(sys.__stdout__, _log)

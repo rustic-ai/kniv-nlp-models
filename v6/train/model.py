@@ -7,7 +7,13 @@ trained from a phase-1 checkpoint (TRAINING.md §4, §8).
 Shapes follow v5's conventions, reimplemented rather than imported:
 
 - a **ScalarMix** per head over every encoder layer, so a head that wants
-  surface form and one that wants semantics need not share a layer;
+  surface form and one that wants semantics need not share a layer. Each
+  layer is layer-normalised before mixing: Ettin's residual stream is not
+  normalised between layers (hidden-state RMS rises to 166 in Ettin-400M and
+  17 in Ettin-1B, against ~1 throughout DeBERTa), so an unnormalised mix is
+  dominated by the loudest layers whatever its weights say, and the heads
+  start from losses of 9-11 where ln(classes) is 3-6. The same treatment is
+  a no-op for DeBERTa, so it does not tilt the comparison;
 - a word is its **first subword**, and every head works at word level;
 - the **cascade** feeds detached POS probabilities into NER and POS + NER
   into DEP, so heads train independently but read upstream predictions;
@@ -160,7 +166,7 @@ class V6Model(nn.Module):
         out = self.encoder(input_ids=batch["input_ids"],
                            attention_mask=batch["attention_mask"],
                            output_hidden_states=True)
-        layers = out.hidden_states
+        layers = tuple(F.layer_norm(h, h.shape[-1:]) for h in out.hidden_states)
         first, wm = batch["first_subword"], batch["word_mask"]
         o = {}
         o["pos"] = self.pos(self._words(layers, "pos", first))
