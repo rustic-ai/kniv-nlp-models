@@ -433,6 +433,9 @@ def start(sess: str, out: str, argv: list[str], wait_minutes: float = 25) -> boo
     ensure_holder(sess, out)
     with tempfile.TemporaryDirectory() as d:
         while time.time() - t0 < wait_minutes * 60:
+            if sess not in colab("sessions", check=False, quiet=True, timeout=120).stdout:
+                print(f"the VM {sess} disappeared before the run reported in")
+                return False
             r = colab("download", "-s", sess, f"{out}/status.json", f"{d}/s.json",
                       check=False, quiet=True)
             if r.returncode == 0:
