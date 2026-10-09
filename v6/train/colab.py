@@ -381,6 +381,84 @@ def cmd_launch(a) -> int:
     return 0
 
 
+SWEEP_DIR = RUNS_DIR / "sweeps"
+SWEEP_METRICS = ("composite", "pos", "las", "ner_f1", "srl_role_f1", "cls_f1")
+
+
+def _vm_status(sess: str, out: str) -> dict | None:
+    with tempfile.TemporaryDirectory() as d:
+        r = colab("download", "-s", sess, f"{out}/status.json", f"{d}/s.json",
+                  check=False, quiet=True)
+        return json.loads(Path(f"{d}/s.json").read_text()) if r.returncode == 0 else None
+
+
+def cmd_sweep(a) -> int:
+    """Learning-rate sweep for one encoder on one VM (OPERATIONS.md §4.2).
+
+    Sets the VM up once, runs each rate under its own run name -- so no run
+    resumes another's weights -- waits for each to finish, records the dev
+    results in ``v6/runs/sweeps/<encoder>.json``, and releases the VM. No hub
+    mirror by default: a sweep run is short, its output is a score, and losing
+    one costs a rerun, not a checkpoint.
+    """
+    spec = encoders.get(a.encoder)
+    lrs = [float(x) for x in a.lrs.split(",")]
+    sess = a.session or session(f"sweep-{spec.name}")
+    SWEEP_DIR.mkdir(parents=True, exist_ok=True)
+    results_f = SWEEP_DIR / f"{spec.name}.json"
+    results = json.loads(results_f.read_text()) if results_f.exists() else {}
+    prepare(sess, token=bool(a.hf_repo))
+    sha = sh(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"], quiet=True).stdout.strip()
+    rc = 0
+    try:
+        for lr in lrs:
+            name = f"{spec.name}-lr{lr:g}"
+            if results.get(name, {}).get("state") == "done" and not a.rerun:
+                print(f"{name}: already done, skipping (--rerun to repeat)")
+                continue
+            out = f"{VM_RUNS}/{name}"
+            argv = ["--encoder", spec.name, "--run-name", name, "--out", out,
+                    "--encoder-lr", f"{lr:g}", "--max-steps", str(a.steps),
+                    "--eval-every", str(a.eval_every), "--dev-limit", str(a.dev_limit),
+                    "--log-every", "20", *a.extra]
+            if a.hf_repo:
+                argv += ["--hf-repo", a.hf_repo]
+            if not start(sess, out, argv):
+                results[name] = {"lr": lr, "state": "failed to start", "sha": sha}
+                rc = 1
+                continue
+            st = None
+            while True:
+                time.sleep(60)
+                st = _vm_status(sess, out) or st
+                if st and st["state"] in TERMINAL:
+                    break
+                if st and time.time() - st["heartbeat"] > STALE_MINUTES * 60:
+                    print(f"{name}: STALE heartbeat; abandoning this rate")
+                    break
+            ev = (st or {}).get("last_eval") or {}
+            results[name] = {
+                "lr": lr, "sha": sha, "state": (st or {}).get("state"),
+                "reason": (st or {}).get("reason"), "steps": (st or {}).get("step"),
+                "best": (st or {}).get("best"), "nonfinite_steps": (st or {}).get("nonfinite_steps"),
+                "final_head_loss": (st or {}).get("head_loss"),
+                "final_eval": ev}
+            results_f.write_text(json.dumps(results, indent=1))
+            print(f"{name}: {results[name]['state']} at step {results[name]['steps']}; "
+                  + " ".join(f"{k} {ev.get(k)}" for k in SWEEP_METRICS), flush=True)
+    finally:
+        if not a.keep:
+            colab("stop", "-s", sess, check=False)
+            print(f"released {sess}")
+    print(f"\n{spec.name} sweep ({a.steps} steps, dev {a.dev_limit} windows):")
+    print(f"  {'lr':>8s} " + " ".join(f"{k:>12s}" for k in SWEEP_METRICS) + "  state")
+    for name, r in sorted(results.items(), key=lambda kv: kv[1]["lr"]):
+        ev = r.get("final_eval") or {}
+        print(f"  {r['lr']:>8g} " + " ".join(f"{ev.get(k, float('nan')):>12.4f}" for k in SWEEP_METRICS)
+              + f"  {r['state']}" + (f" ({r['reason']})" if r.get("reason") else ""))
+    return rc
+
+
 def cmd_probe(a) -> int:
     """The A100 fit check, run synchronously: batch size, gradient
     checkpointing and bf16 are measured, not assumed."""
@@ -637,6 +715,17 @@ def main() -> int:
             p.add_argument("--release", action="store_true",
                            help="after the hub shows the run stopped, release the VM")
             p.add_argument("--timeout", type=float, default=30.0, help="minutes")
+    s = sub.add_parser("sweep")
+    s.add_argument("--encoder", required=True, choices=list(encoders.ENCODERS))
+    s.add_argument("--lrs", required=True, help="comma-separated encoder learning rates")
+    s.add_argument("--steps", type=int, default=400)
+    s.add_argument("--eval-every", type=int, default=100)
+    s.add_argument("--dev-limit", type=int, default=500)
+    s.add_argument("--hf-repo", default="", help="mirror sweep runs to the hub (off by default)")
+    s.add_argument("--session")
+    s.add_argument("--keep", action="store_true", help="do not release the VM at the end")
+    s.add_argument("--rerun", action="store_true", help="repeat rates already done")
+    s.add_argument("extra", nargs=argparse.REMAINDER, help="passed to v6.train.loop, after --")
     w = sub.add_parser("watch")
     w.add_argument("runs", nargs="*", help="run names (default: the three encoders)")
     w.add_argument("--hf-repo", default=HF_REPO)
@@ -656,7 +745,8 @@ def main() -> int:
     if getattr(a, "extra", None) and a.extra[:1] == ["--"]:
         a.extra = a.extra[1:]
     return {"launch": cmd_launch, "probe": cmd_probe, "status": cmd_status,
-            "stop": cmd_stop, "checkpoint": cmd_checkpoint, "watch": cmd_watch}[a.cmd](a)
+            "stop": cmd_stop, "checkpoint": cmd_checkpoint, "watch": cmd_watch,
+            "sweep": cmd_sweep}[a.cmd](a)
 
 
 if __name__ == "__main__":
