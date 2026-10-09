@@ -118,7 +118,27 @@ def redact(text: str) -> str:
     return re.sub(r"(token=)[A-Za-z0-9._-]+", r"\1<redacted>", text)
 
 
+_last_refresh = 0.0
+
+
+def refresh_tokens(force: bool = False) -> None:
+    """Renew the CLI's stored proxy tokens at most every ten minutes.
+
+    They expire an hour after a VM is allocated and the CLI never renews them;
+    after that every upload, download and exec fails while the VM trains on
+    (``colab_holder.refresh_tokens``).
+    """
+    global _last_refresh
+    if not force and time.time() - _last_refresh < 600:
+        return
+    _last_refresh = time.time()
+    sh([_cli_python(), str(HOLDER), "--refresh-tokens"], check=False, quiet=True,
+       timeout=120)
+
+
 def colab(*args: str, **kw) -> subprocess.CompletedProcess:
+    if args and args[0] in ("upload", "download", "exec", "ls"):
+        refresh_tokens()
     return sh(["colab", *args], **kw)
 
 
@@ -843,6 +863,15 @@ def cmd_watch(a) -> int:
     return 0
 
 
+def cmd_orphans(a) -> int:
+    """List VMs Colab has allocated that no local session tracks. Release one
+    from the Colab web UI (Runtime > Manage sessions): they bill until then."""
+    r = sh([_cli_python(), str(HOLDER), "--orphans"], quiet=True, timeout=120)
+    lines = r.stdout.split()
+    print("\n".join(r.stdout.strip().splitlines()) or "no orphaned VMs")
+    return 1 if lines else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -882,6 +911,7 @@ def main() -> int:
     s.add_argument("--retries", type=int, default=2,
                    help="fresh VMs to allocate if Colab reclaims the current one")
     s.add_argument("extra", nargs=argparse.REMAINDER, help="passed to v6.train.loop, after --")
+    sub.add_parser("orphans", help="VMs allocated on Colab that no local session tracks")
     w = sub.add_parser("watch")
     w.add_argument("runs", nargs="*", help="run names (default: the three encoders)")
     w.add_argument("--hf-repo", default=HF_REPO)
@@ -902,7 +932,7 @@ def main() -> int:
         a.extra = a.extra[1:]
     return {"launch": cmd_launch, "probe": cmd_probe, "status": cmd_status,
             "stop": cmd_stop, "checkpoint": cmd_checkpoint, "watch": cmd_watch,
-            "sweep": cmd_sweep}[a.cmd](a)
+            "sweep": cmd_sweep, "orphans": cmd_orphans}[a.cmd](a)
 
 
 if __name__ == "__main__":
