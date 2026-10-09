@@ -3,6 +3,8 @@
     uv run python -m v6.train.colab launch --encoder ettin-1b 
     uv run python -m v6.train.colab status --encoder ettin-1b
     uv run python -m v6.train.colab probe  --encoder ettin-1b      # A100 fit check
+    uv run python -m v6.train.colab watch                          # report changes until done
+    uv run python -m v6.train.colab stop   --run-name ettin-1b --release
 
 Run this yourself: it allocates billable VMs, and it copies your local
 HuggingFace token to each VM (as a 0600 file) so checkpoints can be pushed to
@@ -26,6 +28,19 @@ What it does, per encoder (TRAINING.md §7 says why each step is this way):
 ``status`` reads ``status.json`` from the VM (falling back to the HF mirror
 when the VM is gone) and reports STALE past 15 minutes: a stale heartbeat
 means dead, not slow.
+
+``watch`` polls every run and prints only what changed -- state, a stale
+heartbeat, a lost VM, non-finite steps, a new best, low disk or GPU headroom
+-- so it can run unattended under a monitor. With ``--relaunch`` it also
+restarts a run whose VM died or went stale, up to ``--max-relaunches`` times;
+that spends compute units, so it is opt-in. It never relaunches a run that
+stopped, finished or failed on its own: those need a person.
+
+``stop`` asks the loop to checkpoint and exit (a ``STOP`` file it checks every
+step) instead of tearing the VM down under it; ``--release`` then waits until
+the hub shows the run stopped -- which the loop writes only after
+``latest.pt`` has uploaded -- and releases the VM. ``checkpoint`` writes
+``latest.pt`` now without stopping.
 """
 from __future__ import annotations
 
@@ -44,6 +59,8 @@ from ..config import DATA_DIR, REPO, RUNS_DIR
 from . import encoders
 
 BUNDLE = RUNS_DIR / "colab-bundle"
+LAUNCHES = RUNS_DIR / "colab-launches"      # what was launched, for --relaunch
+TERMINAL = ("done", "stopped", "failed")
 VM_REPO = "/content/kniv"
 VM_RUNS = "/content/runs"
 STALE_MINUTES = 15
@@ -220,8 +237,19 @@ def start(sess: str, out: str, argv: list[str]) -> None:
 
 
 # ── commands ────────────────────────────────────────────────────────
+def _record(name: str, a, **more) -> dict:
+    LAUNCHES.mkdir(parents=True, exist_ok=True)
+    f = LAUNCHES / f"{name}.json"
+    rec = json.loads(f.read_text()) if f.exists() else {"relaunches": 0}
+    rec.update({"encoder": a.encoder, "run_name": name, "session": a.session,
+                "hf_repo": a.hf_repo, "extra": a.extra, **more})
+    f.write_text(json.dumps(rec, indent=1))
+    return rec
+
+
 def cmd_launch(a) -> int:
     spec, name = encoders.get(a.encoder), run_name(a)
+    _record(name, a, launched_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
     sess = prepare(a.session or session(name))
     out = f"{VM_RUNS}/{name}"
     argv = ["--encoder", spec.name, "--run-name", name, "--out", out, *a.extra]
@@ -289,7 +317,11 @@ def cmd_status(a) -> int:
         print(f"{n} [{src}]: {st['state']}{'  ** STALE **' if stale else ''} "
               f"step {st['step']}/{st['total_steps']} ep {st['epoch']} "
               f"loss {st.get('loss')} heartbeat {age:.1f}m ago, "
-              f"eta {st.get('eta_minutes')}m")
+              f"eta {st.get('eta_minutes')}m"
+              + (f"  reason: {st['reason']}" if st.get("reason") else ""))
+        print(f"   grad norm {st.get('grad_norm')} lr {st.get('lr')} "
+              f"non-finite {st.get('nonfinite_steps', 0)} "
+              f"(streak {st.get('nonfinite_streak', 0)}) disk free {st.get('disk_free_gb')} GB")
         if st.get("head_loss"):
             print("   heads: " + " ".join(f"{k} {v}" for k, v in st["head_loss"].items()))
         if ev:
@@ -300,12 +332,174 @@ def cmd_status(a) -> int:
     return rc
 
 
+# ── control ─────────────────────────────────────────────────────────
+def _put_flag(sess: str, name: str, flag: str, text: str) -> None:
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+        f.write(text)
+    try:
+        colab("upload", "-s", sess, f.name, f"{VM_RUNS}/{name}/{flag}", quiet=True)
+    finally:
+        os.unlink(f.name)
+
+
+def cmd_checkpoint(a) -> int:
+    name = run_name(a)
+    _put_flag(a.session or session(name), name, "CHECKPOINT", "")
+    print(f"{name}: checkpoint requested; the loop saves at its next step")
+    return 0
+
+
+def cmd_stop(a) -> int:
+    """Checkpoint and exit cleanly. ``colab stop`` alone tears the VM down
+    under the loop and loses up to one save interval."""
+    name = run_name(a)
+    sess = a.session or session(name)
+    _put_flag(sess, name, "STOP", a.reason)
+    print(f"{name}: stop requested ({a.reason})")
+    if not a.release:
+        return 0
+    deadline = time.time() + a.timeout * 60
+    while time.time() < deadline:
+        time.sleep(30)
+        # The hub's copy is the one that matters: the loop mirrors its final
+        # state only after latest.pt has uploaded.
+        state = (_hf_state(a, name) if a.hf_repo
+                 else ((_read_status(a, name)[0] or {}).get("state")))
+        if state in TERMINAL:
+            print(f"{name}: {state}; checkpoint is on the hub; releasing {sess}")
+            colab("stop", "-s", sess)
+            return 0
+    print(f"{name}: not stopped after {a.timeout} minutes; VM left running")
+    return 1
+
+
+def _hf_state(a, name: str) -> str | None:
+    from huggingface_hub import hf_hub_download
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            p = hf_hub_download(a.hf_repo, f"{name}/status.json", local_dir=d,
+                                force_download=True)
+            return json.loads(Path(p).read_text()).get("state")
+        except Exception:                                   # noqa: BLE001
+            return None
+
+
+# ── watch ───────────────────────────────────────────────────────────
+def observe(prev: dict | None, st: dict | None, alive: bool | None,
+            now: float) -> tuple[list[str], bool]:
+    """What changed between two polls of one run, and whether it needs a
+    relaunch. Pure, so the rules can be tested without a VM.
+
+    ``prev`` and ``st`` are status dicts (``st`` None if unreadable);
+    ``alive`` is whether the run's Colab session exists (None if unknown).
+    """
+    msgs = []
+    if st is None:
+        return (["no status: not started, or VM gone with no hub mirror"]
+                if prev is not None or alive is False else []), False
+    state = st.get("state")
+    terminal = state in TERMINAL
+    age = (now - st.get("heartbeat", 0)) / 60
+    stale = not terminal and age > STALE_MINUTES
+    p = prev or {}
+    if state != p.get("state"):
+        msgs.append(f"state {p.get('state', '-')} -> {state}"
+                    + (f" ({st['reason']})" if st.get("reason") else ""))
+    if stale and not p.get("_stale"):
+        msgs.append(f"STALE: no heartbeat for {age:.0f} minutes (dead, not slow)")
+    if alive is False and not terminal and p.get("_alive") is not False:
+        msgs.append("VM GONE: the Colab session no longer exists")
+    nf, pnf = st.get("nonfinite_steps", 0), p.get("nonfinite_steps", 0)
+    if nf > pnf:
+        msgs.append(f"NON-FINITE: {nf - pnf} step(s) skipped "
+                    f"(streak {st.get('nonfinite_streak', 0)})")
+    if st.get("best", -1) > p.get("best", -1) and st.get("best", -1) >= 0:
+        msgs.append(f"new best {st['best']:.4f} at step {st.get('best_step')}")
+    disk = st.get("disk_free_gb")
+    if disk is not None and disk < 25 and not (p.get("disk_free_gb") or 99) < 25:
+        msgs.append(f"LOW DISK: {disk} GB free; latest.pt saves will be refused")
+    peak = (st.get("memory") or {}).get("gpu_peak")
+    ppeak = (p.get("memory") or {}).get("gpu_peak") or 0
+    if peak and peak > 37 and ppeak <= 37:
+        msgs.append(f"GPU PEAK {peak} GB of 40: little headroom")
+    relaunch = not terminal and (stale or alive is False)
+    return msgs, relaunch
+
+
+def cmd_watch(a) -> int:
+    names = a.runs or ["deberta-v3-large", "ettin-400m", "ettin-1b"]
+    prev: dict[str, dict | None] = {n: None for n in names}
+    relaunched: dict[str, int] = {n: 0 for n in names}
+    hinted: set[str] = set()         # say "needs a relaunch" once, not every poll
+    grace_until: dict[str, float] = {}
+    live = set(names)
+    while live:
+        sessions = colab("sessions", check=False, quiet=True).stdout
+        now = time.time()
+        for n in sorted(live):
+            rec_f = LAUNCHES / f"{n}.json"
+            rec = json.loads(rec_f.read_text()) if rec_f.exists() else {}
+            sess = rec.get("session") or session(n)
+            alive = sess in sessions if sessions else None
+            a.run_name, a.session = n, rec.get("session")
+            st, src = _read_status(a, n)
+            msgs, relaunch = observe(prev[n], st, alive, now)
+            stamp = time.strftime("%H:%M")
+            for m in msgs:
+                print(f"{stamp} {n}: {m}", flush=True)
+            if st is not None:
+                st["_stale"] = (now - st.get("heartbeat", 0)) / 60 > STALE_MINUTES
+                st["_alive"] = alive
+                prev[n] = st
+            if st and st.get("state") in TERMINAL:
+                print(f"{stamp} {n}: finished watching ({st['state']})", flush=True)
+                live.discard(n)
+                continue
+            if not relaunch:
+                hinted.discard(n)
+            elif now < grace_until.get(n, 0):
+                pass        # a relaunched VM needs ~15 min before its first heartbeat
+            elif a.relaunch:
+                if relaunched[n] >= a.max_relaunches or not rec:
+                    if n not in hinted:
+                        print(f"{stamp} {n}: needs a relaunch, but "
+                              + (f"{a.max_relaunches} already spent" if rec else
+                                 f"there is no launch record in {LAUNCHES}")
+                              + "; relaunch it by hand", flush=True)
+                        hinted.add(n)
+                else:
+                    relaunched[n] += 1
+                    print(f"{stamp} {n}: RELAUNCHING ({relaunched[n]}/{a.max_relaunches})",
+                          flush=True)
+                    if alive:
+                        colab("stop", "-s", sess, check=False)   # a wedged kernel
+                    ns = argparse.Namespace(encoder=rec["encoder"], run_name=n,
+                                            session=rec.get("session"),
+                                            hf_repo=rec.get("hf_repo"),
+                                            extra=rec.get("extra") or [])
+                    try:
+                        cmd_launch(ns)
+                        _record(n, ns, relaunches=rec.get("relaunches", 0) + 1)
+                    except SystemExit as exc:
+                        print(f"{stamp} {n}: relaunch failed: {exc}", flush=True)
+                    grace_until[n] = time.time() + a.relaunch_grace * 60
+            elif n not in hinted:
+                print(f"{stamp} {n}: needs a relaunch: uv run python -m v6.train.colab "
+                      f"launch --encoder {rec.get('encoder', '<encoder>')} --run-name {n}",
+                      flush=True)
+                hinted.add(n)
+        if a.once or not live:
+            break
+        time.sleep(a.interval * 60)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("launch", "probe", "status"):
+    for name in ("launch", "probe", "status", "stop", "checkpoint"):
         p = sub.add_parser(name)
-        p.add_argument("--encoder", required=name != "status",
+        p.add_argument("--encoder", required=name in ("launch", "probe"),
                        choices=list(encoders.ENCODERS))
         p.add_argument("--hf-repo", default=HF_REPO,
                        help=f"checkpoint mirror (default {HF_REPO}); '' disables it")
@@ -315,13 +509,34 @@ def main() -> int:
                        "kniv-v6-<run-name>")
         if name == "probe":
             p.add_argument("--steps", type=int, default=10)
-        if name != "status":
+        if name in ("launch", "probe"):
             p.add_argument("extra", nargs=argparse.REMAINDER,
                            help="passed through to v6.train.loop, after --")
+        if name == "stop":
+            p.add_argument("--reason", default="requested from colab.py stop")
+            p.add_argument("--release", action="store_true",
+                           help="after the hub shows the run stopped, release the VM")
+            p.add_argument("--timeout", type=float, default=30.0, help="minutes")
+    w = sub.add_parser("watch")
+    w.add_argument("runs", nargs="*", help="run names (default: the three encoders)")
+    w.add_argument("--hf-repo", default=HF_REPO)
+    w.add_argument("--interval", type=float, default=10.0, help="minutes between polls")
+    w.add_argument("--once", action="store_true")
+    w.add_argument("--relaunch", action="store_true",
+                   help="restart a run whose VM died or went stale (spends compute units)")
+    w.add_argument("--max-relaunches", type=int, default=3)
+    w.add_argument("--relaunch-grace", type=float, default=40.0,
+                   help="minutes after a relaunch before the run may be judged dead again")
     a = ap.parse_args()
+    for k in ("run_name", "session", "extra"):
+        if not hasattr(a, k):
+            setattr(a, k, None if k != "extra" else [])
+    if a.cmd in ("stop", "checkpoint") and not (a.run_name or a.encoder):
+        ap.error("--run-name or --encoder is required")
     if getattr(a, "extra", None) and a.extra[:1] == ["--"]:
         a.extra = a.extra[1:]
-    return {"launch": cmd_launch, "probe": cmd_probe, "status": cmd_status}[a.cmd](a)
+    return {"launch": cmd_launch, "probe": cmd_probe, "status": cmd_status,
+            "stop": cmd_stop, "checkpoint": cmd_checkpoint, "watch": cmd_watch}[a.cmd](a)
 
 
 if __name__ == "__main__":

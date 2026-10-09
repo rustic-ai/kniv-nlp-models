@@ -12,9 +12,23 @@ invisible in the total.
 Dev evaluation scores agreement with the corpus annotators and is used only
 to select ``best.pt``. Headline numbers come from public gold (TRAINING.md §8).
 
-Operations follow TRAINING.md §7: run in the kernel, never detached; resume
-reads ``latest.pt`` (pulled from the hub if this VM is new) and replays the
-same sample order; SIGTERM checkpoints and exits.
+Operations follow TRAINING.md §7 and OPERATIONS.md: run in the kernel, never
+detached; resume reads ``latest.pt`` (pulled from the hub if this VM is new)
+and replays the same sample order; SIGTERM checkpoints and exits.
+
+**Control files** in the output directory are checked every step, so a run
+can be steered without a kernel interrupt (``colab.py stop`` / ``checkpoint``
+upload them):
+
+``STOP``        checkpoint and exit cleanly; its text is recorded as the reason
+``CHECKPOINT``  write ``latest.pt`` now and carry on
+
+**Non-finite steps are skipped, never applied.** A NaN or inf loss or
+gradient norm skips the update (the data is still consumed, so the sample
+order is unchanged) and is recorded. ``--max-nonfinite`` in a row stops the
+run *without* writing ``latest.pt``, so the last good resume point survives.
+Resuming replays the same data, so a run stopped this way needs a change --
+usually a lower learning rate, under a new run name -- not a plain relaunch.
 """
 from __future__ import annotations
 
@@ -141,6 +155,10 @@ def main() -> int:
     ap.add_argument("--log-every", type=int, default=20)
     ap.add_argument("--eval-every", type=int, default=500)
     ap.add_argument("--save-minutes", type=float, default=30.0)
+    ap.add_argument("--push-minutes", type=float, default=5.0,
+                    help="mirror status, events and train.log to the hub this often")
+    ap.add_argument("--max-nonfinite", type=int, default=5,
+                    help="stop after this many consecutive non-finite steps")
     ap.add_argument("--train-limit", type=int)
     ap.add_argument("--dev-limit", type=int)
     ap.add_argument("--seed", type=int, default=13)
@@ -208,6 +226,7 @@ def main() -> int:
                   meta={"encoder": spec.asdict(), "args": vars(args) | {"out": str(out)},
                         "train_windows": len(train), "dev_windows": len(dev),
                         "steps_per_epoch": per_epoch})
+    rs.push_minutes = args.push_minutes
     scale, calib = {h: 1.0 for h in HEADS}, defaultdict(list)
     ck = rs.try_resume(model, opt, sched)
     if ck:
@@ -221,11 +240,29 @@ def main() -> int:
         return {"loss_scale": scale, "calib": dict(calib), "vocab": vocab.to_json(),
                 "encoder": spec.asdict()}
 
-    def stop(state):
+    def stop(state, reason=""):
+        # Checkpoint upload first, status last: a mirrored "stopped" or "done"
+        # then means latest.pt is already on the hub, so the VM may be released.
         rs.save_latest(model, opt, sched, extra())
-        rs.status(state=state, push=True)
         if hub:
             hub.wait()
+        rs.status(state=state, reason=reason, push=True)
+
+    def control() -> str | None:
+        """Act on a control file; return a stop reason if the run must end."""
+        ckf, stopf = out / "CHECKPOINT", out / "STOP"
+        if ckf.exists():
+            ckf.unlink()
+            rs.event("control", action="checkpoint")
+            rs.save_latest(model, opt, sched, extra())
+            rs.status(push=True)
+            print(f"  checkpoint requested: saved at step {rs.p.step}", flush=True)
+        if stopf.exists():
+            why = stopf.read_text().strip() or "STOP file"
+            stopf.unlink()                 # or a relaunch would stop at once
+            rs.event("control", action="stop", reason=why)
+            return why
+        return None
 
     model.train()
     last_save = time.time()
@@ -236,48 +273,81 @@ def main() -> int:
             batches = batch_order(train, micro, args.seed, epoch)
             start = (rs.p.step - epoch * per_epoch) * spec.grad_accum
             for m0 in range(start, per_epoch * spec.grad_accum, spec.grad_accum):
-                this, seen = defaultdict(float), set()
+                this, seen, bad = defaultdict(float), set(), []
                 for m in range(m0, m0 + spec.grad_accum):
                     b = _to(collate([train[i] for i in batches[m]], tok.pad_token_id), device)
                     with amp():
                         o = model(b)
                     L = losses(o, b)
+                    vals = {h: l.item() for h, (l, n) in L.items() if n}
+                    bad = [h for h, v in vals.items() if not math.isfinite(v)]
+                    if bad:
+                        break                  # never backpropagate a non-finite loss
                     loss = sum(scale[h] * l for h, (l, _) in L.items()) / spec.grad_accum
                     loss.backward()
-                    for h, (l, n) in L.items():
-                        if n:
-                            this[h] += l.item() / spec.grad_accum
-                            seen.add(h)
+                    for h, v in vals.items():
+                        this[h] += v / spec.grad_accum
+                        seen.add(h)
                     this["total"] += loss.item()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                opt.step(); sched.step(); opt.zero_grad(set_to_none=True)
+                gn = None
+                if not bad:
+                    gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0))
+                    if not math.isfinite(gn):
+                        bad = ["grad_norm"]
+                if bad:
+                    opt.zero_grad(set_to_none=True)
+                    sched.step()               # the step is consumed, not applied
+                else:
+                    opt.step(); sched.step(); opt.zero_grad(set_to_none=True)
                 rs.p.step += 1
                 step = rs.p.step
-                for k, v in this.items():
-                    log[k] += v
-                n_log += 1
+                rs.p.lr = sched.get_last_lr()[0]
+                if bad:
+                    rs.p.nonfinite_steps += 1
+                    rs.p.nonfinite_streak += 1
+                    rs.event("nonfinite", step=step, heads=bad,
+                             streak=rs.p.nonfinite_streak)
+                    print(f"  NON-FINITE at step {step} ({', '.join(bad)}): update "
+                          f"skipped, {rs.p.nonfinite_streak} in a row", flush=True)
+                    if rs.p.nonfinite_streak >= args.max_nonfinite:
+                        why = (f"{rs.p.nonfinite_streak} consecutive non-finite steps "
+                               f"at step {step}; latest.pt left at the last good state")
+                        rs.event("abort", reason=why)
+                        rs.status(state="failed", reason=why, push=True)
+                        if hub:
+                            hub.wait()
+                        print(f"STOPPED: {why}", flush=True)
+                        return 2
+                    rs.status()
+                else:
+                    rs.p.nonfinite_streak = 0
+                    rs.p.grad_norm = round(gn, 4)
+                    for k, v in this.items():
+                        log[k] += v
+                    n_log += 1
 
                 # Loss scale: each head divided by its own mean over the first
                 # calib_steps steps, so the heads start on an equal footing.
-                if step <= args.calib_steps:
+                # A skipped step's partial losses are not evidence.
+                if step <= args.calib_steps and not bad:
                     for h in seen:
                         calib[h].append(this[h])
-                    if step == args.calib_steps:
-                        scale = {h: 1.0 / max(sum(calib[h]) / len(calib[h]), 1e-3)
-                                 if calib[h] else 1.0 for h in HEADS}
-                        rs.event("loss_scale", scale=scale)
-                        print("  loss scales: " + " ".join(
-                            f"{h} {s:.3f}" for h, s in scale.items()), flush=True)
+                if step == args.calib_steps:
+                    scale = {h: 1.0 / max(sum(calib[h]) / len(calib[h]), 1e-3)
+                             if calib[h] else 1.0 for h in HEADS}
+                    rs.event("loss_scale", scale=scale)
+                    print("  loss scales: " + " ".join(
+                        f"{h} {s:.3f}" for h, s in scale.items()), flush=True)
 
-                if step % args.log_every == 0 or step == total:
+                if (step % args.log_every == 0 or step == total) and n_log:
                     hl = {h: round(log[h] / n_log, 4) for h in HEADS}
-                    rs.status(loss=round(log["total"] / n_log, 4), head_loss=hl,
-                              push=step % (args.log_every * 10) == 0)
+                    rs.status(loss=round(log["total"] / n_log, 4), head_loss=hl)
                     p = rs.p
                     print(f"step {step}/{total} ep {epoch} loss {p.loss:.4f} | "
                           + " ".join(f"{h} {v:.3f}" for h, v in hl.items())
-                          + f" | {p.steps_per_sec or 0:.2f} st/s eta {p.eta_minutes}m "
-                          f"mem {p.memory}", flush=True)
+                          + f" | gn {p.grad_norm} lr {p.lr:.2e} | {p.steps_per_sec or 0:.2f} "
+                          f"st/s eta {p.eta_minutes}m | mem {p.memory} disk {p.disk_free_gb}G",
+                          flush=True)
                     log, n_log = defaultdict(float), 0
 
                 if step % args.eval_every == 0 or step == total:
@@ -289,8 +359,13 @@ def main() -> int:
                     print(f"  eval step {step}: " + " ".join(f"{k} {v:.4f}" for k, v in r.items())
                           + ("  * best" if better else ""), flush=True)
 
+                why = control()
+                if why:
+                    stop("stopped", why)
+                    print(f"stopped at step {step} ({why}); checkpointed", flush=True)
+                    return 0
                 if rs.stop_requested:
-                    stop("interrupted")
+                    stop("interrupted", "signal")
                     print(f"interrupted at step {step}; checkpointed", flush=True)
                     return 0
                 if time.time() - last_save > args.save_minutes * 60:
@@ -307,7 +382,9 @@ def main() -> int:
     except Exception as exc:
         rs.event("error", error=f"{type(exc).__name__}: {exc}", step=rs.p.step,
                  memory=memory())
-        rs.status(state="failed", push=True)
+        rs.status(state="failed", reason=f"{type(exc).__name__}: {exc}"[:300], push=True)
+        if hub:
+            hub.wait()
         raise
     stop("done")
     print(f"done: {rs.p.step} steps, best composite {rs.p.best:.4f} "

@@ -13,8 +13,16 @@ private HF repo as the durable copy.
                  15 minutes means dead, not slow
 ``events.jsonl`` append-only: checkpoints, evals, signals, errors
 
+``status.json``, ``events.jsonl`` and ``train.log`` are mirrored to the hub
+every ``push_minutes``, so the record of a failure survives the VM that had
+it. Mirroring is time-based: a step-based push would make a slow model's
+heartbeat look stale.
+
 SIGTERM and SIGINT set a flag; the loop checkpoints at the next step
 boundary and exits, so a preemption costs at most one save interval.
+
+**A checkpoint is never written with non-finite weights.** A NaN that reached
+``latest.pt`` would overwrite the only good resume point.
 """
 from __future__ import annotations
 
@@ -22,6 +30,7 @@ import json
 import os
 import random
 import resource
+import shutil
 import signal
 import subprocess
 import sys
@@ -71,10 +80,16 @@ def memory() -> dict:
     return out
 
 
+def finite(model) -> bool:
+    import torch
+    return all(bool(torch.isfinite(p).all()) for p in model.parameters())
+
+
 @dataclass
 class Progress:
     run_id: str
-    state: str = "starting"       # starting|featurising|training|evaluating|done|interrupted|failed
+    state: str = "starting"       # starting|training|evaluating|done|interrupted|stopped|failed
+    reason: str = ""              # why the run is stopped or failed
     epoch: int = 0
     step: int = 0
     total_steps: int = 0
@@ -89,6 +104,11 @@ class Progress:
     heartbeat: float = 0.0
     elapsed_minutes: float = 0.0
     memory: dict = field(default_factory=dict)
+    disk_free_gb: float | None = None
+    lr: float | None = None
+    grad_norm: float | None = None
+    nonfinite_steps: int = 0      # skipped since the run began (this process)
+    nonfinite_streak: int = 0     # consecutive, now
     resumed_from_step: int = 0
     meta: dict = field(default_factory=dict)
 
@@ -111,7 +131,8 @@ class Hub:
     def _path(self, name: str) -> str:
         return f"{self.prefix}/{name}"
 
-    def push(self, *files: Path, wait: bool = False, on_error=None) -> None:
+    def push(self, *files: Path, wait: bool = False, on_error=None,
+             skip_if_busy: bool = False) -> bool:
         """Upload ``files`` in order on one background thread.
 
         Order matters for ``best.pt`` then ``best.metric``: uploaded in
@@ -122,6 +143,8 @@ class Hub:
         key = files[0].name
         prev = self._busy.get(key)
         if prev and prev.is_alive():
+            if skip_if_busy:
+                return False        # status is best-effort; never stall training on it
             prev.join()
 
         def run():
@@ -139,6 +162,7 @@ class Hub:
         self._busy[key] = t
         if wait:
             t.join()
+        return True
 
     def pull(self, name: str, dest: Path) -> bool:
         """Download to a temp path and rename, so a half-pulled file is never
@@ -177,6 +201,9 @@ class RunState:
         self.best_metric = self.dir / "best.metric"
         self.status_path, self.events_path = self.dir / "status.json", self.dir / "events.jsonl"
         self.hub = hub
+        self.push_minutes = 5.0
+        self._last_push = 0.0
+        self.mirror = self.dir / ".mirror"
         import torch, transformers
         self.p = Progress(run_id=run_id, started_at=time.time(), meta={
             **meta, "git_sha": _git_sha(), "torch": torch.__version__,
@@ -207,12 +234,15 @@ class RunState:
         print(f"  HUB UPLOAD FAILED for {name}: {exc}", flush=True)
 
     def status(self, push: bool = False, **updates) -> None:
+        """Rewrite ``status.json``; mirror it with the logs every
+        ``push_minutes``, or now if ``push``."""
         for k, v in updates.items():
             setattr(self.p, k, v)
         now = time.time()
         self.p.heartbeat = now
         self.p.elapsed_minutes = round((now - self.p.started_at) / 60, 2)
         self.p.memory = memory()
+        self.p.disk_free_gb = round(shutil.disk_usage(self.dir).free / (1 << 30), 1)
         done = self.p.step - self._step0
         if done > 0:
             rate = done / max(now - self._t0, 1e-6)
@@ -220,13 +250,50 @@ class RunState:
             self.p.eta_minutes = round(max(self.p.total_steps - self.p.step, 0)
                                        / rate / 60, 1)
         atomic_write_json(self.status_path, asdict(self.p))
-        if push and self.hub:
-            self.hub.push(self.status_path, on_error=self._hub_error)
+        if self.hub and (push or now - self._last_push > self.push_minutes * 60):
+            self._mirror(wait=push and self.p.state in
+                         ("done", "stopped", "interrupted", "failed"))
+
+    def _mirror(self, wait: bool = False) -> None:
+        """Push status, events and train.log. The two logs are appended to
+        while training runs, so a snapshot is uploaded rather than the live
+        file, whose hash could change between hashing and upload."""
+        self.mirror.mkdir(exist_ok=True)
+        files = []
+        for src in (self.status_path, self.events_path, self.dir / "train.log"):
+            if src.exists():
+                dst = self.mirror / src.name
+                shutil.copyfile(src, dst)
+                files.append(dst)
+        if self.hub.push(*files, on_error=self._hub_error, wait=wait,
+                         skip_if_busy=not wait):
+            self._last_push = time.time()
 
     # ── checkpoints ───────────────────────────────────────────────
-    def save_latest(self, model, optimizer, scheduler, extra: dict) -> None:
+    def _refuse(self, what: str, model) -> bool:
+        """True if ``what`` must not be written: non-finite weights, or not
+        enough disk for a second copy beside the current one."""
+        if not finite(model):
+            self.event("refused_save", file=what, reason="non-finite weights")
+            print(f"  REFUSED to write {what}: non-finite weights", flush=True)
+            return True
+        need = sum(p.numel() * p.element_size() for p in model.parameters())
+        if what == "latest.pt":
+            need *= 3                     # weights + two Adam moments
+        free = shutil.disk_usage(self.dir).free
+        if free < need * 1.2:
+            self.event("refused_save", file=what, reason="low disk",
+                       free_gb=round(free / 2**30, 1), need_gb=round(need / 2**30, 1))
+            print(f"  REFUSED to write {what}: {free / 2**30:.1f} GB free, "
+                  f"~{need / 2**30:.1f} GB needed", flush=True)
+            return True
+        return False
+
+    def save_latest(self, model, optimizer, scheduler, extra: dict) -> bool:
         import numpy as np
         import torch
+        if self._refuse("latest.pt", model):
+            return False
         tmp = self.latest.with_suffix(".pt.tmp")
         torch.save({
             "model": model.state_dict(), "optimizer": optimizer.state_dict(),
@@ -247,6 +314,7 @@ class RunState:
         self.event("checkpoint", step=self.p.step, epoch=self.p.epoch)
         if self.hub:
             self.hub.push(self.latest, on_error=self._hub_error)
+        return True
 
     def maybe_save_best(self, model, value: float, extra: dict) -> bool:
         """Save ``best.pt`` only if ``value`` beats both the local and the
@@ -258,6 +326,8 @@ class RunState:
         remote = self.hub.remote_best() if self.hub else None
         bar = max([x for x in (local, remote) if x is not None], default=None)
         if bar is not None and value <= bar:
+            return False
+        if self._refuse("best.pt", model):
             return False
         tmp = self.best.with_suffix(".pt.tmp")
         torch.save({"model": model.state_dict(), **extra}, tmp)
