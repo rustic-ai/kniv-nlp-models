@@ -88,7 +88,17 @@ def sh(cmd: list[str], check: bool = True, timeout: float | None = None,
        quiet: bool = False) -> subprocess.CompletedProcess:
     """Run a command and surface its stderr. Several wrong conclusions this
     cycle came from commands whose failure output was discarded."""
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        # A hung CLI must not hang the launcher: on the A100 one colab exec
+        # sat for 20 minutes without ever sending its cell.
+        r = subprocess.CompletedProcess(cmd, 124, exc.stdout or "",
+                                        (exc.stderr or "") + f"\ntimed out after {timeout}s")
+        if isinstance(r.stdout, bytes):
+            r.stdout = r.stdout.decode(errors="replace")
+        if isinstance(r.stderr, bytes):
+            r.stderr = r.stderr.decode(errors="replace")
     # Drop only the CLI's own version notice; anything else may be the error.
     notice = ("[colab] A new version", "[colab] Run 'colab update'",
               "[colab] Run 'uv tool install", "[colab] You can run 'colab update",
@@ -162,8 +172,10 @@ def vm_exec(sess: str, code: str, timeout: float = 600, check: bool = True):
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
         f.write(code)
     try:
+        # The CLI's own --timeout does not cover its connection and preamble,
+        # so the subprocess gets a hard limit too.
         return colab("exec", "-s", sess, "-f", f.name, "--timeout", str(timeout),
-                     check=check)
+                     check=check, timeout=timeout + 180)
     finally:
         os.unlink(f.name)
 
@@ -399,9 +411,22 @@ def start(sess: str, out: str, argv: list[str], wait_minutes: float = 25) -> boo
     """
     print(f"starting in-kernel: python -m v6.train.loop {shlex.join(argv)}")
     t0 = time.time()
+    code = START.format(repo=VM_REPO, out=out, argv=argv, RUN_MARKER=RUN_MARKER)
     # The client times out; the kernel keeps running the cell.
-    vm_exec(sess, START.format(repo=VM_REPO, out=out, argv=argv, RUN_MARKER=RUN_MARKER),
-            timeout=90, check=False)
+    vm_exec(sess, code, timeout=90, check=False)
+    # The start script's first act is to create train.log. If it has not
+    # within a few minutes, the cell never reached the kernel -- the CLI can
+    # hang before sending it -- so send it once more. Were the first copy
+    # merely late, the second would resume the same run and exit.
+    with tempfile.TemporaryDirectory() as d:
+        for _ in range(6):
+            time.sleep(30)
+            if colab("download", "-s", sess, f"{out}/train.log", f"{d}/t.log",
+                     check=False, quiet=True).returncode == 0:
+                break
+        else:
+            print("  the start cell did not arrive; sending it again", flush=True)
+            vm_exec(sess, code, timeout=90, check=False)
     # The training cell is now running; attach a holder before Colab's ~20
     # minute no-client clock can run out.
     _kill_holder(sess)           # one left from a previous run watches the wrong run
