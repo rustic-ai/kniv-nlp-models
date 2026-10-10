@@ -80,7 +80,7 @@ def load_run(run: str, repo: str, device, local: Path | None = None) -> tuple:
     cfg = ck.get("model_config") or {}
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
                     pretrained=False, srl_mode=cfg.get("srl_mode", "joint"),
-                    phase2=cfg.get("phase2", False))
+                    phase2=cfg.get("phase2", False), p2_context=cfg.get("p2_context", 0))
     model.load_state_dict(ck["model"])          # strict: a mismatch raises
     model.to(device).eval()
     tok = AutoTokenizer.from_pretrained(spec.hf_id)

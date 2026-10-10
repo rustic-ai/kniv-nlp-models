@@ -98,67 +98,110 @@ def _dist_bucket(d: torch.Tensor) -> torch.Tensor:
     return torch.where(d < 5, d, (log + 3).clamp(max=9))
 
 
-class CorefHead(nn.Module):
-    """Word-level coreference (Dobrovolskii 2021).
+def context_layer(H: int, n: int, p: float) -> nn.Module | None:
+    """``n`` pre-norm transformer layers over words, for a head on a frozen
+    encoder: feed-forward heads transform each word alone, and a frozen
+    encoder never adapts its context to the task. ``None`` when ``n`` is 0."""
+    if not n:
+        return None
+    layer = nn.TransformerEncoderLayer(H, nhead=max(1, H // 64), dim_feedforward=4 * H,
+                                       dropout=p, activation="gelu", batch_first=True,
+                                       norm_first=True)
+    return nn.TransformerEncoder(layer, n, enable_nested_tensor=False)
 
-    Antecedents are scored between words, not spans: a cheap bilinear coarse
-    score keeps the top ``k`` earlier words per word, and a fine scorer over
-    ``[a_i, a_j, a_i*a_j, distance]`` adds to it. Column 0 of the result is
-    the dummy "no antecedent" at score 0. A span head then grows each
-    mention's head word into its span, within ``span_radius`` words.
+
+def contextualise(ctx: nn.Module | None, words: torch.Tensor, word_mask: torch.Tensor):
+    if ctx is None:
+        return words
+    return ctx(words, src_key_padding_mask=~word_mask)
+
+
+class CorefHead(nn.Module):
+    """Word-level coreference, as wl-coref (Dobrovolskii 2021) builds it.
+
+    A word is an attention-weighted average of its subwords. Antecedents are
+    scored between words: a bilinear coarse score keeps the top ``k`` earlier
+    words, and a feed-forward scorer over ``[a_i, a_j, a_i*a_j, distance]``
+    adds to it. Column 0 of the result is the dummy "no antecedent" at 0. The
+    span predictor grows each mention's head word into its span: a
+    feed-forward net over ``[head, word, offset]`` for the words within
+    ``span_radius`` in the head's sentence, then two width-3 convolutions so a
+    boundary sees its neighbours. Widths and dropout are wl-coref's; the
+    genre and speaker features are not, the corpus has neither.
     """
 
-    def __init__(self, H: int, d: int = 256, k: int = 50, span_radius: int = 24,
-                 p: float = 0.1):
+    def __init__(self, H: int, k: int = 50, span_radius: int = 32, p: float = 0.3,
+                 context: int = 0):
         super().__init__()
         self.k, self.r = k, span_radius
-        self.proj = mlp(H, d, p)
-        self.coarse = nn.Linear(d, d, bias=False)
+        self.drop = nn.Dropout(p)
+        self.attn = nn.Linear(H, 1)
+        self.context = context_layer(H, context, 0.1)
+        self.coarse = nn.Linear(H, H)
         self.dist = nn.Embedding(10, 32)
-        self.fine = nn.Sequential(nn.Linear(3 * d + 32, d), nn.GELU(), nn.Dropout(p),
-                                  nn.Linear(d, 1))
-        self.rel_pos = nn.Embedding(2 * span_radius + 1, 32)
-        self.span = nn.Sequential(nn.Linear(2 * d + 32, d), nn.GELU(), nn.Dropout(p),
-                                  nn.Linear(d, 2))
+        self.fine = nn.Sequential(nn.Linear(3 * H + 32, H), nn.LeakyReLU(), nn.Dropout(p),
+                                  nn.Linear(H, 1))
+        self.rel_pos = nn.Embedding(2 * span_radius + 1, 64)
+        self.span = nn.Sequential(nn.Linear(2 * H + 64, H), nn.ReLU(), nn.Dropout(p),
+                                  nn.Linear(H, 256), nn.ReLU(), nn.Dropout(p),
+                                  nn.Linear(256, 64))
+        self.conv = nn.Sequential(nn.Conv1d(64, 4, 3, 1, 1), nn.Conv1d(4, 2, 3, 1, 1))
 
-    def antecedents(self, words, word_mask):
-        """``(scores [B,W,k+1], cand [B,W,k], a [B,W,d])``; invalid = NEG."""
-        a = self.proj(words)
-        B, W, _ = a.shape
-        # Scaled like attention: unscaled, two LayerNorm'd 256-d vectors give
-        # scores around +-16 and the softmax starts saturated.
-        coarse = (self.coarse(a) @ a.transpose(1, 2)) / a.size(-1) ** 0.5  # [B,W,W]
+    def words(self, h, first, word_mask, attention_mask):
+        """``[B,W,H]`` from subword states ``h [B,T,H]``: a word's subwords run
+        from its first to the next represented word's first (or the last real
+        subword before [SEP])."""
+        B, T, _ = h.shape
+        W = first.size(1)
+        last = attention_mask.sum(1, keepdim=True) - 1                     # [SEP]
+        f = torch.where(word_mask, first, last.expand(-1, W))
+        nxt = torch.cat([f[:, 1:], last], 1)
+        nxt = torch.flip(torch.cummin(torch.flip(nxt, [1]), 1).values, [1])
+        t = torch.arange(T, device=h.device).view(1, 1, T)
+        inside = (t >= f.unsqueeze(-1)) & (t < nxt.unsqueeze(-1)) & word_mask.unsqueeze(-1)
+        sc = self.attn(h).float().squeeze(-1).unsqueeze(1)                # [B,1,T]
+        att = sc.masked_fill(~inside, NEG).softmax(-1)
+        att = att * inside.any(-1, keepdim=True)                           # padding -> 0
+        w = torch.bmm(att.to(h.dtype), h)
+        return contextualise(self.context, self.drop(w), word_mask)
+
+    def antecedents(self, a, word_mask):
+        """``(scores [B,W,k+1], cand [B,W,k])``; invalid = NEG."""
+        B, W, D = a.shape
+        coarse = (self.drop(self.coarse(a)) @ a.transpose(1, 2)) / D ** 0.5   # [B,W,W]
         i = torch.arange(W, device=a.device)
         ok = (i.view(1, W, 1) > i.view(1, 1, W)) & word_mask.unsqueeze(1) \
             & word_mask.unsqueeze(2)
         coarse = coarse.float().masked_fill(~ok, NEG)
         k = min(self.k, W)
         top, cand = coarse.topk(k, dim=-1)                              # [B,W,k]
-        aj = torch.gather(a.unsqueeze(1).expand(B, W, W, a.size(-1)), 2,
-                          cand.unsqueeze(-1).expand(B, W, k, a.size(-1)))
+        aj = torch.gather(a.unsqueeze(1).expand(B, W, W, D), 2,
+                          cand.unsqueeze(-1).expand(B, W, k, D))
         ai = a.unsqueeze(2).expand_as(aj)
-        dist = self.dist(_dist_bucket(i.view(1, W, 1) - cand))
+        dist = self.dist(_dist_bucket(i.view(1, W, 1) - cand)).to(a.dtype)
         fine = self.fine(torch.cat([ai, aj, ai * aj, dist], -1)).squeeze(-1).float()
         valid = top > NEG / 2
         s = torch.where(valid, top + fine, torch.full_like(top, NEG))
         dummy = torch.zeros(B, W, 1, device=a.device)
-        return torch.cat([dummy, s], -1), cand, a
+        return torch.cat([dummy, s], -1), cand
 
     def spans(self, a, batch_idx, heads, sent_of_word):
-        """Start/end logits ``[M, 2r+1]`` over positions ``head-r .. head+r``
-        in the head's sentence."""
+        """Start/end logits ``[M, 2r+1, 2]`` over positions ``head-r .. head+r``
+        in the head's sentence, and those positions."""
         W = a.size(1)
         off = torch.arange(-self.r, self.r + 1, device=a.device)
         pos = heads.unsqueeze(1) + off                                  # [M,2r+1]
         inb = (pos >= 0) & (pos < W)
         posc = pos.clamp(0, W - 1)
-        same = sent_of_word[batch_idx.unsqueeze(1), posc] == \
-            sent_of_word[batch_idx, heads].unsqueeze(1)
-        aj = a[batch_idx.unsqueeze(1), posc]                            # [M,2r+1,d]
+        same = inb & (sent_of_word[batch_idx.unsqueeze(1), posc] ==
+                      sent_of_word[batch_idx, heads].unsqueeze(1))
+        aj = a[batch_idx.unsqueeze(1), posc]                            # [M,2r+1,H]
         ah = a[batch_idx, heads].unsqueeze(1).expand_as(aj)
-        lg = self.span(torch.cat([ah, aj, self.rel_pos(off + self.r).expand(
-            len(heads), -1, -1)], -1)).float()                          # [M,2r+1,2]
-        return lg.masked_fill(~(inb & same).unsqueeze(-1), NEG), pos
+        rp = self.rel_pos(off + self.r).to(a.dtype).expand(len(heads), -1, -1)
+        x = self.span(torch.cat([ah, aj, rp], -1))
+        x = x * same.unsqueeze(-1)                     # outside the sentence: zeros, as padding
+        lg = self.conv(x.transpose(1, 2)).transpose(1, 2).float()      # [M,2r+1,2]
+        return lg.masked_fill(~same.unsqueeze(-1), NEG), pos
 
 
 class RelationHead(nn.Module):
@@ -171,9 +214,11 @@ class RelationHead(nn.Module):
     relations, with column 0 the adaptive threshold class.
     """
 
-    def __init__(self, H: int, n_rel: int, d: int = 512, block: int = 64, p: float = 0.1):
+    def __init__(self, H: int, n_rel: int, d: int = 768, block: int = 64, p: float = 0.1,
+                 context: int = 0):
         super().__init__()
         self.block = block
+        self.context = context_layer(H, context, p)
         self.proj = mlp(H, d, p)
         self.q = nn.Linear(2 * d, d)
         self.kp = nn.Linear(d, d)
@@ -182,7 +227,7 @@ class RelationHead(nn.Module):
         self.bilinear = nn.Linear(d * block, n_rel + 1)
 
     def forward(self, words, batch):
-        x = self.proj(words)                                            # [B,W,d]
+        x = self.proj(contextualise(self.context, words, batch["word_mask"]))  # [B,W,d]
         E = len(batch["ent_batch"])
         if E == 0 or len(batch["pair_h"]) == 0:
             return x.new_zeros(0, self.bilinear.out_features)
@@ -232,7 +277,7 @@ class V6Model(nn.Module):
                  attn_implementation: str | None = None,
                  arc_dim: int = 512, rel_dim: int = 128, srl_dim: int = 256,
                  pretrained: bool = True, srl_mode: str = "joint",
-                 phase2: bool = False):
+                 phase2: bool = False, p2_context: int = 0):
         super().__init__()
         from transformers import AutoConfig, AutoModel
         # fp32 master weights for every encoder; bf16 autocast does the
@@ -289,10 +334,20 @@ class V6Model(nn.Module):
             # NER and coref.
             for k in ("coref", "relation"):
                 self.mix[k] = ScalarMix(L)
-            self.coref = CorefHead(H, p=p)
-            self.relation = RelationHead(H, S["relations"], p=p)
+            self.coref = CorefHead(H, context=p2_context)
+            self.relation = RelationHead(H, S["relations"], p=p, context=p2_context)
+        self.p2_context = p2_context
+        # Set by a run that trains only heads: the encoder then runs without
+        # gradient and without dropout, the features it will give at inference.
+        self.freeze_encoder = False
         self.cls = classifier(H, H, S["cls"], p)
         self.sentiment = classifier(H, H, S["sentiment"], p)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.freeze_encoder:
+            self.encoder.eval()
+        return self
 
     def head_parameters(self):
         return [p for n, p in self.named_parameters() if not n.startswith("encoder.")]
@@ -378,9 +433,10 @@ class V6Model(nn.Module):
         sets ``predict_heads`` alone, so LAS is scored on predicted arcs while
         SRL roles are still scored on gold predicates."""
         predict_heads = predict if predict_heads is None else predict_heads
-        out = self.encoder(input_ids=batch["input_ids"],
-                           attention_mask=batch["attention_mask"],
-                           output_hidden_states=True)
+        with torch.set_grad_enabled(torch.is_grad_enabled() and not self.freeze_encoder):
+            out = self.encoder(input_ids=batch["input_ids"],
+                               attention_mask=batch["attention_mask"],
+                               output_hidden_states=True)
         layers = tuple(F.layer_norm(h, h.shape[-1:]) for h in out.hidden_states)
         first, wm = batch["first_subword"], batch["word_mask"]
         o = {}
@@ -434,8 +490,10 @@ class V6Model(nn.Module):
             self._pool(self._words(layers, "sentiment", first), batch, "sentiment"))
 
         if self.phase2 and "coref_ok" in batch:
-            cw = self._words(layers, "coref", first)
-            o["coref_scores"], o["coref_cand"], o["coref_a"] = self.coref.antecedents(cw, wm)
+            cw = self.coref.words(self.mix["coref"](layers), first, wm,
+                                  batch["attention_mask"])
+            o["coref_scores"], o["coref_cand"] = self.coref.antecedents(cw, wm)
+            o["coref_a"] = cw
             if len(batch["coref_head"]):
                 o["coref_span"], o["coref_span_pos"] = self.coref.spans(
                     o["coref_a"], batch["coref_batch"], batch["coref_head"],
@@ -492,7 +550,12 @@ def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
         wm = batch["word_mask"] & ok.unsqueeze(1)
         nll = torch.logsumexp(s, -1) - torch.logsumexp(s.masked_fill(~gold, NEG), -1)
         n = int(wm.sum())
-        out["coref"] = (nll[wm].mean(), n)
+        # wl-coref's auxiliary BCE (weight 0.5) over the real candidates and
+        # the dummy: it keeps teaching after the likelihood term has converged.
+        real = torch.cat([torch.ones_like(s[..., :1], dtype=torch.bool), s[..., 1:] > NEG / 2], -1)
+        real = real & wm.unsqueeze(-1)
+        bce = F.binary_cross_entropy_with_logits(s[real].clamp(-50, 50), gold[real].float())
+        out["coref"] = (nll[wm].mean() + 0.5 * bce, n)
     else:
         out["coref"] = (o["pos"].sum() * 0.0, 0)
     if "coref_span" in o:

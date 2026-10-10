@@ -214,6 +214,9 @@ def main() -> int:
     ap.add_argument("--train-scope", choices=["all", "phase2"], default="all",
                     help="phase2: train only the phase-2 heads and their layer mixes; "
                          "everything else stays exactly as --init left it")
+    ap.add_argument("--p2-context", type=int, default=0, metavar="N",
+                    help="transformer layers over words inside each phase-2 head "
+                         "(for a frozen encoder; 0 = none)")
     ap.add_argument("--srl-mode", choices=["joint", "conditioned"], default="joint",
                     help="joint: every predicate in one pass (v6); conditioned: one "
                          "pass per predicate over its sentence (v5), for MODEL_CHANGES §1")
@@ -268,7 +271,8 @@ def main() -> int:
 
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
                     attn_implementation=spec.attn_implementation,
-                    srl_mode=args.srl_mode, phase2=args.phase2).to(device)
+                    srl_mode=args.srl_mode, phase2=args.phase2,
+                    p2_context=args.p2_context).to(device)
     if args.init:
         _load_init(model, args.init, vocab)
     if args.train_scope == "phase2":
@@ -277,6 +281,8 @@ def main() -> int:
         for n, prm in model.named_parameters():
             prm.requires_grad = n.startswith(("coref.", "relation.", "mix.coref.",
                                               "mix.relation."))
+        model.freeze_encoder = True
+        model.train()
     wrong = {str(p.dtype) for p in model.parameters()} - {"torch.float32"}
     if wrong:
         raise SystemExit(f"parameters must be fp32 master weights; found {wrong}")
@@ -327,6 +333,7 @@ def main() -> int:
         return {"loss_scale": scale, "calib": dict(calib), "vocab": vocab.to_json(),
                 "encoder": spec.asdict(),
                 "model_config": {"srl_mode": args.srl_mode, "phase2": args.phase2,
+                                 "p2_context": args.p2_context,
                                  "init": args.init, "train_scope": args.train_scope}}
 
     def stop(state, reason=""):
