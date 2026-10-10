@@ -561,7 +561,9 @@ def eval_redocred(model, tok, spec, vocab, device, limit) -> dict:
         sp = [tuple(x) for x in it.layers["sentence_spans"]]
         ents = [[(a, e + 1) for a, e in en["mentions"]] for en in it.entities]
         feats.append(phase2_window(it.tokens, sp, tok, spec, vocab, ents))
-    outs = run_phase2(model, feats, tok, device)
+    # One document at a time: a 40-entity document is 1,560 pairs, each a
+    # 49k-wide bilinear input, and four of them exhaust a 48 GB Mac.
+    outs = run_phase2(model, feats, tok, device, batch=1)
     rows, feats2, order2 = [], [], []
     for n, (it, f, o) in enumerate(zip(items, feats, outs)):
         keep = f["_ent_keep"]
@@ -584,7 +586,7 @@ def eval_redocred(model, tok, spec, vocab, device, limit) -> dict:
                  for m in v] for v in vertex]
         feats2.append(phase2_window(it.tokens, sp, tok, spec, vocab, ents))
         order2.append((n, ents))
-    outs2 = run_phase2(model, feats2, tok, device)
+    outs2 = run_phase2(model, feats2, tok, device, batch=1)
     for r in rows:
         r["rel_e2e_f1"] = [0, 0, r["rel_f1"][2]]
         r["rel_e2e_docs"] = [0, 1]          # did the model find two entities?
