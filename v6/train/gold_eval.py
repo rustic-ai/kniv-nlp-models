@@ -25,7 +25,17 @@ context), so no encoder gains from its longer window.
 Differences between encoders come with **paired bootstrap 95% intervals** over
 items: a difference whose interval spans zero is a tie, however it looks.
 
-Sentiment has no public gold here; coref and relations are phase 2.
+Phase 2, for checkpoints with the coref and relation heads:
+
+| benchmark | layer | metric |
+|---|---|---|
+| LitBank, 400-word windows | coref | CoNLL-F1 per window, averaged |
+| Re-DocRED test, docs ≤ 512 words | relations | triple-F1, gold entities; and end to end |
+
+These two inputs are whole documents, not single sentences. Their teachers'
+scores (LingMess, ATLOP) are on the same items.
+
+Sentiment has no public gold here.
 """
 from __future__ import annotations
 
@@ -67,9 +77,10 @@ def load_run(run: str, repo: str, device, local: Path | None = None) -> tuple:
     ck = torch.load(path, map_location="cpu", weights_only=False)
     spec = EncoderSpec(**ck["encoder"])
     vocab = Vocab.from_json(ck["vocab"])
-    srl_mode = (ck.get("model_config") or {}).get("srl_mode", "joint")
+    cfg = ck.get("model_config") or {}
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
-                    pretrained=False, srl_mode=srl_mode)
+                    pretrained=False, srl_mode=cfg.get("srl_mode", "joint"),
+                    phase2=cfg.get("phase2", False))
     model.load_state_dict(ck["model"])          # strict: a mismatch raises
     model.to(device).eval()
     tok = AutoTokenizer.from_pretrained(spec.hf_id)
@@ -398,8 +409,208 @@ def eval_cls(model, tok, spec, vocab, device, limit, context: int = 6) -> dict:
     return {"items": rows, "kinds": {"cls_f1": "f1", "cls_exact": "acc"}}
 
 
+# ── phase 2: coreference and relations ──────────────────────────────
+def phase2_window(tokens: list[str], spans: list[tuple[int, int]], tok, spec,
+                  vocab: Vocab, entities: list[list[tuple[int, int]]] | None = None) -> dict:
+    """``window`` plus the phase-2 inputs: no coref targets, and ``entities``
+    (each a list of ``(start, end_exclusive)`` mentions) as the relation
+    head's input with every pair unlabelled. ``_ent_keep`` maps the kept
+    entities back to the caller's indices: an entity whose every mention
+    falls past the subword limit cannot be scored."""
+    f = window(tokens, spans, tok, spec, vocab)
+    W = f["_W"]
+    f.update(coref=None, rel=None, _n_rel=vocab.size("relations"), _ent_keep=[])
+    kept, keep = [], []
+    for ei, ms in enumerate(entities or []):
+        ms = [(a, b) for a, b in ms if b <= W and f["word_ok"][a]]
+        if ms:
+            kept.append(np.asarray(ms, dtype=np.int32)); keep.append(ei)
+    if len(kept) >= 2:
+        f["rel"] = {"spans": kept, "types": np.zeros(len(kept), dtype=np.int32),
+                    "triples": []}
+        f["_ent_keep"] = keep
+    return f
+
+
+def _sentences(tokens: list[str]) -> list[tuple[int, int]]:
+    """Sentence spans at terminal punctuation, for gold without boundaries
+    (LitBank). Only the coref span head reads them: a span cannot cross one."""
+    spans, s = [], 0
+    for i, t in enumerate(tokens):
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if t in (".", "!", "?") and nxt not in ('"', "'", "”", "’", "''"):
+            spans.append((s, i + 1)); s = i + 1
+        elif t in ('"', "”", "''") and i > 0 and tokens[i - 1] in (".", "!", "?"):
+            spans.append((s, i + 1)); s = i + 1
+    if s < len(tokens):
+        spans.append((s, len(tokens)))
+    return spans
+
+
+def link_clusters(antecedent: dict[int, int]) -> list[list[int]]:
+    """Word clusters from each word's chosen antecedent (union-find)."""
+    parent: dict[int, int] = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for w, a in antecedent.items():
+        parent[find(w)] = find(a)
+    groups: dict[int, list[int]] = defaultdict(list)
+    for w in parent:
+        groups[find(w)].append(w)
+    return sorted(sorted(g) for g in groups.values() if len(g) > 1)
+
+
+def relation_triples(logits: np.ndarray, pairs: list[tuple[int, int]],
+                     names: list[str], top: int = 4) -> set[tuple]:
+    """ATLOP decoding: a relation holds when its logit beats the threshold
+    class (column 0), at most ``top`` per pair."""
+    out = set()
+    for (h, t), lg in zip(pairs, logits):
+        above = [k for k in np.argsort(-lg[1:])[:top] if lg[k + 1] > lg[0]]
+        out |= {(h, t, names[k]) for k in above}
+    return out
+
+
+@torch.no_grad()
+def run_phase2(model, feats: list[dict], tok, device, batch: int = 4) -> list[dict]:
+    """Per window: predicted coref clusters (inclusive word spans), relation
+    logits per ordered entity pair, and NER log-probabilities."""
+    order = sorted(range(len(feats)), key=lambda i: len(feats[i]["input_ids"]))
+    out: list[dict | None] = [None] * len(feats)
+    for k in range(0, len(order), batch):
+        idx = order[k:k + batch]
+        b = {n: v.to(device) for n, v in collate([feats[i] for i in idx],
+                                                 tok.pad_token_id).items()}
+        o = model(b, predict=False, predict_heads=True)
+        best = o["coref_scores"].argmax(-1).cpu()                    # [B,W]
+        cand = o["coref_cand"].cpu()
+        rel = o["relation"].float().cpu().numpy()
+        pair_b = b["pair_batch"].cpu().numpy()
+        for j, i in enumerate(idx):
+            W = feats[i]["_W"]
+            ante = {w: int(cand[j, w, best[j, w] - 1]) for w in range(W) if best[j, w] > 0}
+            words = link_clusters(ante)
+            heads = [w for c in words for w in c]
+            span = {}
+            if heads:
+                h = torch.tensor(heads, device=device)
+                lg, pos = model.coref.spans(o["coref_a"], torch.full_like(h, j), h,
+                                            b["sent_of_word"])
+                st = lg[..., 0].masked_fill(pos > h.unsqueeze(1), -1e9).argmax(1)
+                en = lg[..., 1].masked_fill(pos < h.unsqueeze(1), -1e9).argmax(1)
+                st = pos.gather(1, st.unsqueeze(1)).squeeze(1).tolist()
+                en = pos.gather(1, en.unsqueeze(1)).squeeze(1).tolist()
+                span = {w: (s, e) for w, s, e in zip(heads, st, en)}
+            out[i] = {"coref": [[span[w] for w in c] for c in words],
+                      "relation": rel[pair_b == j],
+                      "ner": torch.log_softmax(o["ner"][j, :W].float(), -1).cpu().numpy()}
+    return out
+
+
+def eval_litbank(model, tok, spec, vocab, device, limit) -> dict:
+    """LitBank coreference, the bake-off's 400-word windows: CoNLL-F1 (mean of
+    MUC, B³, CEAF-e) per window, averaged -- the teacher LingMess's protocol."""
+    from ..gold.litbank import load_coref_items
+    from ..score.coref import conll_f1
+    items = load_coref_items(limit=limit)
+    feats = [phase2_window(it.tokens, _sentences(it.tokens), tok, spec, vocab)
+             for it in items]
+    outs = run_phase2(model, feats, tok, device)
+    rows = []
+    for it, f, o in zip(items, feats, outs):
+        gold = it.layers["coref"]
+        r = conll_f1(gold, o["coref"]) if gold else {"conll_f1": 1.0, "b3_f1": 1.0, "muc_f1": 1.0}
+        n_gold = sum(len(c) for c in gold)
+        reach = sum(e < f["_W"] for c in gold for _, e in c)
+        rows.append({"coref_conll": [r["conll_f1"], 1], "coref_b3": [r["b3_f1"], 1],
+                     "coref_muc": [r["muc_f1"], 1], "coref_reach": [reach, n_gold]})
+    return {"items": rows, "kinds": {"coref_conll": "acc", "coref_b3": "acc",
+                                     "coref_muc": "acc", "coref_reach": "acc"}}
+
+
+def _pairs(n: int) -> list[tuple[int, int]]:
+    return [(h, t) for h in range(n) for t in range(n) if h != t]
+
+
+def eval_redocred(model, tok, spec, vocab, device, limit) -> dict:
+    """Re-DocRED test (documents up to 512 words).
+
+    ``rel_f1``: gold entities given, micro triple-F1 -- the teacher ATLOP's
+    protocol. Triples on an entity past the subword limit count as misses.
+
+    ``rel_e2e_f1``: entities found by the model itself -- its NER and coref
+    through ``entities.build_entities``, as the corpus built them for the
+    teacher. A predicted entity stands for the gold entity sharing the most
+    exactly-matching mention spans (none: its triples are false positives),
+    so this is a relaxed end-to-end score, not the strict all-mentions one.
+    """
+    from ..entities import build_entities
+    from ..gold.redocred import load_rel_items
+    items = load_rel_items(limit=limit)
+    names = vocab.labels["relations"]
+    tags = vocab.labels["ner"]
+    allowed, start = bio_constraints(tags)
+    feats = []
+    for it in items:
+        sp = [tuple(x) for x in it.layers["sentence_spans"]]
+        ents = [[(a, e + 1) for a, e in en["mentions"]] for en in it.entities]
+        feats.append(phase2_window(it.tokens, sp, tok, spec, vocab, ents))
+    outs = run_phase2(model, feats, tok, device)
+    rows, feats2, order2 = [], [], []
+    for n, (it, f, o) in enumerate(zip(items, feats, outs)):
+        keep = f["_ent_keep"]
+        pred = relation_triples(o["relation"], _pairs(len(keep)), names)
+        pred = {(keep[h], keep[t], r) for h, t, r in pred}
+        gold = {tuple(x) for x in it.layers["rel"]}
+        reach = sum(h in keep and t in keep for h, t, _ in gold)
+        rows.append({"rel_f1": [len(pred & gold), len(pred), len(gold)],
+                     "rel_reach": [reach, len(gold)]})
+        # End to end: the model's own entities.
+        W = f["_W"]
+        sp = [tuple(x) for x in it.layers["sentence_spans"]]
+        ner = [[tags[x] for x in viterbi(o["ner"][s:min(e, W)], allowed, start)]
+               if s < W else None for s, e in sp]
+        sents, vertex = build_entities(it.tokens, [list(x) for x in sp], ner,
+                                       [[list(m) for m in c] for c in o["coref"]])
+        if vertex is None:
+            continue
+        ents = [[(sp[m["sent_id"]][0] + m["pos"][0], sp[m["sent_id"]][0] + m["pos"][1])
+                 for m in v] for v in vertex]
+        feats2.append(phase2_window(it.tokens, sp, tok, spec, vocab, ents))
+        order2.append((n, ents))
+    outs2 = run_phase2(model, feats2, tok, device)
+    for r in rows:
+        r["rel_e2e_f1"] = [0, 0, r["rel_f1"][2]]
+        r["rel_e2e_docs"] = [0, 1]          # did the model find two entities?
+    for (n, ents), f, o in zip(order2, feats2, outs2):
+        it, keep = items[n], f["_ent_keep"]
+        gold_m = [{(a, e + 1) for a, e in en["mentions"]} for en in it.entities]
+        match = {}
+        for k, ei in enumerate(keep):
+            ov = [len(set(ents[ei]) & g) for g in gold_m]
+            m = max(ov) if ov else 0
+            match[k] = ov.index(m) if m and ov.count(m) == 1 else None
+        pred = relation_triples(o["relation"], _pairs(len(keep)), names)
+        pred_n = len({(h, t, r) for h, t, r in pred})
+        mapped = {(match[h], match[t], r) for h, t, r in pred
+                  if match[h] is not None and match[t] is not None and match[h] != match[t]}
+        gold = {tuple(x) for x in it.layers["rel"]}
+        rows[n]["rel_e2e_f1"] = [len(mapped & gold), pred_n, len(gold)]
+        rows[n]["rel_e2e_docs"] = [1, 1]
+    return {"items": rows, "kinds": {"rel_f1": "f1", "rel_reach": "acc",
+                                     "rel_e2e_f1": "f1", "rel_e2e_docs": "acc"}}
+
+
 BENCHMARKS = {"ud": eval_ud, "srl": eval_srl, "srl_full": eval_srl_full,
-              "ner": eval_ner, "cls": eval_cls}
+              "ner": eval_ner, "cls": eval_cls,
+              "litbank": eval_litbank, "redocred": eval_redocred}
+PHASE2_BENCHMARKS = ("litbank", "redocred")
 
 
 # ── aggregation and the bootstrap ───────────────────────────────────
@@ -451,11 +662,19 @@ REPORTED = [("ud", "pos", "POS acc"), ("ud", "lemma", "lemma acc"),
             ("srl_full", "role_f1", "roles F1, gold predicates (all)"),
             ("srl_full", "e2e_f1", "end-to-end SRL F1"),
             ("ner", "ner_f1", "NER F1"),
-            ("cls", "cls_f1", "CLS micro-F1"), ("cls", "cls_exact", "CLS exact")]
+            ("cls", "cls_f1", "CLS micro-F1"), ("cls", "cls_exact", "CLS exact"),
+            ("litbank", "coref_conll", "coref CoNLL-F1"),
+            ("litbank", "coref_reach", "coref gold mentions inside the window"),
+            ("redocred", "rel_f1", "relation triple-F1, gold entities"),
+            ("redocred", "rel_e2e_f1", "relation triple-F1, own entities (relaxed)"),
+            ("redocred", "rel_reach", "relation gold triples inside the window")]
 # v5 from DECISIONS.md; its SRL split from its cached bake-off predictions on
 # the same items (EVALUATION.md).
 V5 = {"pos": 0.987, "uas": 0.949, "las": 0.925, "ner_f1": 0.889, "srl_f1": 0.843,
       "srl_f1_verb": 0.857, "srl_f1_other": 0.742}
+# The phase-2 teachers' scores on the same items (DECISIONS.md); v5 had no
+# coref or relation heads.
+TEACHER = {"coref_conll": 0.699, "rel_f1": 0.790}
 
 
 def report(results: dict, out: Path, source: str) -> str:
@@ -469,18 +688,19 @@ def report(results: dict, out: Path, source: str) -> str:
             continue
         vals = [metric(results[r][bench]["items"], key, results[r][bench]["kinds"][key])
                 for r in runs]
-        best = max(vals) if key != "tree" else None
+        best = max(vals) if not key.endswith(("tree", "reach")) else None
         cells = [f"**{v:.4f}**" if v == best else f"{v:.4f}" for v in vals]
         n = len(results[runs[0]][bench]["items"])
-        lines.append(f"| {bench} (n={n}) | {name} | " + " | ".join(cells)
-                     + f" | {V5[key]:.3f} |" if key in V5 else
-                     f"| {bench} (n={n}) | {name} | " + " | ".join(cells) + " | — |")
+        ref = (f"{V5[key]:.3f}" if key in V5 else
+               f"{TEACHER[key]:.3f} (teacher)" if key in TEACHER else "—")
+        lines.append(f"| {bench} (n={n}) | {name} | " + " | ".join(cells) + f" | {ref} |")
     lines += ["", "## Paired differences (95% bootstrap interval; a tie if it spans 0)", ""]
     pairs = [(a, b) for i, a in enumerate(runs) for b in runs[i + 1:]]
     lines += ["| metric | " + " | ".join(f"{a} − {b}" for a, b in pairs) + " |",
               "|---|" + "---|" * len(pairs)]
     for bench, key, name in REPORTED:
-        if key == "tree" or not all(bench in results[r] for r in runs):
+        if key in ("tree", "coref_reach", "rel_reach") or \
+                not all(bench in results[r] for r in runs):
             continue
         cells = []
         for a, b in pairs:
@@ -519,6 +739,8 @@ def main() -> int:
               flush=True)
         results[run] = {}
         for bench in args.benchmarks.split(","):
+            if bench in PHASE2_BENCHMARKS and not model.phase2:
+                continue                    # no coref or relation heads
             t1 = time.time()
             lim = args.limit if bench != "cls" else (args.limit or args.cls_limit or None)
             r = BENCHMARKS[bench](model, tok, spec, vocab, device, lim)

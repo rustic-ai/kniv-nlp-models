@@ -135,7 +135,10 @@ def load_rel_items(split: str = "test", limit: int | None = None,
         items.append(GoldItem(
             id=f"redocred-{split}-{di:04d}",
             tokens=tokens,
-            layers={"rel": [list(t) for t in triples]},
+            # Sentence boundaries ride along for models that take them
+            # (v6's gold evaluation); scorers read only ``rel``.
+            layers={"rel": [list(t) for t in triples],
+                    "sentence_spans": [[o, o + len(st)] for o, st in zip(offsets, sents)]},
             entities=entities,
         ))
         if limit and len(items) >= limit:
