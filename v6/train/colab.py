@@ -656,7 +656,8 @@ def cmd_probe(a) -> int:
     """The A100 fit check, run synchronously: batch size, gradient
     checkpointing and bf16 are measured, not assumed."""
     spec, name = encoders.get(a.encoder), run_name(a)
-    sess = prepare(a.session or session(name), token=False)
+    # The token only when the probe reads the hub: --init from a run there.
+    sess = prepare(a.session or session(name), token="--init" in a.extra)
     out = f"{VM_RUNS}/{name}-probe"
     argv = ["--encoder", spec.name, "--out", out, "--probe", str(a.steps), *a.extra]
     code = START.format(repo=VM_REPO, out=out, argv=argv, RUN_MARKER=RUN_MARKER)
