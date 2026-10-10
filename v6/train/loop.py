@@ -44,7 +44,7 @@ import torch
 from ..config import RUNS_DIR
 from . import encoders
 from .data import IGNORE, batch_order, collate, featurise
-from .model import HEADS, V6Model, losses
+from .model import HEADS, PHASE2_HEADS, V6Model, losses
 from .runstate import Hub, RunState, memory
 from .vocab import Vocab
 
@@ -111,6 +111,13 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
         t, m = b["sentiment"], b["sentiment"] != IGNORE
         c["sent_ok"] += (o["sentiment"].argmax(-1)[m] == t[m]).sum().item()
         c["sent_n"] += m.sum().item()
+        if "coref_scores" in o:
+            _coref_counts(o, b, c)
+        if "relation" in o and len(o["relation"]):
+            lg, gold = o["relation"], b["pair_labels"][:, 1:] > 0.5
+            pred = lg[:, 1:] > lg[:, :1]
+            c["rel_tp"] += (pred & gold).sum().item()
+            c["rel_p"] += pred.sum().item(); c["rel_g"] += gold.sum().item()
     model.train()
     r = {h: c[f"{h}_ok"] / max(c[f"{h}_n"], 1) for h in ("pos", "morph", "lemma")}
     r.update(uas=c["uas_ok"] / max(c["dep_n"], 1), las=c["las_ok"] / max(c["dep_n"], 1),
@@ -119,12 +126,65 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
              srl_role_f1=_f1(c["role_tp"], c["role_p"], c["role_g"]),
              cls_f1=_f1(c["cls_tp"], c["cls_p"], c["cls_g"]),
              sentiment=c["sent_ok"] / max(c["sent_n"], 1))
+    keys = ["pos", "morph", "lemma", "ner_f1", "las", "srl_pred_f1", "srl_role_f1",
+            "cls_f1", "sentiment"]
+    if c["link_g"] or c["rel_g"]:
+        r.update(coref_link_f1=_f1(c["link_tp_p"], c["link_p"], c["link_g"])
+                 if c["link_g"] else 0.0,
+                 relation_f1=_f1(c["rel_tp"], c["rel_p"], c["rel_g"]))
+        keys += ["coref_link_f1", "relation_f1"]
     r = {k: round(v, 5) for k, v in r.items()}
     # One number to select best.pt on: every head counts equally.
-    r["composite"] = round(sum(r[k] for k in (
-        "pos", "morph", "lemma", "ner_f1", "las", "srl_pred_f1", "srl_role_f1",
-        "cls_f1", "sentiment")) / 9, 5)
+    r["composite"] = round(sum(r[k] for k in keys) / len(keys), 5)
     return r
+
+
+def _coref_counts(o: dict, b: dict, c: dict) -> None:
+    """Antecedent-link F1 on gold mentions: a predicted link (word -> earlier
+    word) is right when both are gold mentions of one cluster; recall is over
+    gold mentions that have an earlier mention in their cluster."""
+    s, cand = o["coref_scores"], o["coref_cand"]
+    B, W, _ = cand.shape
+    cl = torch.full((B, W), -1, dtype=torch.long, device=cand.device)
+    cl[b["coref_batch"], b["coref_head"]] = b["coref_cluster"]
+    ok = b["coref_ok"].unsqueeze(1) & b["word_mask"]
+    best = s.argmax(-1)                                                # 0 = dummy
+    ante = torch.gather(cand, 2, (best - 1).clamp(min=0).unsqueeze(-1)).squeeze(-1)
+    linked = (best > 0) & ok
+    right = linked & (cl >= 0) & (torch.gather(cl, 1, ante) == cl)
+    # gold mentions with an earlier mention of their cluster
+    has_prev = torch.zeros(B, W, dtype=torch.bool, device=cand.device)
+    order = torch.argsort(b["coref_head"] + b["coref_batch"] * (W + 1))
+    seen = set()
+    for i in order.tolist():
+        key = int(b["coref_cluster"][i])
+        if key in seen:
+            has_prev[b["coref_batch"][i], b["coref_head"][i]] = True
+        seen.add(key)
+    c["link_tp_p"] += right.sum().item()
+    c["link_p"] += linked.sum().item()
+    c["link_g"] += (has_prev & ok).sum().item()
+
+
+def _load_init(model, init: str, vocab: Vocab) -> None:
+    """Weights from a phase-1 checkpoint; the phase-2 heads start fresh. A
+    vocabulary that disagrees on any shared inventory refuses to load."""
+    path = Path(init)
+    if not path.exists():
+        from huggingface_hub import hf_hub_download
+        path = Path(hf_hub_download("dragonscale-ai/kniv-v6-runs", f"{init}/best.pt"))
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    for k, labels in ck["vocab"]["labels"].items():
+        if vocab.labels.get(k) != labels:
+            raise SystemExit(f"--init vocabulary differs from this one on {k!r}")
+    missing, unexpected = model.load_state_dict(ck["model"], strict=False)
+    fresh = [m for m in missing if not m.startswith(("coref.", "relation.",
+                                                      "mix.coref.", "mix.relation."))]
+    if fresh or unexpected:
+        raise SystemExit(f"--init does not fit this model: missing {fresh[:5]}, "
+                         f"unexpected {unexpected[:5]}")
+    print(f"initialised from {init}: {len(ck['model'])} tensors loaded, "
+          f"{len(missing)} phase-2 tensors fresh", flush=True)
 
 
 def _to(batch: dict, device) -> dict:
@@ -147,6 +207,13 @@ def main() -> int:
     ap.add_argument("--head-lr", type=float)
     ap.add_argument("--batch-size", type=int)
     ap.add_argument("--grad-accum", type=int)
+    ap.add_argument("--phase2", action="store_true",
+                    help="add the coreference and relation heads (TRAINING.md §4)")
+    ap.add_argument("--init", help="start from a checkpoint: a best.pt path, or a run "
+                                   "name in the hub repo (e.g. deberta-v3-large-srlft-full)")
+    ap.add_argument("--train-scope", choices=["all", "phase2"], default="all",
+                    help="phase2: train only the phase-2 heads and their layer mixes; "
+                         "everything else stays exactly as --init left it")
     ap.add_argument("--srl-mode", choices=["joint", "conditioned"], default="joint",
                     help="joint: every predicate in one pass (v6); conditioned: one "
                          "pass per predicate over its sentence (v5), for MODEL_CHANGES §1")
@@ -193,13 +260,23 @@ def main() -> int:
     tok = AutoTokenizer.from_pretrained(spec.hf_id)
     vocab = Vocab.load()
     cond = args.srl_mode == "conditioned"
-    train = featurise(spec, "train", vocab, tok, limit=args.train_limit, srl_sentences=cond)
-    dev = (featurise(spec, "dev", vocab, tok, limit=args.dev_limit, srl_sentences=cond)
-           if not args.probe else [])
+    train = featurise(spec, "train", vocab, tok, limit=args.train_limit, srl_sentences=cond,
+                      phase2=args.phase2)
+    dev = (featurise(spec, "dev", vocab, tok, limit=args.dev_limit, srl_sentences=cond,
+                     phase2=args.phase2) if not args.probe else [])
+    heads = HEADS + (PHASE2_HEADS if args.phase2 else ())
 
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
                     attn_implementation=spec.attn_implementation,
-                    srl_mode=args.srl_mode).to(device)
+                    srl_mode=args.srl_mode, phase2=args.phase2).to(device)
+    if args.init:
+        _load_init(model, args.init, vocab)
+    if args.train_scope == "phase2":
+        if not args.phase2:
+            raise SystemExit("--train-scope phase2 needs --phase2")
+        for n, prm in model.named_parameters():
+            prm.requires_grad = n.startswith(("coref.", "relation.", "mix.coref.",
+                                              "mix.relation."))
     wrong = {str(p.dtype) for p in model.parameters()} - {"torch.float32"}
     if wrong:
         raise SystemExit(f"parameters must be fp32 master weights; found {wrong}")
@@ -209,12 +286,14 @@ def main() -> int:
 
     enc_decay, enc_plain = [], []
     for n, p in model.encoder.named_parameters():
-        (enc_plain if p.ndim < 2 or "norm" in n.lower() else enc_decay).append(p)
-    opt = torch.optim.AdamW([
-        {"params": enc_decay, "lr": spec.encoder_lr, "weight_decay": args.weight_decay},
-        {"params": enc_plain, "lr": spec.encoder_lr, "weight_decay": 0.0},
-        {"params": model.head_parameters(), "lr": spec.head_lr, "weight_decay": 0.0},
-    ], betas=(0.9, 0.98), eps=1e-6, fused=device.type == "cuda")
+        if p.requires_grad:
+            (enc_plain if p.ndim < 2 or "norm" in n.lower() else enc_decay).append(p)
+    groups = [{"params": enc_decay, "lr": spec.encoder_lr, "weight_decay": args.weight_decay},
+              {"params": enc_plain, "lr": spec.encoder_lr, "weight_decay": 0.0},
+              {"params": [p for p in model.head_parameters() if p.requires_grad],
+               "lr": spec.head_lr, "weight_decay": 0.0}]
+    opt = torch.optim.AdamW([g for g in groups if g["params"]], betas=(0.9, 0.98),
+                            eps=1e-6, fused=device.type == "cuda")
 
     micro = spec.batch_size
     if args.probe:
@@ -235,7 +314,7 @@ def main() -> int:
                         "train_windows": len(train), "dev_windows": len(dev),
                         "steps_per_epoch": per_epoch})
     rs.push_minutes = args.push_minutes
-    scale, calib = {h: 1.0 for h in HEADS}, defaultdict(list)
+    scale, calib = {h: 1.0 for h in heads}, defaultdict(list)
     ck = rs.try_resume(model, opt, sched)
     if ck:
         scale, calib = ck["loss_scale"], defaultdict(list, ck["calib"])
@@ -246,7 +325,9 @@ def main() -> int:
 
     def extra():
         return {"loss_scale": scale, "calib": dict(calib), "vocab": vocab.to_json(),
-                "encoder": spec.asdict(), "model_config": {"srl_mode": args.srl_mode}}
+                "encoder": spec.asdict(),
+                "model_config": {"srl_mode": args.srl_mode, "phase2": args.phase2,
+                                 "init": args.init, "train_scope": args.train_scope}}
 
     def stop(state, reason=""):
         # Checkpoint upload first, status last: a mirrored "stopped" or "done"
@@ -342,13 +423,13 @@ def main() -> int:
                         calib[h].append(this[h])
                 if step == args.calib_steps:
                     scale = {h: 1.0 / max(sum(calib[h]) / len(calib[h]), 1e-3)
-                             if calib[h] else 1.0 for h in HEADS}
+                             if calib[h] else 1.0 for h in heads}
                     rs.event("loss_scale", scale=scale)
                     print("  loss scales: " + " ".join(
                         f"{h} {s:.3f}" for h, s in scale.items()), flush=True)
 
                 if (step % args.log_every == 0 or step == total) and n_log:
-                    hl = {h: round(log[h] / n_log, 4) for h in HEADS}
+                    hl = {h: round(log[h] / n_log, 4) for h in heads}
                     rs.status(loss=round(log["total"] / n_log, 4), head_loss=hl)
                     p = rs.p
                     print(f"step {step}/{total} ep {epoch} loss {p.loss:.4f} | "

@@ -91,11 +91,148 @@ class Bilinear(nn.Module):
             + y @ b.T + self.lin.bias
 
 
+def _dist_bucket(d: torch.Tensor) -> torch.Tensor:
+    """0,1,2,3,4 exact, then 5-7, 8-15, 16-31, 32-63, 64+ -> 10 buckets."""
+    d = d.clamp(min=0)
+    log = torch.floor(torch.log2(d.clamp(min=1).float())).long()
+    return torch.where(d < 5, d, (log + 3).clamp(max=9))
+
+
+class CorefHead(nn.Module):
+    """Word-level coreference (Dobrovolskii 2021).
+
+    Antecedents are scored between words, not spans: a cheap bilinear coarse
+    score keeps the top ``k`` earlier words per word, and a fine scorer over
+    ``[a_i, a_j, a_i*a_j, distance]`` adds to it. Column 0 of the result is
+    the dummy "no antecedent" at score 0. A span head then grows each
+    mention's head word into its span, within ``span_radius`` words.
+    """
+
+    def __init__(self, H: int, d: int = 256, k: int = 50, span_radius: int = 24,
+                 p: float = 0.1):
+        super().__init__()
+        self.k, self.r = k, span_radius
+        self.proj = mlp(H, d, p)
+        self.coarse = nn.Linear(d, d, bias=False)
+        self.dist = nn.Embedding(10, 32)
+        self.fine = nn.Sequential(nn.Linear(3 * d + 32, d), nn.GELU(), nn.Dropout(p),
+                                  nn.Linear(d, 1))
+        self.rel_pos = nn.Embedding(2 * span_radius + 1, 32)
+        self.span = nn.Sequential(nn.Linear(2 * d + 32, d), nn.GELU(), nn.Dropout(p),
+                                  nn.Linear(d, 2))
+
+    def antecedents(self, words, word_mask):
+        """``(scores [B,W,k+1], cand [B,W,k], a [B,W,d])``; invalid = NEG."""
+        a = self.proj(words)
+        B, W, _ = a.shape
+        # Scaled like attention: unscaled, two LayerNorm'd 256-d vectors give
+        # scores around +-16 and the softmax starts saturated.
+        coarse = (self.coarse(a) @ a.transpose(1, 2)) / a.size(-1) ** 0.5  # [B,W,W]
+        i = torch.arange(W, device=a.device)
+        ok = (i.view(1, W, 1) > i.view(1, 1, W)) & word_mask.unsqueeze(1) \
+            & word_mask.unsqueeze(2)
+        coarse = coarse.float().masked_fill(~ok, NEG)
+        k = min(self.k, W)
+        top, cand = coarse.topk(k, dim=-1)                              # [B,W,k]
+        aj = torch.gather(a.unsqueeze(1).expand(B, W, W, a.size(-1)), 2,
+                          cand.unsqueeze(-1).expand(B, W, k, a.size(-1)))
+        ai = a.unsqueeze(2).expand_as(aj)
+        dist = self.dist(_dist_bucket(i.view(1, W, 1) - cand))
+        fine = self.fine(torch.cat([ai, aj, ai * aj, dist], -1)).squeeze(-1).float()
+        valid = top > NEG / 2
+        s = torch.where(valid, top + fine, torch.full_like(top, NEG))
+        dummy = torch.zeros(B, W, 1, device=a.device)
+        return torch.cat([dummy, s], -1), cand, a
+
+    def spans(self, a, batch_idx, heads, sent_of_word):
+        """Start/end logits ``[M, 2r+1]`` over positions ``head-r .. head+r``
+        in the head's sentence."""
+        W = a.size(1)
+        off = torch.arange(-self.r, self.r + 1, device=a.device)
+        pos = heads.unsqueeze(1) + off                                  # [M,2r+1]
+        inb = (pos >= 0) & (pos < W)
+        posc = pos.clamp(0, W - 1)
+        same = sent_of_word[batch_idx.unsqueeze(1), posc] == \
+            sent_of_word[batch_idx, heads].unsqueeze(1)
+        aj = a[batch_idx.unsqueeze(1), posc]                            # [M,2r+1,d]
+        ah = a[batch_idx, heads].unsqueeze(1).expand_as(aj)
+        lg = self.span(torch.cat([ah, aj, self.rel_pos(off + self.r).expand(
+            len(heads), -1, -1)], -1)).float()                          # [M,2r+1,2]
+        return lg.masked_fill(~(inb & same).unsqueeze(-1), NEG), pos
+
+
+class RelationHead(nn.Module):
+    """ATLOP-style document relation extraction over entity clusters.
+
+    An entity is the log-sum-exp of its mentions' first-word vectors. ATLOP's
+    localized context pooling reads the encoder's attention; this learns a
+    pair-specific attention over the window instead, computed per window so
+    no ``[pairs, words, d]`` tensor exists. Grouped bilinear over the
+    relations, with column 0 the adaptive threshold class.
+    """
+
+    def __init__(self, H: int, n_rel: int, d: int = 512, block: int = 64, p: float = 0.1):
+        super().__init__()
+        self.block = block
+        self.proj = mlp(H, d, p)
+        self.q = nn.Linear(2 * d, d)
+        self.kp = nn.Linear(d, d)
+        self.head_ext = nn.Linear(2 * d, d)
+        self.tail_ext = nn.Linear(2 * d, d)
+        self.bilinear = nn.Linear(d * block, n_rel + 1)
+
+    def forward(self, words, batch):
+        x = self.proj(words)                                            # [B,W,d]
+        E = len(batch["ent_batch"])
+        if E == 0 or len(batch["pair_h"]) == 0:
+            return x.new_zeros(0, self.bilinear.out_features)
+        men = x[batch["ent_batch"][batch["men_ent"]], batch["men_start"]].float()  # [Mm,d]
+        # log-sum-exp per entity, via a max shift for stability
+        ent_max = torch.full((E, men.size(1)), -1e4, device=x.device)
+        ent_max = ent_max.scatter_reduce(0, batch["men_ent"].unsqueeze(1).expand_as(men),
+                                         men, reduce="amax", include_self=True)
+        ex = torch.exp(men - ent_max[batch["men_ent"]])
+        ent = torch.zeros(E, men.size(1), device=x.device).index_add_(0, batch["men_ent"], ex)
+        ent = ent_max + torch.log(ent.clamp(min=1e-30))
+        eh, et = ent[batch["pair_h"]], ent[batch["pair_t"]]
+        ctx = torch.zeros_like(eh)
+        keys = self.kp(x).float()
+        qs = self.q(torch.cat([eh, et], -1).to(x.dtype)).float()
+        wm = batch["word_mask"]
+        for b in batch["pair_batch"].unique().tolist():
+            sel = batch["pair_batch"] == b
+            att = (qs[sel] @ keys[b].T) / keys.size(-1) ** 0.5             # [Pb,W]
+            att = att.masked_fill(~wm[b].unsqueeze(0), NEG).softmax(-1)
+            ctx[sel] = att @ x[b].float()
+        zs = torch.tanh(self.head_ext(torch.cat([eh, ctx], -1)))
+        zo = torch.tanh(self.tail_ext(torch.cat([et, ctx], -1)))
+        P, d = zs.shape
+        b1 = zs.view(P, d // self.block, self.block)
+        b2 = zo.view(P, d // self.block, self.block)
+        bl = (b1.unsqueeze(3) * b2.unsqueeze(2)).view(P, d * self.block)
+        return self.bilinear(bl).float()                                # [P, R+1]
+
+
+def atlop_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """ATLOP's adaptive-threshold loss. ``labels[:, 0]`` marks no-relation
+    pairs; positive relations must beat the threshold class and the threshold
+    must beat every negative relation."""
+    labels = labels.clone()
+    th = torch.zeros_like(labels)
+    th[:, 0] = 1.0
+    labels[:, 0] = 0.0
+    p_mask, n_mask = labels + th, 1 - labels
+    l1 = -(F.log_softmax(logits - (1 - p_mask) * 1e4, -1) * labels).sum(1)
+    l2 = -(F.log_softmax(logits - (1 - n_mask) * 1e4, -1) * th).sum(1)
+    return (l1 + l2).mean()
+
+
 class V6Model(nn.Module):
     def __init__(self, hf_id: str, sizes: dict[str, int], dropout: float = 0.1,
                  attn_implementation: str | None = None,
                  arc_dim: int = 512, rel_dim: int = 128, srl_dim: int = 256,
-                 pretrained: bool = True, srl_mode: str = "joint"):
+                 pretrained: bool = True, srl_mode: str = "joint",
+                 phase2: bool = False):
         super().__init__()
         from transformers import AutoConfig, AutoModel
         # fp32 master weights for every encoder; bf16 autocast does the
@@ -145,6 +282,15 @@ class V6Model(nn.Module):
             self.mix["srl_cond"] = ScalarMix(L)
             self.srl_cond = classifier(2 * H, H, S["srl"], p)
         self.pool = nn.ModuleDict({k: nn.Linear(H, 1) for k in ("cls", "sentiment")})
+        self.phase2 = phase2
+        if phase2:
+            # Phase 2 (TRAINING.md §4): coreference and relations, each with
+            # its own layer mix; relations ride on entity clusters built from
+            # NER and coref.
+            for k in ("coref", "relation"):
+                self.mix[k] = ScalarMix(L)
+            self.coref = CorefHead(H, p=p)
+            self.relation = RelationHead(H, S["relations"], p=p)
         self.cls = classifier(H, H, S["cls"], p)
         self.sentiment = classifier(H, H, S["sentiment"], p)
 
@@ -286,6 +432,15 @@ class V6Model(nn.Module):
         o["cls"] = self.cls(self._pool(self._words(layers, "cls", first), batch, "cls"))
         o["sentiment"] = self.sentiment(
             self._pool(self._words(layers, "sentiment", first), batch, "sentiment"))
+
+        if self.phase2 and "coref_ok" in batch:
+            cw = self._words(layers, "coref", first)
+            o["coref_scores"], o["coref_cand"], o["coref_a"] = self.coref.antecedents(cw, wm)
+            if len(batch["coref_head"]):
+                o["coref_span"], o["coref_span_pos"] = self.coref.spans(
+                    o["coref_a"], batch["coref_batch"], batch["coref_head"],
+                    batch["sent_of_word"])
+            o["relation"] = self.relation(self._words(layers, "relation", first), batch)
         return o
 
 
@@ -311,8 +466,62 @@ def _ce(logits: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, int]:
                            ignore_index=IGNORE), n
 
 
-def losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
+PHASE2_HEADS = ("coref", "coref_span", "relation")
+
+
+def coref_targets(batch: dict, cand: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+    """``[B,W,k+1]`` gold antecedent mask; column 0 (dummy) where a word has
+    no gold antecedent among its *valid* candidates, including non-mentions.
+    Early words have fewer than k real candidates and ``topk`` pads with
+    masked ones; a gold match there would put the target on a NEG score."""
+    B, W, k = cand.shape
+    cl = torch.full((B, W), -1, dtype=torch.long, device=cand.device)
+    cl[batch["coref_batch"], batch["coref_head"]] = batch["coref_cluster"]
+    cj = torch.gather(cl, 1, cand.view(B, -1)).view(B, W, k)
+    gold = (cj == cl.unsqueeze(-1)) & (cl.unsqueeze(-1) >= 0) & (scores[..., 1:] > NEG / 2)
+    dummy = ~gold.any(-1, keepdim=True)
+    return torch.cat([dummy, gold], -1)
+
+
+def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
     out = {}
+    ok = batch["coref_ok"]
+    if "coref_scores" in o and ok.any():
+        s = o["coref_scores"]                                          # [B,W,k+1]
+        gold = coref_targets(batch, o["coref_cand"], s)
+        wm = batch["word_mask"] & ok.unsqueeze(1)
+        nll = torch.logsumexp(s, -1) - torch.logsumexp(s.masked_fill(~gold, NEG), -1)
+        n = int(wm.sum())
+        out["coref"] = (nll[wm].mean(), n)
+    else:
+        out["coref"] = (o["pos"].sum() * 0.0, 0)
+    if "coref_span" in o:
+        lg, pos = o["coref_span"], o["coref_span_pos"]
+        st = (pos == batch["coref_start"].unsqueeze(1)).float().argmax(1)
+        en = (pos == batch["coref_end"].unsqueeze(1)).float().argmax(1)
+        r = (lg.size(1) - 1) // 2
+        inr = ((batch["coref_start"] - batch["coref_head"]).abs() <= r) & \
+              ((batch["coref_end"] - batch["coref_head"]).abs() <= r)
+        # A target outside the head's sentence sits on a masked position:
+        # LingMess mentions can cross our sentence splits.
+        m_ = torch.arange(len(st), device=lg.device)
+        inr = inr & (lg[m_, st, 0] > NEG / 2) & (lg[m_, en, 1] > NEG / 2)
+        if inr.any():
+            loss = F.cross_entropy(lg[inr, :, 0], st[inr]) + F.cross_entropy(lg[inr, :, 1], en[inr])
+            out["coref_span"] = (loss, int(inr.sum()))
+        else:
+            out["coref_span"] = (lg.sum() * 0.0, 0)
+    else:
+        out["coref_span"] = (o["pos"].sum() * 0.0, 0)
+    if "relation" in o and len(o["relation"]):
+        out["relation"] = (atlop_loss(o["relation"], batch["pair_labels"]), len(o["relation"]))
+    else:
+        out["relation"] = (o["pos"].sum() * 0.0, 0)
+    return out
+
+
+def losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
+    out = phase2_losses(o, batch) if "coref_ok" in batch else {}
     for h in HEADS:
         if h == "cls":
             ok = batch["cls_ok"]
