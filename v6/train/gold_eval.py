@@ -131,6 +131,7 @@ def run_model(model, feats: list[dict], tok, device, batch: int = 32) -> list[di
                         for f in range(len(fb)) if fb[f] == j],
                 # Padded to the batch's longest window: keep this window's own.
                 "cls": torch.sigmoid(o["cls"][j, :feats[i]["_S"]].float()).cpu().numpy(),
+                "srl_pred": o["srl_pred"][j, :W].argmax(-1).cpu().numpy(),
             }
     return out
 
@@ -262,6 +263,78 @@ def eval_srl(model, tok, spec, vocab, device, limit) -> dict:
                                      "srl_f1_other": "f1"}}
 
 
+POS_GROUPS = ("VERB", "AUX", "NOUN", "ADJ")
+
+
+def _group(upos: str) -> str:
+    return upos if upos in POS_GROUPS else "other"
+
+
+def eval_srl_full(model, tok, spec, vocab, device, limit) -> dict:
+    """PropBank EWT test with every predicate annotated (``gold.propbank_full``).
+
+    Three measurements per sentence:
+    - **predicate identification**: the predicate head's flags against every
+      gold predicate, overall and by UPOS group;
+    - **roles given the gold predicate**, as ``eval_srl`` but over all frames;
+    - **end to end**: roles for the predicates the model itself found. An
+      argument counts only if predicate, role and span all match, so a missed
+      predicate loses all its arguments and a spurious one adds false ones.
+    """
+    path = DATA_DIR / "prepared" / "propbank-full" / "test.json"
+    if not path.exists():
+        raise SystemExit(f"{path} missing; run python -m v6.gold.propbank_full")
+    rows = json.loads(path.read_text())[:limit] if limit else json.loads(path.read_text())
+    tags = vocab.labels["srl"]
+    allowed, start = bio_constraints(tags)
+    v = tags.index("V")
+    cond = getattr(model, "srl_mode", "joint") == "conditioned"
+
+    def decode(lp, p):
+        keep = np.ones_like(lp, dtype=bool)
+        keep[:, v] = False
+        keep[p, :] = False
+        keep[p, v] = True
+        return bio_spans([tags[x] for x in viterbi(lp, allowed, start, keep)])
+
+    # Pass 1: gold predicates -> role scores, and the predicate head's flags.
+    gold_preds = [[f["predicate_idx"] for f in r["frames"]] for r in rows]
+    feats = [window(r["words"], [(0, len(r["words"]))], tok, spec, vocab,
+                    predicates=gp, srl_sentences=cond) for r, gp in zip(rows, gold_preds)]
+    outs = run_model(model, feats, tok, device)
+    found = [sorted(np.nonzero(o["srl_pred"] == 1)[0].tolist()) for o in outs]
+    # Pass 2: the model's own predicates -> roles, for the end-to-end score.
+    feats2 = [window(r["words"], [(0, len(r["words"]))], tok, spec, vocab,
+                     predicates=fp, srl_sentences=cond) for r, fp in zip(rows, found)]
+    outs2 = run_model(model, feats2, tok, device)
+
+    items = []
+    for r, gp, o, fp, o2 in zip(rows, gold_preds, outs, found, outs2):
+        row = {}
+        gset, fset = set(gp), set(fp)
+        row["pred_id"] = [len(gset & fset), len(fset), len(gset)]
+        for g in POS_GROUPS:
+            gg = {p for p in gset if _group(r["upos"][p]) == g}
+            fg = {p for p in fset if _group(r["upos"][p]) == g}
+            row[f"pred_id_{g.lower()}"] = [len(gg & fg), len(fg), len(gg)]
+        tp = n_p = n_g = 0
+        gold_args = set()
+        for f, lp in zip(r["frames"], o["srl"]):
+            gs = bio_spans(f["srl_tags"])
+            ps = decode(lp, f["predicate_idx"])
+            tp += len(gs & ps); n_p += len(ps); n_g += len(gs)
+            gold_args |= {(f["predicate_idx"],) + s for s in gs}
+        row["role_f1"] = [tp, n_p, n_g]
+        pred_args = set()
+        for p, lp in zip(fp, o2["srl"]):
+            pred_args |= {(p,) + s for s in decode(lp, p)}
+        row["e2e_f1"] = [len(gold_args & pred_args), len(pred_args), len(gold_args)]
+        items.append(row)
+    kinds = {"pred_id": "f1", "role_f1": "f1", "e2e_f1": "f1",
+             **{f"pred_id_{g.lower()}": "f1" for g in POS_GROUPS}}
+    return {"items": items, "kinds": kinds}
+
+
 def eval_ner(model, tok, spec, vocab, device, limit) -> dict:
     from ..gold.ner import load_ner_items
     items = load_ner_items("ontonotes5", limit=limit)
@@ -325,7 +398,8 @@ def eval_cls(model, tok, spec, vocab, device, limit, context: int = 6) -> dict:
     return {"items": rows, "kinds": {"cls_f1": "f1", "cls_exact": "acc"}}
 
 
-BENCHMARKS = {"ud": eval_ud, "srl": eval_srl, "ner": eval_ner, "cls": eval_cls}
+BENCHMARKS = {"ud": eval_ud, "srl": eval_srl, "srl_full": eval_srl_full,
+              "ner": eval_ner, "cls": eval_cls}
 
 
 # ── aggregation and the bootstrap ───────────────────────────────────
@@ -368,7 +442,15 @@ REPORTED = [("ud", "pos", "POS acc"), ("ud", "lemma", "lemma acc"),
             ("ud", "morph_f1", "morph feat-F1"), ("ud", "morph_exact", "morph exact"),
             ("ud", "uas", "UAS"), ("ud", "las", "LAS"), ("ud", "tree", "tree rate"),
             ("srl", "srl_f1", "SRL F1"), ("srl", "srl_f1_verb", "SRL F1, VERB predicates"),
-            ("srl", "srl_f1_other", "SRL F1, ADJ/NOUN/other"), ("ner", "ner_f1", "NER F1"),
+            ("srl", "srl_f1_other", "SRL F1, ADJ/NOUN/other"),
+            ("srl_full", "pred_id", "predicate ID F1 (all predicates)"),
+            ("srl_full", "pred_id_verb", "predicate ID F1, VERB"),
+            ("srl_full", "pred_id_aux", "predicate ID F1, AUX"),
+            ("srl_full", "pred_id_noun", "predicate ID F1, NOUN"),
+            ("srl_full", "pred_id_adj", "predicate ID F1, ADJ"),
+            ("srl_full", "role_f1", "roles F1, gold predicates (all)"),
+            ("srl_full", "e2e_f1", "end-to-end SRL F1"),
+            ("ner", "ner_f1", "NER F1"),
             ("cls", "cls_f1", "CLS micro-F1"), ("cls", "cls_exact", "CLS exact")]
 # v5 from DECISIONS.md; its SRL split from its cached bake-off predictions on
 # the same items (EVALUATION.md).

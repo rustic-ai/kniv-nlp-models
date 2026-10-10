@@ -51,13 +51,13 @@ DOMAINS = ("conversation", "narrative", "technical", "news", "encyclopedic",
 # first. See stage_srl.
 PER_SENTENCE = {"kniv-v5": ["pos", "ner", "dep"],
                 "stanza": ["lemma", "morph"]}
-# VERB only. PropBank treats an auxiliary as ARGM-MOD of the main verb, not as
-# a predicate: in the EWT test gold only 6 of 1,227 AUX tokens (0.5%) are
-# predicates, and copular "is" almost never is (existential "there is" is
-# VERB in UD, so it stays). With AUX included, a third of the frames came from
-# auxiliaries and only 13.9% of those marked their own predicate V, against
-# 91.2% for VERB -- one layer carrying two conventions. The AUX entries remain
-# in the cache; dropping them needs only a re-assemble.
+# VERB only, because the v5 teacher's AUX frames are inconsistent: with AUX
+# included, a third of the frames came from auxiliaries and only 13.9% of
+# those marked their own predicate V, against 91.2% for VERB -- one layer
+# carrying two conventions. (PropBank itself does annotate copulas and most
+# auxiliaries as predicates -- be.01, be.03, have.01, do.01 -- which the
+# fine-tuned SRL heads recover from gold; STATUS §5.2.) The AUX entries remain
+# in the cache; restoring them needs only a re-assemble.
 SRL_PREDICATE_TAGS = {"VERB"}
 PER_WINDOW = {"lingmess": ["coref"]}
 

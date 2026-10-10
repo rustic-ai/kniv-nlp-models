@@ -51,6 +51,7 @@ from .data import IGNORE, collate
 from .gold_eval import CKPT_DIR, HF_REPO, bio_constraints, load_run, viterbi, window
 
 SRL_PARAMS = ("srl_p.", "srl_a.", "srl_role.")
+PRED_PARAMS = ("srl_pred.",)
 
 
 def ewt_sentences(split: str) -> set[tuple]:
@@ -155,6 +156,169 @@ def score(model, reps, frames, tags, device, batch: int = 256) -> float:
     return 2 * P * R / max(P + R, 1e-12)
 
 
+# ── --data full: every PropBank predicate, predicate head trained too ──
+def load_full(split: str, exclude: set) -> list[dict]:
+    from ..config import DATA_DIR
+    path = DATA_DIR / "prepared" / "propbank-full" / f"{split}.json"
+    if not path.exists():
+        raise SystemExit(f"{path} missing; run python -m v6.gold.propbank_full")
+    return [r for r in json.loads(path.read_text())
+            if tuple(r["words"]) not in exclude and len(r["words"]) <= 128 and r["frames"]]
+
+
+def _decode(lp, p, tags, allowed, start, v):
+    keep = np.ones_like(lp, dtype=bool)
+    keep[:, v] = False
+    keep[p, :] = False
+    keep[p, v] = True
+    return bio_spans([tags[x] for x in viterbi(lp, allowed, start, keep)])
+
+
+@torch.no_grad()
+def score_full(model, reps, rows, frames, tags, device) -> dict:
+    """Predicate-ID F1, roles F1 on gold predicates, and end-to-end F1 (the
+    model's own predicates; predicate, role and span must all match)."""
+    model.eval()
+    allowed, start = bio_constraints(tags)
+    v = tags.index("V")
+    pid = [0, 0, 0]; role = [0, 0, 0]; e2e = [0, 0, 0]
+    found = []
+    for si, r in enumerate(rows):
+        logits = model.srl_pred(reps[si].to(device, torch.float32))
+        fp = torch.nonzero(logits.argmax(-1) == 1).flatten().tolist()
+        found.append(fp)
+        g = {f["predicate_idx"] for f in r["frames"]}
+        pid[0] += len(g & set(fp)); pid[1] += len(fp); pid[2] += len(g)
+    by_sent = defaultdict(list)
+    for fr in frames:
+        by_sent[fr[0]].append(fr)
+    gold_args = defaultdict(set)
+    for k in range(0, len(frames), 256):
+        chunk = frames[k:k + 256]
+        lg, _ = role_logits(model, reps, chunk, device)
+        lp = torch.log_softmax(lg.float(), -1).cpu().numpy()
+        for (si, p, gold), l in zip(chunk, lp):
+            gs = bio_spans([tags[x] for x in gold])
+            ps = _decode(l[:len(gold)], p, tags, allowed, start, v)
+            role[0] += len(gs & ps); role[1] += len(ps); role[2] += len(gs)
+            gold_args[si] |= {(p,) + s for s in gs}
+    pred_frames = [(si, p, np.zeros(len(rows[si]["words"]), dtype=np.int64))
+                   for si, fp in enumerate(found) for p in fp]
+    pred_args = defaultdict(set)
+    for k in range(0, len(pred_frames), 256):
+        chunk = pred_frames[k:k + 256]
+        lg, _ = role_logits(model, reps, chunk, device)
+        lp = torch.log_softmax(lg.float(), -1).cpu().numpy()
+        for (si, p, z), l in zip(chunk, lp):
+            pred_args[si] |= {(p,) + s for s in _decode(l[:len(z)], p, tags, allowed, start, v)}
+    for si in range(len(rows)):
+        e2e[0] += len(gold_args[si] & pred_args[si])
+        e2e[1] += len(pred_args[si]); e2e[2] += len(gold_args[si])
+
+    def f1(c):
+        P, R = c[0] / max(c[1], 1), c[0] / max(c[2], 1)
+        return 2 * P * R / max(P + R, 1e-12)
+    return {"pred_id_f1": f1(pid), "role_f1": f1(role), "e2e_f1": f1(e2e)}
+
+
+def main_full(args, model, tok, spec, vocab, best, device, rng) -> int:
+    tags = vocab.labels["srl"]
+    test = {tuple(r["words"]) for r in load_full("test", set())} | {
+        tuple(e["words"]) for e in json.loads((PREPARED_DIR / "srl_test.json").read_text())
+        if e.get("words")}
+    train, dev = load_full("train", test), load_full("dev", test)
+    print(f"{args.run} (dev {best['value']}): full PropBank EWT, train {len(train)} sentences / "
+          f"{sum(len(r['frames']) for r in train)} frames, dev {len(dev)} / "
+          f"{sum(len(r['frames']) for r in dev)}; test sentences excluded", flush=True)
+    t0 = time.time()
+    train_r = cache_reps(model, [tuple(r["words"]) for r in train], tok, spec, vocab, device)
+    dev_r = cache_reps(model, [tuple(r["words"]) for r in dev], tok, spec, vocab, device)
+    print(f"cached representations in {time.time() - t0:.0f}s", flush=True)
+    ix = vocab.index["srl"]
+
+    def frames(rows):
+        return [(si, f["predicate_idx"], np.array([ix[x] for x in f["srl_tags"]], dtype=np.int64))
+                for si, r in enumerate(rows) for f in r["frames"]]
+    train_f, dev_f = frames(train), frames(dev)
+    pred_target = [torch.tensor([int(i in {f["predicate_idx"] for f in r["frames"]})
+                                 for i in range(len(r["words"]))]) for r in train]
+    for n, p in model.named_parameters():
+        p.requires_grad = n.startswith(SRL_PARAMS + PRED_PARAMS)
+    params = [p for p in model.parameters() if p.requires_grad]
+    print(f"trainable: {sum(p.numel() for p in params):,} parameters "
+          f"({', '.join(SRL_PARAMS + PRED_PARAMS)})", flush=True)
+    opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
+    base = score_full(model, dev_r, dev, dev_f, tags, device)
+    print("dev before: " + "  ".join(f"{k} {v:.4f}" for k, v in base.items()), flush=True)
+    frames_of_sent = defaultdict(list)
+    for fr in train_f:
+        frames_of_sent[fr[0]].append(fr)
+    best_e2e, stale, history = base["e2e_f1"], 0, [{"epoch": 0, **base}]
+    best_state = {n: p.detach().clone() for n, p in model.named_parameters() if p.requires_grad}
+    sent_batch = max(8, args.batch // 4)          # ~4 frames per sentence
+    for epoch in range(1, args.epochs + 1):
+        for m in (model.srl_p, model.srl_a, model.srl_role, model.srl_pred):
+            m.train()
+        order = rng.permutation(len(train))
+        tot = n = 0
+        for k in range(0, len(order), sent_batch):
+            sents = order[k:k + sent_batch].tolist()
+            # predicate head: every word of these fully annotated sentences
+            reps = [train_r[s].to(device, torch.float32) for s in sents]
+            plog = model.srl_pred(torch.cat(reps))
+            ploss = F.cross_entropy(plog.float(), torch.cat([pred_target[s] for s in sents]).to(device))
+            # role head: every frame of these sentences
+            chunk = [fr for s in sents for fr in frames_of_sent[s]]
+            lg, tgt = role_logits(model, train_r, chunk, device)
+            rloss = F.cross_entropy(lg.reshape(-1, lg.size(-1)).float(), tgt.reshape(-1),
+                                    ignore_index=IGNORE)
+            loss = ploss + rloss
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(params, 1.0)
+            opt.step()
+            tot += loss.item(); n += 1
+        r = score_full(model, dev_r, dev, dev_f, tags, device)
+        history.append({"epoch": epoch, "train_loss": tot / n, **r})
+        mark = ""
+        if r["e2e_f1"] > best_e2e:
+            best_e2e, stale, mark = r["e2e_f1"], 0, "  * best"
+            best_state = {n_: p.detach().clone() for n_, p in model.named_parameters()
+                          if p.requires_grad}
+        else:
+            stale += 1
+        print(f"epoch {epoch}: train loss {tot / n:.4f}  dev " +
+              "  ".join(f"{k} {v:.4f}" for k, v in r.items()) + mark, flush=True)
+        if stale >= args.patience:
+            print(f"no dev end-to-end improvement for {args.patience} epochs; stopping", flush=True)
+            break
+    return _write(args, best_state, best, history, base, {"e2e_f1": best_e2e},
+                  "full PropBank EWT (every predicate; gold.propbank_full)",
+                  SRL_PARAMS + PRED_PARAMS)
+
+
+def _write(args, best_state, best, history, before, after, data, trained) -> int:
+    src = CKPT_DIR / args.run / "best.pt"
+    ck = torch.load(src, map_location="cpu", weights_only=False)
+    for n_, p in best_state.items():
+        assert n_ in ck["model"] and ck["model"][n_].shape == p.shape
+        ck["model"][n_] = p.detach().cpu().to(ck["model"][n_].dtype)
+    ck["srl_finetune"] = {"base": args.run, "base_dev": best["value"], "data": data,
+                          "trained": list(trained), "history": history,
+                          "dev_before": before, "dev_after": after, "args": vars(args)}
+    out = CKPT_DIR / args.out_run
+    out.mkdir(parents=True, exist_ok=True)
+    torch.save(ck, out / "best.pt")
+    (out / "best.metric").write_text(json.dumps({
+        "value": best["value"], "step": best["step"],
+        "metric": f"dev composite of the base run; {', '.join(trained)} fine-tuned on {data}",
+        **{f"srl_dev_{k}": v for k, v in after.items()}}))
+    print(f"{len(best_state)} SRL tensors replaced; wrote {out / 'best.pt'}", flush=True)
+    print(f"score it: uv run python -m v6.train.gold_eval --local {CKPT_DIR} "
+          f"--runs {args.run},{args.out_run} --benchmarks srl,srl_full")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--run", default="deberta-v3-large", help="base checkpoint (hub)")
@@ -165,6 +329,9 @@ def main() -> int:
     ap.add_argument("--patience", type=int, default=3)
     ap.add_argument("--seed", type=int, default=13)
     ap.add_argument("--device")
+    ap.add_argument("--data", choices=["full", "root"], default="full",
+                    help="full: every PropBank predicate (gold.propbank_full), predicate head "
+                         "trained too; root: v5's one-root-predicate files, role head only")
     ap.add_argument("--all-sources", action="store_true",
                     help="train on all of srl_train.json (PropBank + MASC + QA-SRL + silver)")
     args = ap.parse_args()
@@ -175,6 +342,10 @@ def main() -> int:
 
     model, tok, spec, vocab, best = load_run(args.run, HF_REPO, device)
     assert model.srl_mode == "joint", "fine-tunes the joint SRL head"
+    if args.data == "full":
+        if args.out_run == "deberta-v3-large-srlft":
+            args.out_run = "deberta-v3-large-srlft-full"
+        return main_full(args, model, tok, spec, vocab, best, device, rng)
     tags = vocab.labels["srl"]
     test = {tuple(e["words"]) for e in json.loads((PREPARED_DIR / "srl_test.json").read_text())
             if e.get("words")}
