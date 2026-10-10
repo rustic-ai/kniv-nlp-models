@@ -95,7 +95,7 @@ class V6Model(nn.Module):
     def __init__(self, hf_id: str, sizes: dict[str, int], dropout: float = 0.1,
                  attn_implementation: str | None = None,
                  arc_dim: int = 512, rel_dim: int = 128, srl_dim: int = 256,
-                 pretrained: bool = True):
+                 pretrained: bool = True, srl_mode: str = "joint"):
         super().__init__()
         from transformers import AutoConfig, AutoModel
         # fp32 master weights for every encoder; bf16 autocast does the
@@ -130,8 +130,20 @@ class V6Model(nn.Module):
         self.arc = Bilinear(arc_dim, 1)
         self.rel = Bilinear(rel_dim, S["dep"])
         self.srl_pred = nn.Linear(H, 2)
-        self.srl_p, self.srl_a = mlp(H, srl_dim, p), mlp(H, srl_dim, p)
-        self.srl_role = Bilinear(srl_dim, S["srl"])
+        if srl_mode not in ("joint", "conditioned"):
+            raise ValueError(f"srl_mode must be joint or conditioned, not {srl_mode!r}")
+        self.srl_mode = srl_mode
+        if srl_mode == "joint":
+            self.srl_p, self.srl_a = mlp(H, srl_dim, p), mlp(H, srl_dim, p)
+            self.srl_role = Bilinear(srl_dim, S["srl"])
+        else:
+            # v5's design, for the controlled comparison of MODEL_CHANGES §1:
+            # mark the predicate at the input so every encoder layer sees it,
+            # one pass per predicate over its sentence.
+            self.pred_embedding = nn.Embedding(2, H)
+            nn.init.zeros_(self.pred_embedding.weight)
+            self.mix["srl_cond"] = ScalarMix(L)
+            self.srl_cond = classifier(2 * H, H, S["srl"], p)
         self.pool = nn.ModuleDict({k: nn.Linear(H, 1) for k in ("cls", "sentiment")})
         self.cls = classifier(H, H, S["cls"], p)
         self.sentiment = classifier(H, H, S["sentiment"], p)
@@ -161,6 +173,56 @@ class V6Model(nn.Module):
         score = score.masked_fill(~member, NEG)
         att = torch.softmax(score.float(), -1).to(words.dtype) * member
         return att @ words
+
+    def _srl_conditioned(self, batch: dict, W: int,
+                         max_tokens: int = 8192) -> torch.Tensor:
+        """``[F, W, roles]`` logits from one encoder pass per frame over the
+        predicate's sentence, predicate marked at the input. Frames run in
+        length-sorted chunks of at most ``max_tokens`` subwords; positions
+        outside the sentence are NEG, exactly as the joint head masks them."""
+        C = self.sizes["srl"]
+        if "frame_sent_ids" not in batch:          # a batch with no frames at all
+            return torch.full((0, W, C), NEG, device=batch["input_ids"].device)
+        ids = batch["frame_sent_ids"]
+        F_ = ids.size(0)
+        out = torch.full((F_, W, C), NEG, device=ids.device, dtype=torch.float32)
+        if F_ == 0:
+            return out
+        lengths = batch["frame_sent_mask"].sum(1)
+        order = torch.argsort(lengths, descending=True)
+        embed = self.encoder.get_input_embeddings()
+        chunks, cur, cur_len = [], [], 0
+        for f in order.tolist():
+            n = int(lengths[f])
+            if cur and (len(cur) + 1) * max(cur_len, n) > max_tokens:
+                chunks.append(cur); cur, cur_len = [], 0
+            cur.append(f); cur_len = max(cur_len, n)
+        chunks.append(cur)
+        for chunk in chunks:
+            idx = torch.tensor(chunk, device=ids.device)
+            # Rounded up to a multiple of 16: far fewer distinct shapes (the MPS
+            # backend caches a graph per shape and ran out of memory on them),
+            # and tensor-core friendly on CUDA. Padding is masked.
+            Lc = min(-(-int(lengths[idx].max()) // 16) * 16, ids.size(1))
+            cid, cmask = ids[idx, :Lc], batch["frame_sent_mask"][idx, :Lc]
+            psub = batch["frame_pred_sub"][idx]
+            ind = torch.zeros_like(cid)
+            ind[torch.arange(len(chunk), device=ids.device), psub] = 1
+            emb = embed(cid) + self.pred_embedding(ind)
+            hs = self.encoder(inputs_embeds=emb, attention_mask=cmask,
+                              output_hidden_states=True).hidden_states
+            h = self.mix["srl_cond"](tuple(F.layer_norm(x, x.shape[-1:]) for x in hs))
+            first = batch["frame_sent_first"][idx]
+            words = self.drop(torch.gather(h, 1, first.unsqueeze(-1).expand(-1, -1, h.size(-1))))
+            pred = h[torch.arange(len(chunk), device=ids.device), psub]
+            logits = self.srl_cond(torch.cat(
+                [words, pred.unsqueeze(1).expand_as(words)], -1)).float()   # [c,Ws,C]
+            pos = batch["frame_sent_start"][idx].unsqueeze(1) + torch.arange(
+                words.size(1), device=ids.device)
+            ok = batch["frame_sent_wmask"][idx] & (pos < W)
+            rows = idx.unsqueeze(1).expand_as(pos)
+            out[rows[ok], pos[ok]] = logits[ok]
+        return out
 
     # ── forward ────────────────────────────────────────────────────
     def forward(self, batch: dict, predict: bool = False,
@@ -205,7 +267,13 @@ class V6Model(nn.Module):
         else:
             fb, fp = batch["frame_batch"], batch["frame_pred"]
         o["frame_batch"], o["frame_pred"] = fb, fp
-        if len(fb):
+        if self.srl_mode == "conditioned":
+            if predict:
+                raise NotImplementedError(
+                    "the conditioned SRL head scores given predicates; decoding "
+                    "predicted ones is the hybrid's job and is not built")
+            o["srl_role"] = self._srl_conditioned(batch, s.size(1))
+        elif len(fb):
             pr = self.srl_p(s)[fb, fp]                                 # [F,d]
             ar = self.srl_a(s)[fb]                                     # [F,W,d]
             role = self.srl_role.against(pr, ar)

@@ -147,6 +147,9 @@ def main() -> int:
     ap.add_argument("--head-lr", type=float)
     ap.add_argument("--batch-size", type=int)
     ap.add_argument("--grad-accum", type=int)
+    ap.add_argument("--srl-mode", choices=["joint", "conditioned"], default="joint",
+                    help="joint: every predicate in one pass (v6); conditioned: one "
+                         "pass per predicate over its sentence (v5), for MODEL_CHANGES §1")
     ap.add_argument("--grad-checkpointing", choices=["on", "off"],
                     help="override the encoder's default")
     ap.add_argument("--warmup", type=float, default=0.06)
@@ -189,12 +192,14 @@ def main() -> int:
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(spec.hf_id)
     vocab = Vocab.load()
-    train = featurise(spec, "train", vocab, tok, limit=args.train_limit)
-    dev = (featurise(spec, "dev", vocab, tok, limit=args.dev_limit)
+    cond = args.srl_mode == "conditioned"
+    train = featurise(spec, "train", vocab, tok, limit=args.train_limit, srl_sentences=cond)
+    dev = (featurise(spec, "dev", vocab, tok, limit=args.dev_limit, srl_sentences=cond)
            if not args.probe else [])
 
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
-                    attn_implementation=spec.attn_implementation).to(device)
+                    attn_implementation=spec.attn_implementation,
+                    srl_mode=args.srl_mode).to(device)
     wrong = {str(p.dtype) for p in model.parameters()} - {"torch.float32"}
     if wrong:
         raise SystemExit(f"parameters must be fp32 master weights; found {wrong}")
@@ -241,7 +246,7 @@ def main() -> int:
 
     def extra():
         return {"loss_scale": scale, "calib": dict(calib), "vocab": vocab.to_json(),
-                "encoder": spec.asdict()}
+                "encoder": spec.asdict(), "model_config": {"srl_mode": args.srl_mode}}
 
     def stop(state, reason=""):
         # Checkpoint upload first, status last: a mirrored "stopped" or "done"

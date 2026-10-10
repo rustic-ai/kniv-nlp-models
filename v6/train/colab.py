@@ -898,6 +898,7 @@ def cmd_queue(a) -> int:
     A run stopped with ``colab.py stop`` ends the queue.
     """
     names = [n.strip() for n in a.encoders.split(",") if n.strip()]
+    suffix = f"-{a.suffix}" if a.suffix else ""
     for n in names:
         encoders.get(n)
     if not a.hf_repo:
@@ -905,9 +906,10 @@ def cmd_queue(a) -> int:
     if not os.environ.get(TOKEN_ENV):
         print(f"WARNING: {TOKEN_ENV} is not set; the local HF login will be copied to VMs")
     outcome = {}
-    for n in names:
+    for enc in names:
+        n = f"{enc}{suffix}"              # the run name: keys the VM, out dir, hub prefix
         sess = session(n)
-        launch_args = argparse.Namespace(encoder=n, run_name=n, session=None,
+        launch_args = argparse.Namespace(encoder=enc, run_name=n, session=None,
                                          hf_repo=a.hf_repo, extra=list(a.extra))
         print(f"\n=== {n}: launching on {sess}", flush=True)
         relaunches = 0
@@ -1019,6 +1021,8 @@ def main() -> int:
     q.add_argument("--hf-repo", default=HF_REPO)
     q.add_argument("--poll", type=float, default=2.0, help="minutes between status checks")
     q.add_argument("--max-relaunches", type=int, default=3)
+    q.add_argument("--suffix", default="", help="run name = <encoder>-<suffix>; "
+                   "without it a variant would resume the baseline's checkpoint")
     q.add_argument("extra", nargs=argparse.REMAINDER, help="passed to v6.train.loop, after --")
     w = sub.add_parser("watch")
     w.add_argument("runs", nargs="*", help="run names (default: the three encoders)")

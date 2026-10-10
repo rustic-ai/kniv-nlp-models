@@ -41,7 +41,7 @@ import torch
 
 from ..config import DATA_DIR, RUNS_DIR
 from ..score.metrics import _feats_set, bio_spans
-from .data import IGNORE, align, collate
+from .data import IGNORE, align, collate, sentence_encodings
 from .encoders import EncoderSpec
 from .vocab import Vocab, apply_script
 
@@ -67,8 +67,9 @@ def load_run(run: str, repo: str, device, local: Path | None = None) -> tuple:
     ck = torch.load(path, map_location="cpu", weights_only=False)
     spec = EncoderSpec(**ck["encoder"])
     vocab = Vocab.from_json(ck["vocab"])
+    srl_mode = (ck.get("model_config") or {}).get("srl_mode", "joint")
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
-                    pretrained=False)
+                    pretrained=False, srl_mode=srl_mode)
     model.load_state_dict(ck["model"])          # strict: a mismatch raises
     model.to(device).eval()
     tok = AutoTokenizer.from_pretrained(spec.hf_id)
@@ -76,7 +77,7 @@ def load_run(run: str, repo: str, device, local: Path | None = None) -> tuple:
 
 
 def window(tokens: list[str], spans: list[tuple[int, int]], tok, spec,
-           vocab: Vocab, predicates: list[int] = ()) -> dict:
+           vocab: Vocab, predicates: list[int] = (), srl_sentences: bool = False) -> dict:
     """A label-free feature dict ``collate`` accepts: the gold is scored
     outside the model, so every label is IGNORE."""
     ids, first, W = align(tokens, tok, spec.max_subwords)
@@ -100,7 +101,10 @@ def window(tokens: list[str], spans: list[tuple[int, int]], tok, spec,
             "cls": np.zeros((S, vocab.size("cls")), dtype=np.int8),
             "cls_ok": np.zeros(S, dtype=bool),
             "sentiment": np.full(S, IGNORE, dtype=np.int16),
-            "_W": W, "_S": S}
+            "_W": W, "_S": S,
+            **({"srl_sents": sentence_encodings(tokens, spans, {s for _, s, _ in frames},
+                                                tok, spec.max_subwords)}
+               if srl_sentences else {})}
 
 
 @torch.no_grad()
@@ -226,8 +230,10 @@ def eval_srl(model, tok, spec, vocab, device, limit) -> dict:
     for it in items:
         by_sent[tuple(it.tokens)].append(it)
     sents = list(by_sent)
+    cond = getattr(model, "srl_mode", "joint") == "conditioned"
     feats = [window(list(s), [(0, len(s))], tok, spec, vocab,
-                    predicates=[it.predicate_idx for it in by_sent[s]]) for s in sents]
+                    predicates=[it.predicate_idx for it in by_sent[s]],
+                    srl_sentences=cond) for s in sents]
     outs = run_model(model, feats, tok, device)
     tags = vocab.labels["srl"]
     allowed, start = bio_constraints(tags)
@@ -411,7 +417,8 @@ def main() -> int:
     for run in args.runs.split(","):
         t0 = time.time()
         model, tok, spec, vocab, best = load_run(run, args.repo, device, args.local)
-        print(f"{run}: best.pt from step {best['step']} (dev {best['value']}) on {device}",
+        print(f"{run}: best.pt from step {best['step']} (dev {best['value']}), "
+              f"SRL head {model.srl_mode}, on {device}",
               flush=True)
         results[run] = {}
         for bench in args.benchmarks.split(","):

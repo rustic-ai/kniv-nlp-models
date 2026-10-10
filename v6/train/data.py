@@ -108,6 +108,18 @@ def align(words: list[str], tok, max_subwords: int):
     return ids, first[:limit], limit
 
 
+def sentence_encodings(words, spans, starts, tok, max_subwords) -> dict:
+    """``{sentence start: (input_ids, first_subword)}`` for the sentences that
+    hold a predicate, each tokenised on its own -- whole, even where the
+    window's encoder limit cut it."""
+    out = {}
+    for s, e in spans:
+        if s in starts:
+            ids, first, _ = align(words[s:e], tok, max_subwords)
+            out[s] = (np.asarray(ids, dtype=np.int32), np.asarray(first, dtype=np.int32))
+    return out
+
+
 def _sentence_of(spans, n):
     out = np.full(n, -1, dtype=np.int32)
     for j, (s, e) in enumerate(spans):
@@ -117,7 +129,11 @@ def _sentence_of(spans, n):
 
 # ── one row ─────────────────────────────────────────────────────────
 def encode_row(row: dict, tok, max_subwords: int, vocab: Vocab,
-               stats: Counter) -> dict:
+               stats: Counter, srl_sentences: bool = False) -> dict:
+    """One corpus row as features. ``srl_sentences`` also tokenises each
+    predicate's sentence on its own, for the predicate-conditioned SRL head
+    (``model.V6Model(srl_mode="conditioned")``), which runs one encoder pass
+    per predicate over its sentence as v5 did."""
     words = row["tokens"]
     mask = json.loads(row["loss_mask"] or "{}")
     ids, first, W = align(words, tok, max_subwords)
@@ -207,6 +223,9 @@ def encode_row(row: dict, tok, max_subwords: int, vocab: Vocab,
             frames.append((p, s, roles))
     feats["srl_pred"] = pred
     feats["frames"] = frames
+    if srl_sentences:
+        feats["srl_sents"] = sentence_encodings(
+            words, row["sentence_spans"], {s for _, s, _ in frames}, tok, max_subwords)
 
     # Sentence layers. A sentence is pooled only if it ends inside the limit.
     S = len(row["sentence_spans"])
@@ -241,11 +260,13 @@ def encode_row(row: dict, tok, max_subwords: int, vocab: Vocab,
 
 
 # ── features on disk ────────────────────────────────────────────────
-def _key(spec, split: str, vocab: Vocab, limit: int | None) -> str:
+def _key(spec, split: str, vocab: Vocab, limit: int | None,
+         srl_sentences: bool = False) -> str:
     manifest = DATA_DIR / "v6-corpus" / "MANIFEST.json"
     h = hashlib.sha256()
     h.update(json.dumps([spec.hf_id, spec.max_subwords, split, limit,
-                         vocab.to_json()["labels"]]).encode())
+                         vocab.to_json()["labels"]] + (["srl_sentences"] if srl_sentences else [])
+                        ).encode())
     h.update(manifest.read_bytes() if manifest.exists() else b"")
     for f in sorted((CORPUS / f"split={split}").glob("domain=*/*.parquet")):
         st = f.stat()
@@ -254,14 +275,15 @@ def _key(spec, split: str, vocab: Vocab, limit: int | None) -> str:
 
 
 def featurise(spec, split: str, vocab: Vocab, tok=None,
-              limit: int | None = None) -> list[dict]:
+              limit: int | None = None, srl_sentences: bool = False) -> list[dict]:
     """Encoded rows for one split, cached per (tokenizer, limit, vocab, corpus).
 
     The key covers the corpus files' sizes and mtimes, so a re-assembled
     corpus is re-featurised rather than silently served from a stale cache.
     """
     import pickle
-    path = FEATURES / f"{spec.name}-{split}-{_key(spec, split, vocab, limit)}.pkl"
+    path = FEATURES / (f"{spec.name}-{split}-"
+                       f"{_key(spec, split, vocab, limit, srl_sentences)}.pkl")
     if path.exists():
         with path.open("rb") as fh:
             return pickle.load(fh)
@@ -271,7 +293,8 @@ def featurise(spec, split: str, vocab: Vocab, tok=None,
     t0 = time.time()
     stats = Counter()
     rows = load_rows(split, limit=limit)
-    out = [encode_row(r, tok, spec.max_subwords, vocab, stats) for r in rows]
+    out = [encode_row(r, tok, spec.max_subwords, vocab, stats, srl_sentences)
+           for r in rows]
     print(f"featurised {split}: {len(out)} windows in {time.time() - t0:.0f}s; "
           + ", ".join(f"{k} {v:,}" for k, v in sorted(stats.items())),
           flush=True)
@@ -350,7 +373,35 @@ def collate(items: list[dict], pad_id: int):
     out["frame_pred"] = torch.tensor(fp, dtype=torch.long)
     out["frame_roles"] = (torch.stack(roles) if roles
                           else torch.zeros(0, W, dtype=torch.long))
+    if "srl_sents" in items[0]:
+        out.update(_collate_srl_sentences(items, pad_id))
     return out
+
+
+def _collate_srl_sentences(items: list[dict], pad_id: int) -> dict:
+    """Per frame, in ``frame_batch`` order: its sentence's subwords, the first
+    subword of each of its words, the predicate's subword, and where the
+    sentence starts in the window."""
+    import torch
+    encs = [(x["srl_sents"][s], p - s, s) for x in items for p, s, _ in x["frames"]]
+    F_ = len(encs)
+    Ls = max((len(e[0][0]) for e in encs), default=1)
+    Ws = max((len(e[0][1]) for e in encs), default=1)
+    ids = torch.full((F_, Ls), pad_id, dtype=torch.long)
+    mask = torch.zeros(F_, Ls, dtype=torch.long)
+    first = torch.zeros(F_, Ws, dtype=torch.long)
+    wmask = torch.zeros(F_, Ws, dtype=torch.bool)
+    psub = torch.zeros(F_, dtype=torch.long)
+    start = torch.zeros(F_, dtype=torch.long)
+    for f, ((sid, sfirst), plocal, s) in enumerate(encs):
+        ids[f, :len(sid)] = torch.from_numpy(sid.astype(np.int64))
+        mask[f, :len(sid)] = 1
+        first[f, :len(sfirst)] = torch.from_numpy(np.maximum(sfirst, 0).astype(np.int64))
+        wmask[f, :len(sfirst)] = torch.from_numpy(sfirst >= 0)
+        psub[f] = int(sfirst[plocal]) if plocal < len(sfirst) and sfirst[plocal] >= 0 else 0
+        start[f] = s
+    return {"frame_sent_ids": ids, "frame_sent_mask": mask, "frame_sent_first": first,
+            "frame_sent_wmask": wmask, "frame_pred_sub": psub, "frame_sent_start": start}
 
 
 # ── round-trip verification ─────────────────────────────────────────
