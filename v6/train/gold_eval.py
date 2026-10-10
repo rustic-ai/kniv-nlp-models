@@ -238,6 +238,13 @@ def eval_srl(model, tok, spec, vocab, device, limit) -> dict:
     tags = vocab.labels["srl"]
     allowed, start = bio_constraints(tags)
     v = tags.index("V")
+    # The predicate's part of speech, from the gold file: v6 trains on VERB
+    # predicates only, so adjectival and nominal ones are scored apart.
+    from ..config import PREPARED_DIR
+    raw = json.loads((PREPARED_DIR / "srl_test.json").read_text())
+    pos_of = {(tuple(e["words"]), e["predicate_idx"]): e["pos_tags"][e["predicate_idx"]]
+              for e in raw if e.get("words") and e.get("predicate_idx") is not None
+              and e.get("pos_tags")}
     rows = []
     for s, o in zip(sents, outs):
         for it, lp in zip(by_sent[s], o["srl"]):
@@ -247,8 +254,12 @@ def eval_srl(model, tok, spec, vocab, device, limit) -> dict:
             keep[it.predicate_idx, v] = True     # the predicate is given
             pred = [tags[x] for x in viterbi(lp, allowed, start, keep)]
             ps, gs = bio_spans(pred), bio_spans(it.layers["srl"])
-            rows.append({"srl_f1": [len(ps & gs), len(ps), len(gs)]})
-    return {"items": rows, "kinds": {"srl_f1": "f1"}}
+            c = [len(ps & gs), len(ps), len(gs)]
+            verb = pos_of.get((tuple(it.tokens), it.predicate_idx)) == "VERB"
+            rows.append({"srl_f1": c, "srl_f1_verb": c if verb else [0, 0, 0],
+                         "srl_f1_other": [0, 0, 0] if verb else c})
+    return {"items": rows, "kinds": {"srl_f1": "f1", "srl_f1_verb": "f1",
+                                     "srl_f1_other": "f1"}}
 
 
 def eval_ner(model, tok, spec, vocab, device, limit) -> dict:
@@ -356,9 +367,13 @@ def paired_bootstrap(a: list[dict], b: list[dict], key: str, kind: str,
 REPORTED = [("ud", "pos", "POS acc"), ("ud", "lemma", "lemma acc"),
             ("ud", "morph_f1", "morph feat-F1"), ("ud", "morph_exact", "morph exact"),
             ("ud", "uas", "UAS"), ("ud", "las", "LAS"), ("ud", "tree", "tree rate"),
-            ("srl", "srl_f1", "SRL F1"), ("ner", "ner_f1", "NER F1"),
+            ("srl", "srl_f1", "SRL F1"), ("srl", "srl_f1_verb", "SRL F1, VERB predicates"),
+            ("srl", "srl_f1_other", "SRL F1, ADJ/NOUN/other"), ("ner", "ner_f1", "NER F1"),
             ("cls", "cls_f1", "CLS micro-F1"), ("cls", "cls_exact", "CLS exact")]
-V5 = {"pos": 0.987, "uas": 0.949, "las": 0.925, "ner_f1": 0.889, "srl_f1": 0.843}
+# v5 from DECISIONS.md; its SRL split from its cached bake-off predictions on
+# the same items (EVALUATION.md).
+V5 = {"pos": 0.987, "uas": 0.949, "las": 0.925, "ner_f1": 0.889, "srl_f1": 0.843,
+      "srl_f1_verb": 0.857, "srl_f1_other": 0.742}
 
 
 def report(results: dict, out: Path, source: str) -> str:
