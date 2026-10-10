@@ -73,8 +73,20 @@ PIP = ["transformers==5.6.2", "huggingface_hub>=1.0", "psutil", "pyarrow",
        "sentencepiece"]
 
 
+OURS = "kniv-v6-"      # every session this launcher creates; it touches no others
+
+
 def session(run_name: str) -> str:
-    return f"kniv-v6-{run_name}"
+    return f"{OURS}{run_name}"
+
+
+def release(sess: str, **kw) -> subprocess.CompletedProcess | None:
+    """Stop one of OUR VMs. Refuses any other name: the same Colab account runs
+    other projects, whose VMs must never be stopped from here."""
+    if not sess.startswith(OURS):
+        print(f"  refusing to stop {sess!r}: not a {OURS}* session", flush=True)
+        return None
+    return colab("stop", "-s", sess, **kw)
 
 
 def run_name(a) -> str:
@@ -328,11 +340,20 @@ finally:
 '''
 
 
+TOKEN_ENV = "HF_KNIV_REPO_TOKEN"     # a token scoped to the checkpoint repo
+
+
 def _upload_token(sess: str) -> None:
-    from huggingface_hub import get_token
-    token = get_token()
+    """Copy an HF token to the VM: ``HF_KNIV_REPO_TOKEN`` if set -- a token
+    scoped to the checkpoint repo -- else the local login. The value is never
+    printed or passed on a command line."""
+    token = os.environ.get(TOKEN_ENV)
     if not token:
-        raise SystemExit("no local HF token; run `hf auth login` first")
+        from huggingface_hub import get_token
+        token = get_token()
+        print(f"  note: {TOKEN_ENV} is not set; copying the local HF login instead")
+    if not token:
+        raise SystemExit("no HF token: set HF_KNIV_REPO_TOKEN or run `hf auth login`")
     fd, path = tempfile.mkstemp()
     try:
         os.fchmod(fd, 0o600)
@@ -593,7 +614,7 @@ def cmd_sweep(a) -> int:
                     retries -= 1
                     print(f"  allocating a fresh VM and retrying this rate "
                           f"({a.retries - retries}/{a.retries})", flush=True)
-                    colab("stop", "-s", sess, check=False, quiet=True)
+                    release(sess, check=False, quiet=True)
                     prepare(sess, token=bool(a.hf_repo))
                     queue.insert(0, lr)
                     continue
@@ -616,7 +637,7 @@ def cmd_sweep(a) -> int:
     finally:
         if not a.keep:
             _kill_holder(sess)
-            colab("stop", "-s", sess, check=False)
+            release(sess, check=False)
             print(f"released {sess}")
     print(f"\n{spec.name}{suffix} sweep ({a.steps} steps, dev {a.dev_limit} windows):")
     print(f"  {'lr':>8s} " + " ".join(f"{k:>12s}" for k in SWEEP_METRICS) + "  state")
@@ -733,7 +754,7 @@ def cmd_stop(a) -> int:
                  else ((_read_status(a, name)[0] or {}).get("state")))
         if state in TERMINAL:
             print(f"{name}: {state}; checkpoint is on the hub; releasing {sess}")
-            colab("stop", "-s", sess)
+            release(sess)
             return 0
     print(f"{name}: not stopped after {a.timeout} minutes; VM left running")
     return 1
@@ -841,7 +862,7 @@ def cmd_watch(a) -> int:
                     print(f"{stamp} {n}: RELAUNCHING ({relaunched[n]}/{a.max_relaunches})",
                           flush=True)
                     if alive:
-                        colab("stop", "-s", sess, check=False)   # a wedged kernel
+                        release(sess, check=False)   # a wedged kernel
                     ns = argparse.Namespace(encoder=rec["encoder"], run_name=n,
                                             session=rec.get("session"),
                                             hf_repo=rec.get("hf_repo"),
@@ -863,12 +884,93 @@ def cmd_watch(a) -> int:
     return 0
 
 
+def cmd_queue(a) -> int:
+    """Full runs one after another on a single A100 (OPERATIONS.md §4.3).
+
+    For each encoder: launch it (its own ``kniv-v6-<encoder>`` VM, hub mirror
+    on), supervise it until it ends -- re-attaching a holder that drops, and
+    relaunching from the hub's ``latest.pt`` on a fresh VM if the VM is lost
+    or goes stale, up to ``--max-relaunches`` -- then release that VM and
+    start the next. Only this queue's own VMs are ever stopped.
+
+    A run that fails on its own (non-finite streak, exception) is reported
+    and skipped: it needs a person, and the next encoder can use the time.
+    A run stopped with ``colab.py stop`` ends the queue.
+    """
+    names = [n.strip() for n in a.encoders.split(",") if n.strip()]
+    for n in names:
+        encoders.get(n)
+    if not a.hf_repo:
+        raise SystemExit("queue needs --hf-repo: full runs must survive a lost VM")
+    if not os.environ.get(TOKEN_ENV):
+        print(f"WARNING: {TOKEN_ENV} is not set; the local HF login will be copied to VMs")
+    outcome = {}
+    for n in names:
+        sess = session(n)
+        launch_args = argparse.Namespace(encoder=n, run_name=n, session=None,
+                                         hf_repo=a.hf_repo, extra=list(a.extra))
+        print(f"\n=== {n}: launching on {sess}", flush=True)
+        relaunches = 0
+        started = cmd_launch(launch_args) == 0
+        state = None
+        while True:
+            if not started:
+                lost = True
+            else:
+                time.sleep(a.poll * 60)
+                st, src = _read_status(argparse.Namespace(session=None, hf_repo=a.hf_repo), n)
+                state = (st or {}).get("state")
+                if state in TERMINAL:
+                    print(f"{n}: {state} at step {st['step']}/{st['total_steps']}, best "
+                          f"{st.get('best')}" + (f" ({st['reason']})" if st.get("reason") else ""),
+                          flush=True)
+                    break
+                alive = sess in colab("sessions", check=False, quiet=True, timeout=120).stdout
+                stale = bool(st) and time.time() - st.get("heartbeat", 0) > STALE_MINUTES * 60
+                if alive and st and state in ("training", "evaluating") and ensure_holder(
+                        sess, f"{VM_RUNS}/{n}"):
+                    print(f"{n}: holder re-attached", flush=True)
+                lost = not alive or stale
+                if not lost:
+                    continue
+                print(f"{n}: VM {'gone' if not alive else 'stale'} at step "
+                      f"{(st or {}).get('step', '?')}", flush=True)
+            if relaunches >= a.max_relaunches:
+                print(f"{n}: {a.max_relaunches} relaunches spent; leaving it for a person",
+                      flush=True)
+                state = "abandoned"
+                break
+            relaunches += 1
+            print(f"{n}: relaunching from the hub's latest.pt ({relaunches}/{a.max_relaunches})",
+                  flush=True)
+            _kill_holder(sess)
+            release(sess, check=False, quiet=True)
+            started = cmd_launch(launch_args) == 0
+        outcome[n] = state
+        _kill_holder(sess)
+        release(sess, check=False, quiet=True)
+        print(f"{n}: released {sess}", flush=True)
+        if state == "stopped":
+            print("queue ends: the run was stopped by request", flush=True)
+            break
+    print("\nqueue finished: " + ", ".join(f"{k} {v}" for k, v in outcome.items()), flush=True)
+    return 0 if all(v == "done" for v in outcome.values()) else 1
+
+
 def cmd_orphans(a) -> int:
-    """List VMs Colab has allocated that no local session tracks. Release one
-    from the Colab web UI (Runtime > Manage sessions): they bill until then."""
+    """List VMs Colab has allocated that no local session tracks.
+
+    Some may belong to other projects on the same account, or to the Colab web
+    UI: this lists, it never stops anything. One of ours that the CLI dropped
+    after an expired token bills until released from the Colab web UI
+    (Runtime > Manage sessions)."""
     r = sh([_cli_python(), str(HOLDER), "--orphans"], quiet=True, timeout=120)
-    lines = r.stdout.split()
-    print("\n".join(r.stdout.strip().splitlines()) or "no orphaned VMs")
+    lines = r.stdout.strip().splitlines()
+    if lines:
+        print("VMs on this account with no local session (may be another project's):")
+        print("\n".join(f"  {l}" for l in lines))
+    else:
+        print("no untracked VMs")
     return 1 if lines else 0
 
 
@@ -912,6 +1014,12 @@ def main() -> int:
                    help="fresh VMs to allocate if Colab reclaims the current one")
     s.add_argument("extra", nargs=argparse.REMAINDER, help="passed to v6.train.loop, after --")
     sub.add_parser("orphans", help="VMs allocated on Colab that no local session tracks")
+    q = sub.add_parser("queue", help="full runs one after another on one A100")
+    q.add_argument("--encoders", default="deberta-v3-large,ettin-1b,ettin-400m")
+    q.add_argument("--hf-repo", default=HF_REPO)
+    q.add_argument("--poll", type=float, default=2.0, help="minutes between status checks")
+    q.add_argument("--max-relaunches", type=int, default=3)
+    q.add_argument("extra", nargs=argparse.REMAINDER, help="passed to v6.train.loop, after --")
     w = sub.add_parser("watch")
     w.add_argument("runs", nargs="*", help="run names (default: the three encoders)")
     w.add_argument("--hf-repo", default=HF_REPO)
@@ -932,7 +1040,7 @@ def main() -> int:
         a.extra = a.extra[1:]
     return {"launch": cmd_launch, "probe": cmd_probe, "status": cmd_status,
             "stop": cmd_stop, "checkpoint": cmd_checkpoint, "watch": cmd_watch,
-            "sweep": cmd_sweep, "orphans": cmd_orphans}[a.cmd](a)
+            "sweep": cmd_sweep, "orphans": cmd_orphans, "queue": cmd_queue}[a.cmd](a)
 
 
 if __name__ == "__main__":

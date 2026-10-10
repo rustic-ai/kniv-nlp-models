@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 TERMINAL = ("done", "stopped", "failed")
+OURS = "kniv-v6-"             # session-name prefix; nothing else is touched
 
 
 def log(msg: str) -> None:
@@ -54,6 +55,8 @@ def refresh_tokens() -> int:
     current = {a.endpoint: a.runtime_proxy_info for a in state.client.list_assignments()}
     changed = 0
     for name, s in state.store.list().items():
+        if not name.startswith(OURS):
+            continue                # another project's session: not ours to touch
         info = current.get(s.endpoint)
         if info and info.token != s.token:
             s.token = info.token
