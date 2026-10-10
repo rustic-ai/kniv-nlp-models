@@ -101,6 +101,13 @@ def build(rows) -> Vocab:
             lemma.update(edit_script(w, l) for w, l in zip(r["tokens"], r["lemma"]))
         n_words += r["n_tokens"]
     labels = dict(FIXED)
+    # Phase 2. Relation names come from Re-DocRED's inventory, which needs the
+    # Re-DocRED files, so they are resolved here and stored -- a VM reads them
+    # from vocab.json rather than recomputing them.
+    from ..schemas import relation_names
+    from ..entities import TYPE_MAP
+    labels["relations"] = relation_names()
+    labels["ent_type"] = sorted(set(TYPE_MAP.values()))
     meta = {"min_count": MIN_COUNT, "train_words": n_words}
     for name, counts in (("morph", morph), ("lemma", lemma)):
         kept = sorted((k for k, c in counts.items() if c >= MIN_COUNT),

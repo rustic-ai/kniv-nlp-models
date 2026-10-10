@@ -129,7 +129,8 @@ def _sentence_of(spans, n):
 
 # ── one row ─────────────────────────────────────────────────────────
 def encode_row(row: dict, tok, max_subwords: int, vocab: Vocab,
-               stats: Counter, srl_sentences: bool = False) -> dict:
+               stats: Counter, srl_sentences: bool = False,
+               phase2: dict | None = None) -> dict:
     """One corpus row as features. ``srl_sentences`` also tokenises each
     predicate's sentence on its own, for the predicate-conditioned SRL head
     (``model.V6Model(srl_mode="conditioned")``), which runs one encoder pass
@@ -256,16 +257,118 @@ def encode_row(row: dict, tok, max_subwords: int, vocab: Vocab,
                 else:
                     sent[j] = k
     feats.update(sent_whole=whole, cls=cls, cls_ok=cls_ok, sentiment=sent)
+    if phase2 is not None:
+        feats["coref"] = coref_features(row, mask, W, rep, stats)
+        feats["rel"] = relation_features(row, W, rep, vocab, phase2, stats)
+        feats["_n_rel"] = vocab.size("relations")
     return feats
+
+
+# ── phase 2: coreference and relations ──────────────────────────────
+ENTITIES = DATA_DIR / "v6-corpus" / "entities_docred.json"
+
+
+def load_phase2() -> dict:
+    """``{"entities": {window_id: vertexSet}}`` -- the entity clusters ATLOP
+    labelled, as the corpus built them (``v6.entities.build_entities``)."""
+    docs = json.loads(ENTITIES.read_text())
+    return {"entities": {d["title"]: d["vertexSet"] for d in docs}}
+
+
+def _head_word(s: int, e: int, heads) -> int:
+    """The span's syntactic head: the token whose DEP parent lies outside
+    ``[s, e]``. Several (a fragment) -> the rightmost; no parse -> the last."""
+    if heads is None:
+        return e
+    out = [i for i in range(s, e + 1) if heads[i] < 0 or not s <= heads[i] <= e]
+    return out[-1] if out else e
+
+
+def coref_features(row: dict, mask: dict, W: int, rep, stats: Counter) -> dict | None:
+    """Word-level coreference targets (Dobrovolskii 2021): each mention as its
+    head word, inclusive span and cluster. ``None`` when coref is absent."""
+    if row.get("coref") is None or mask.get("coref"):
+        return None
+    heads, starts, ends, clusters = [], [], [], []
+    taken: set[int] = set()
+    for ci, chain in enumerate(row["coref"]):
+        kept = []
+        for s, e in chain:
+            if e >= W or not rep[s]:
+                stats["coref_mentions_past_limit"] += 1
+                continue
+            h = _head_word(s, e, row.get("dep_heads"))
+            if h in taken:
+                # Word-level coref represents a mention by its head word, so
+                # two mentions sharing one cannot both be kept.
+                stats["coref_mentions_shared_head"] += 1
+                continue
+            kept.append((h, s, e))
+        if len(kept) < 2:                     # a chain needs two mentions
+            stats["coref_chains_dropped"] += 1
+            continue
+        for h, s, e in kept:
+            taken.add(h)
+            heads.append(h); starts.append(s); ends.append(e); clusters.append(ci)
+        stats["coref_chains"] += 1
+    stats["coref_mentions"] += len(heads)
+    return {"head": np.asarray(heads, dtype=np.int32), "start": np.asarray(starts, dtype=np.int32),
+            "end": np.asarray(ends, dtype=np.int32), "cluster": np.asarray(clusters, dtype=np.int32)}
+
+
+def relation_features(row: dict, W: int, rep, vocab: Vocab, phase2: dict,
+                      stats: Counter) -> dict | None:
+    """Entities (mention spans, coarse type) and triples for a window ATLOP
+    labelled. Every such window supervises, including the 17,899 where ATLOP
+    found nothing: those are negatives, not absences. ``None`` otherwise."""
+    vertex = phase2["entities"].get(row["window_id"])
+    if vertex is None:
+        return None
+    offs = [s for s, _ in row["sentence_spans"]]
+    keep, spans, types = {}, [], []
+    for ei, mentions in enumerate(vertex):
+        ms = []
+        for m in mentions:
+            a = offs[m["sent_id"]] + m["pos"][0]
+            b = offs[m["sent_id"]] + m["pos"][1]        # exclusive
+            if b > W or not rep[a]:
+                stats["rel_mentions_past_limit"] += 1
+                continue
+            ms.append((a, b))
+        if not ms:
+            stats["rel_entities_past_limit"] += 1
+            continue
+        keep[ei] = len(spans)
+        spans.append(np.asarray(ms, dtype=np.int32))
+        types.append(vocab.id("ent_type", mentions[0]["type"]))
+    if len(spans) < 2:
+        stats["rel_windows_under_two_entities"] += 1
+        return None
+    triples = []
+    for r in row.get("relations") or []:
+        if r["head"] not in keep or r["tail"] not in keep:
+            stats["rel_triples_past_limit"] += 1
+            continue
+        k = vocab.id("relations", r["relation"])
+        if k is None:
+            stats["rel_out_of_vocab"] += 1
+            continue
+        triples.append((keep[r["head"]], keep[r["tail"]], k))
+    stats["rel_windows"] += 1
+    stats["rel_windows_negative_only"] += not triples
+    stats["rel_triples"] += len(triples)
+    return {"spans": spans, "types": np.asarray(types, dtype=np.int16),
+            "triples": np.asarray(triples, dtype=np.int32).reshape(-1, 3)}
 
 
 # ── features on disk ────────────────────────────────────────────────
 def _key(spec, split: str, vocab: Vocab, limit: int | None,
-         srl_sentences: bool = False) -> str:
+         srl_sentences: bool = False, phase2: bool = False) -> str:
     manifest = DATA_DIR / "v6-corpus" / "MANIFEST.json"
     h = hashlib.sha256()
     h.update(json.dumps([spec.hf_id, spec.max_subwords, split, limit,
                          vocab.to_json()["labels"]] + (["srl_sentences"] if srl_sentences else [])
+                        + (["phase2"] if phase2 else [])
                         ).encode())
     h.update(manifest.read_bytes() if manifest.exists() else b"")
     for f in sorted((CORPUS / f"split={split}").glob("domain=*/*.parquet")):
@@ -275,7 +378,8 @@ def _key(spec, split: str, vocab: Vocab, limit: int | None,
 
 
 def featurise(spec, split: str, vocab: Vocab, tok=None,
-              limit: int | None = None, srl_sentences: bool = False) -> list[dict]:
+              limit: int | None = None, srl_sentences: bool = False,
+              phase2: bool = False) -> list[dict]:
     """Encoded rows for one split, cached per (tokenizer, limit, vocab, corpus).
 
     The key covers the corpus files' sizes and mtimes, so a re-assembled
@@ -283,7 +387,7 @@ def featurise(spec, split: str, vocab: Vocab, tok=None,
     """
     import pickle
     path = FEATURES / (f"{spec.name}-{split}-"
-                       f"{_key(spec, split, vocab, limit, srl_sentences)}.pkl")
+                       f"{_key(spec, split, vocab, limit, srl_sentences, phase2)}.pkl")
     if path.exists():
         with path.open("rb") as fh:
             return pickle.load(fh)
@@ -293,7 +397,10 @@ def featurise(spec, split: str, vocab: Vocab, tok=None,
     t0 = time.time()
     stats = Counter()
     rows = load_rows(split, limit=limit)
-    out = [encode_row(r, tok, spec.max_subwords, vocab, stats, srl_sentences)
+    p2 = load_phase2() if phase2 else None
+    if phase2:
+        rows = load_rows(split, limit=limit, columns=COLUMNS + ["coref", "relations"])
+    out = [encode_row(r, tok, spec.max_subwords, vocab, stats, srl_sentences, p2)
            for r in rows]
     print(f"featurised {split}: {len(out)} windows in {time.time() - t0:.0f}s; "
           + ", ".join(f"{k} {v:,}" for k, v in sorted(stats.items())),
@@ -375,6 +482,69 @@ def collate(items: list[dict], pad_id: int):
                           else torch.zeros(0, W, dtype=torch.long))
     if "srl_sents" in items[0]:
         out.update(_collate_srl_sentences(items, pad_id))
+    if "coref" in items[0]:
+        out.update(_collate_phase2(items, len(items[0]["rel"]["types"])
+                                   if items[0].get("rel") else None))
+    return out
+
+
+def _collate_phase2(items: list[dict], _unused=None) -> dict:
+    """Coreference mentions and relation entities/pairs, flattened over the
+    batch with a per-item index, as the SRL frames are.
+
+    Relation pairs are every ordered (head, tail) of distinct entities in a
+    supervised window; ``pair_labels[:, 0]`` is the no-relation class, set
+    when a pair has no triple -- ATLOP's adaptive threshold class.
+    """
+    import torch
+    cb, ch, cs, ce, cc, cok = [], [], [], [], [], []
+    eb, et, me, ms, mx = [], [], [], [], []
+    pb, ph, pt, plab = [], [], [], []
+    n_rel = None
+    cluster_base = ent_base = 0
+    for b, x in enumerate(items):
+        c = x.get("coref")
+        cok.append(c is not None)
+        if c is not None and len(c["head"]):
+            cb += [b] * len(c["head"]); ch += c["head"].tolist(); cs += c["start"].tolist()
+            ce += c["end"].tolist(); cc += (c["cluster"] + cluster_base).tolist()
+            cluster_base += int(c["cluster"].max()) + 1
+        r = x.get("rel")
+        if r is None:
+            continue
+        E = len(r["spans"])
+        for k, spans in enumerate(r["spans"]):
+            eb.append(b); et.append(int(r["types"][k]))
+            for a, z in spans:
+                me.append(ent_base + k); ms.append(int(a)); mx.append(int(z))
+        n_rel = n_rel or x["_n_rel"]
+        lab = {}
+        for h, tl, k in r["triples"]:
+            lab.setdefault((int(h), int(tl)), set()).add(int(k))
+        for h in range(E):
+            for tl in range(E):
+                if h == tl:
+                    continue
+                pb.append(b); ph.append(ent_base + h); pt.append(ent_base + tl)
+                plab.append(lab.get((h, tl), set()))
+        ent_base += E
+    L = torch.long
+    out = {"coref_batch": torch.tensor(cb, dtype=L), "coref_head": torch.tensor(ch, dtype=L),
+           "coref_start": torch.tensor(cs, dtype=L), "coref_end": torch.tensor(ce, dtype=L),
+           "coref_cluster": torch.tensor(cc, dtype=L), "coref_ok": torch.tensor(cok),
+           "ent_batch": torch.tensor(eb, dtype=L), "ent_type": torch.tensor(et, dtype=L),
+           "men_ent": torch.tensor(me, dtype=L), "men_start": torch.tensor(ms, dtype=L),
+           "men_end": torch.tensor(mx, dtype=L),
+           "pair_batch": torch.tensor(pb, dtype=L), "pair_h": torch.tensor(ph, dtype=L),
+           "pair_t": torch.tensor(pt, dtype=L)}
+    R = (n_rel or items[0].get("_n_rel") or 0) + 1
+    labels = torch.zeros(len(plab), R)
+    for i, s in enumerate(plab):
+        if s:
+            labels[i, [k + 1 for k in s]] = 1.0
+        else:
+            labels[i, 0] = 1.0
+    out["pair_labels"] = labels
     return out
 
 
