@@ -666,6 +666,9 @@ def cmd_probe(a) -> int:
     for l in lines:
         if "probe step" in l or l.startswith("PROBE") or "Error" in l:
             print(l)
+    if not a.keep:
+        release(sess, check=False)          # a probe's VM bills until released
+        print(f"released {sess} (--keep to reuse it)")
     return 0
 
 
@@ -991,6 +994,7 @@ def main() -> int:
                        "kniv-v6-<run-name>")
         if name == "probe":
             p.add_argument("--steps", type=int, default=10)
+            p.add_argument("--keep", action="store_true", help="leave the VM running")
         if name in ("launch", "probe"):
             p.add_argument("extra", nargs=argparse.REMAINDER,
                            help="passed through to v6.train.loop, after --")
