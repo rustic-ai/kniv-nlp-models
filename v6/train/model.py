@@ -248,7 +248,7 @@ class RelationHead(nn.Module):
             sel = batch["pair_batch"] == b
             att = (qs[sel] @ keys[b].T) / keys.size(-1) ** 0.5             # [Pb,W]
             att = att.masked_fill(~wm[b].unsqueeze(0), NEG).softmax(-1)
-            ctx[sel] = att @ x[b].float()
+            ctx[sel] = (att @ x[b].float()).to(ctx.dtype)   # autocast returns bf16
         zs = torch.tanh(self.head_ext(torch.cat([eh, ctx], -1)))
         zo = torch.tanh(self.tail_ext(torch.cat([et, ctx], -1)))
         P, d = zs.shape
