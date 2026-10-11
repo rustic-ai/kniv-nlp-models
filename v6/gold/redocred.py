@@ -16,7 +16,8 @@ readable English labels via the Wikidata API — annotators are given names,
 not opaque codes — and the resolved map is cached in
 ``data/re-docred/rel_info.json``.
 
-Source: https://github.com/tonytan48/Re-DocRED (MIT). Evaluation only.
+Source: https://github.com/tonytan48/Re-DocRED (MIT). Test is evaluation only;
+train and dev also supervise the v6 relation head (``train.data.prepare_redocred``).
 """
 from __future__ import annotations
 

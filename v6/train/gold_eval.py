@@ -51,7 +51,7 @@ import torch
 
 from ..config import DATA_DIR, RUNS_DIR
 from ..score.metrics import _feats_set, bio_spans
-from .data import IGNORE, align, collate, sentence_encodings
+from .data import IGNORE, blank_window, collate
 from .encoders import EncoderSpec
 from .vocab import Vocab, apply_script
 
@@ -89,33 +89,9 @@ def load_run(run: str, repo: str, device, local: Path | None = None) -> tuple:
 
 def window(tokens: list[str], spans: list[tuple[int, int]], tok, spec,
            vocab: Vocab, predicates: list[int] = (), srl_sentences: bool = False) -> dict:
-    """A label-free feature dict ``collate`` accepts: the gold is scored
-    outside the model, so every label is IGNORE."""
-    ids, first, W = align(tokens, tok, spec.max_subwords)
-    sent = np.full(W, -1, dtype=np.int32)
-    for j, (s, e) in enumerate(spans):
-        sent[s:min(e, W)] = j
-    blank = np.full(W, IGNORE, dtype=np.int16)
-    S = len(spans)
-    frames = []
-    for p in predicates:
-        if p < W:
-            s, e = spans[sent[p]]
-            frames.append((p, s, np.full(min(e, W) - s, IGNORE, dtype=np.int16)))
-    return {"input_ids": np.asarray(ids, dtype=np.int32),
-            "first_subword": np.asarray(first, dtype=np.int32),
-            "word_ok": np.asarray([f >= 0 for f in first], dtype=bool),
-            "sent_of_word": sent, "pos": blank, "morph": blank, "lemma": blank,
-            "ner": blank, "dep_head": blank, "dep_rel": blank, "srl_pred": blank,
-            "frames": frames,
-            "sent_whole": np.array([e <= W for _, e in spans], dtype=bool),
-            "cls": np.zeros((S, vocab.size("cls")), dtype=np.int8),
-            "cls_ok": np.zeros(S, dtype=bool),
-            "sentiment": np.full(S, IGNORE, dtype=np.int16),
-            "_W": W, "_S": S,
-            **({"srl_sents": sentence_encodings(tokens, spans, {s for _, s, _ in frames},
-                                                tok, spec.max_subwords)}
-               if srl_sentences else {})}
+    """A label-free feature dict: the gold is scored outside the model."""
+    return blank_window(tokens, spans, tok, spec.max_subwords, vocab.size("cls"),
+                        predicates, srl_sentences)
 
 
 @torch.no_grad()
@@ -467,12 +443,12 @@ def link_clusters(antecedent: dict[int, int]) -> list[list[int]]:
 
 
 def relation_triples(logits: np.ndarray, pairs: list[tuple[int, int]],
-                     names: list[str], top: int = 4) -> set[tuple]:
+                     names: list[str], top: int = 4, offset: float = 0.0) -> set[tuple]:
     """ATLOP decoding: a relation holds when its logit beats the threshold
-    class (column 0), at most ``top`` per pair."""
+    class (column 0) lowered by ``offset``, at most ``top`` per pair."""
     out = set()
     for (h, t), lg in zip(pairs, logits):
-        above = [k for k in np.argsort(-lg[1:])[:top] if lg[k + 1] > lg[0]]
+        above = [k for k in np.argsort(-lg[1:])[:top] if lg[k + 1] > lg[0] - offset]
         out |= {(h, t, names[k]) for k in above}
     return out
 
@@ -538,6 +514,34 @@ def _pairs(n: int) -> list[tuple[int, int]]:
     return [(h, t) for h in range(n) for t in range(n) if h != t]
 
 
+OFFSETS = (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
+
+
+def calibrate_offset(model, tok, spec, vocab, device) -> float:
+    """The threshold offset that maximises triple-F1 on **Re-DocRED dev**,
+    for test. ATLOP's threshold class is learned on the training labels'
+    density; a head trained on sparse teacher labels sets it too high for
+    Re-DocRED's dense gold."""
+    from ..gold.redocred import load_rel_items
+    items = load_rel_items("dev")
+    names = vocab.labels["relations"]
+    feats = [phase2_window(it.tokens, [tuple(x) for x in it.layers["sentence_spans"]], tok,
+                           spec, vocab, [[(a, e + 1) for a, e in en["mentions"]]
+                                         for en in it.entities]) for it in items]
+    outs = run_phase2(model, feats, tok, device, batch=1)
+
+    def f1(off):
+        tp = p = g = 0
+        for it, f, o in zip(items, feats, outs):
+            keep = f["_ent_keep"]
+            pred = {(keep[h], keep[t], r) for h, t, r in
+                    relation_triples(o["relation"], _pairs(len(keep)), names, offset=off)}
+            gold = {tuple(x) for x in it.layers["rel"]}
+            tp += len(pred & gold); p += len(pred); g += len(gold)
+        return 2 * tp / max(p + g, 1)
+    return max(OFFSETS, key=f1)
+
+
 def eval_redocred(model, tok, spec, vocab, device, limit) -> dict:
     """Re-DocRED test (documents up to 512 words).
 
@@ -549,6 +553,10 @@ def eval_redocred(model, tok, spec, vocab, device, limit) -> dict:
     teacher. A predicted entity stands for the gold entity sharing the most
     exactly-matching mention spans (none: its triples are false positives),
     so this is a relaxed end-to-end score, not the strict all-mentions one.
+    It decodes with the dev-calibrated threshold, as a deployment would.
+
+    ``rel_f1_cal``: gold entities, threshold offset chosen on Re-DocRED dev
+    (``calibrate_offset``); test never informs it.
     """
     from ..entities import build_entities
     from ..gold.redocred import load_rel_items
@@ -564,15 +572,19 @@ def eval_redocred(model, tok, spec, vocab, device, limit) -> dict:
     # One document at a time: a 40-entity document is 1,560 pairs, each a
     # 49k-wide bilinear input, and four of them exhaust a 48 GB Mac.
     outs = run_phase2(model, feats, tok, device, batch=1)
+    offset = calibrate_offset(model, tok, spec, vocab, device)
     rows, feats2, order2 = [], [], []
     for n, (it, f, o) in enumerate(zip(items, feats, outs)):
         keep = f["_ent_keep"]
-        pred = relation_triples(o["relation"], _pairs(len(keep)), names)
-        pred = {(keep[h], keep[t], r) for h, t, r in pred}
         gold = {tuple(x) for x in it.layers["rel"]}
-        reach = sum(h in keep and t in keep for h, t, _ in gold)
-        rows.append({"rel_f1": [len(pred & gold), len(pred), len(gold)],
-                     "rel_reach": [reach, len(gold)]})
+        row = {}
+        for key, off in (("rel_f1", 0.0), ("rel_f1_cal", offset)):
+            pred = relation_triples(o["relation"], _pairs(len(keep)), names, offset=off)
+            pred = {(keep[h], keep[t], r) for h, t, r in pred}
+            row[key] = [len(pred & gold), len(pred), len(gold)]
+        row["rel_reach"] = [sum(h in keep and t in keep for h, t, _ in gold), len(gold)]
+        row["_offset"] = offset
+        rows.append(row)
         # End to end: the model's own entities.
         W = f["_W"]
         sp = [tuple(x) for x in it.layers["sentence_spans"]]
@@ -598,14 +610,14 @@ def eval_redocred(model, tok, spec, vocab, device, limit) -> dict:
             ov = [len(set(ents[ei]) & g) for g in gold_m]
             m = max(ov) if ov else 0
             match[k] = ov.index(m) if m and ov.count(m) == 1 else None
-        pred = relation_triples(o["relation"], _pairs(len(keep)), names)
+        pred = relation_triples(o["relation"], _pairs(len(keep)), names, offset=offset)
         pred_n = len({(h, t, r) for h, t, r in pred})
         mapped = {(match[h], match[t], r) for h, t, r in pred
                   if match[h] is not None and match[t] is not None and match[h] != match[t]}
         gold = {tuple(x) for x in it.layers["rel"]}
         rows[n]["rel_e2e_f1"] = [len(mapped & gold), pred_n, len(gold)]
         rows[n]["rel_e2e_docs"] = [1, 1]
-    return {"items": rows, "kinds": {"rel_f1": "f1", "rel_reach": "acc",
+    return {"items": rows, "kinds": {"rel_f1": "f1", "rel_f1_cal": "f1", "rel_reach": "acc",
                                      "rel_e2e_f1": "f1", "rel_e2e_docs": "acc"}}
 
 
@@ -668,6 +680,7 @@ REPORTED = [("ud", "pos", "POS acc"), ("ud", "lemma", "lemma acc"),
             ("litbank", "coref_conll", "coref CoNLL-F1"),
             ("litbank", "coref_reach", "coref gold mentions inside the window"),
             ("redocred", "rel_f1", "relation triple-F1, gold entities"),
+            ("redocred", "rel_f1_cal", "same, threshold calibrated on Re-DocRED dev"),
             ("redocred", "rel_e2e_f1", "relation triple-F1, own entities (relaxed)"),
             ("redocred", "rel_reach", "relation gold triples inside the window")]
 # v5 from DECISIONS.md; its SRL split from its cached bake-off predictions on

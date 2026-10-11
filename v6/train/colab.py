@@ -232,10 +232,10 @@ def build_bundles() -> tuple[Path, Path, str]:
         raise SystemExit("data/v6-corpus/vocab.json missing; run python -m v6.train.vocab")
     stamp = json.loads((corpus / "MANIFEST.json").read_text()).get("git_sha", "x")[:7]
     # Phase 2 reads the relation entities beside the corpus.
-    entities = corpus / "entities_docred.json"
-    extra = [entities] if entities.exists() else []
+    extra = [p for p in (corpus / "entities_docred.json", corpus / "redocred_rel.json")
+             if p.exists()]
     data = BUNDLE / (f"corpus-{stamp}-{int(vocab.stat().st_mtime)}"
-                     f"{'-p2' if extra else ''}.tar.gz")
+                     f"{'-p2' if extra else ''}{len(extra) if len(extra) > 1 else ''}.tar.gz")
     if not data.exists():
         with tarfile.open(data, "w:gz") as t:
             for p in [corpus / "corpus", vocab, corpus / "MANIFEST.json", *extra]:

@@ -264,6 +264,37 @@ def encode_row(row: dict, tok, max_subwords: int, vocab: Vocab,
     return feats
 
 
+def blank_window(tokens: list[str], spans: list[tuple[int, int]], tok, max_subwords: int,
+                 n_cls: int, predicates: list[int] = (), srl_sentences: bool = False) -> dict:
+    """Features with every label IGNORE: for gold scored outside the model,
+    and for external documents that supervise one head only."""
+    ids, first, W = align(tokens, tok, max_subwords)
+    sent = np.full(W, -1, dtype=np.int32)
+    for j, (s, e) in enumerate(spans):
+        sent[s:min(e, W)] = j
+    blank = np.full(W, IGNORE, dtype=np.int16)
+    S = len(spans)
+    frames = []
+    for p in predicates:
+        if p < W:
+            s, e = spans[sent[p]]
+            frames.append((p, s, np.full(min(e, W) - s, IGNORE, dtype=np.int16)))
+    return {"input_ids": np.asarray(ids, dtype=np.int32),
+            "first_subword": np.asarray(first, dtype=np.int32),
+            "word_ok": np.asarray([f >= 0 for f in first], dtype=bool),
+            "sent_of_word": sent, "pos": blank, "morph": blank, "lemma": blank,
+            "ner": blank, "dep_head": blank, "dep_rel": blank, "srl_pred": blank,
+            "frames": frames,
+            "sent_whole": np.array([e <= W for _, e in spans], dtype=bool),
+            "cls": np.zeros((S, n_cls), dtype=np.int8),
+            "cls_ok": np.zeros(S, dtype=bool),
+            "sentiment": np.full(S, IGNORE, dtype=np.int16),
+            "_W": W, "_S": S,
+            **({"srl_sents": sentence_encodings(tokens, spans, {s for _, s, _ in frames},
+                                                tok, max_subwords)}
+               if srl_sentences else {})}
+
+
 # ── phase 2: coreference and relations ──────────────────────────────
 ENTITIES = DATA_DIR / "v6-corpus" / "entities_docred.json"
 
@@ -362,6 +393,66 @@ def relation_features(row: dict, W: int, rep, vocab: Vocab, phase2: dict,
 
 
 # ── features on disk ────────────────────────────────────────────────
+# ── phase 2: Re-DocRED as relation supervision ──────────────────────
+REDOCRED_REL = DATA_DIR / "v6-corpus" / "redocred_rel.json"
+
+
+def prepare_redocred(path: Path = REDOCRED_REL) -> dict:
+    """Re-DocRED train and dev as plain documents, written once locally so a
+    VM needs neither GitHub nor Wikidata (relation names are resolved there).
+    Test is never written: it stays held out for the gold evaluation."""
+    from ..gold.redocred import load_rel_items
+    out = {}
+    for split in ("train", "dev"):
+        out[split] = [{"id": it.id, "tokens": it.tokens,
+                       "sentence_spans": it.layers["sentence_spans"],
+                       "entities": [{"type": e["type"], "mentions": e["mentions"]}
+                                    for e in it.entities],
+                       "triples": it.layers["rel"]}
+                      for it in load_rel_items(split, max_tokens=10 ** 6)]
+    path.write_text(json.dumps(out))
+    return out
+
+
+def redocred_features(split: str, tok, max_subwords: int, vocab: Vocab,
+                      stats: Counter | None = None) -> list[dict]:
+    """Human-annotated documents that supervise the relation head alone:
+    every other label is IGNORE and coref is absent (``coref_ok`` false)."""
+    if not REDOCRED_REL.exists():
+        raise SystemExit(f"{REDOCRED_REL} missing; run python -m v6.train.data --prepare-redocred")
+    stats = Counter() if stats is None else stats
+    feats = []
+    for doc in json.loads(REDOCRED_REL.read_text())[split]:
+        spans = [tuple(x) for x in doc["sentence_spans"]]
+        f = blank_window(doc["tokens"], spans, tok, max_subwords, vocab.size("cls"))
+        W = f["_W"]
+        keep, ents, types = {}, [], []
+        for ei, e in enumerate(doc["entities"]):
+            ms = [(a, b + 1) for a, b in e["mentions"] if b + 1 <= W and f["word_ok"][a]]
+            stats["redocred_mentions_past_limit"] += len(e["mentions"]) - len(ms)
+            if ms:
+                keep[ei] = len(ents)
+                ents.append(np.asarray(ms, dtype=np.int32))
+                types.append(vocab.id("ent_type", e["type"]) or 0)
+        triples = []
+        for h, t, name in doc["triples"]:
+            k = vocab.id("relations", name)
+            if k is None or h not in keep or t not in keep:
+                stats["redocred_triples_dropped"] += 1
+                continue
+            triples.append((keep[h], keep[t], k))
+        if len(ents) < 2:
+            stats["redocred_docs_dropped"] += 1
+            continue
+        f.update(coref=None, _n_rel=vocab.size("relations"),
+                 rel={"spans": ents, "types": np.asarray(types, dtype=np.int32),
+                      "triples": triples})
+        stats["redocred_docs"] += 1
+        stats["redocred_triples"] += len(triples)
+        feats.append(f)
+    return feats
+
+
 def _key(spec, split: str, vocab: Vocab, limit: int | None,
          srl_sentences: bool = False, phase2: bool = False) -> str:
     manifest = DATA_DIR / "v6-corpus" / "MANIFEST.json"
@@ -713,11 +804,21 @@ def verify(spec, split: str, vocab: Vocab, limit: int | None,
 def main() -> int:
     from . import encoders
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--encoder", required=True)
+    ap.add_argument("--encoder")
     ap.add_argument("--split", default="dev")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--prepare-redocred", action="store_true",
+                    help=f"write {REDOCRED_REL.name} (Re-DocRED train and dev) and stop")
     args = ap.parse_args()
+    if args.prepare_redocred:
+        out = prepare_redocred()
+        for k, docs in out.items():
+            print(f"{k}: {len(docs)} documents, {sum(len(d['triples']) for d in docs):,} triples")
+        print(f"wrote {REDOCRED_REL}")
+        return 0
+    if not args.encoder:
+        ap.error("--encoder is required")
     spec, vocab = encoders.get(args.encoder), Vocab.load()
     if args.verify:
         return verify(spec, args.split, vocab, args.limit)

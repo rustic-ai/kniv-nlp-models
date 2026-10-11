@@ -36,7 +36,7 @@ import argparse
 import dataclasses
 import math
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import torch
@@ -67,7 +67,14 @@ def _f1(tp: float, n_pred: float, n_gold: float) -> float:
 
 @torch.no_grad()
 def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
-             batch_size: int) -> dict:
+             batch_size: int, rel_gold: list | None = None) -> dict:
+    """Dev scores and their composite. ``rel_gold``: human-annotated relation
+    documents (Re-DocRED dev), scored as ``relation_gold_f1`` and counted in
+    the composite."""
+    gold_f1 = None
+    if rel_gold:
+        gold_f1 = evaluate(model, rel_gold, vocab, pad_id, device, amp,
+                           max(1, batch_size // 4))["relation_f1"]
     model.eval()
     L = vocab.labels
     c = defaultdict(float)
@@ -133,6 +140,9 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
                  if c["link_g"] else 0.0,
                  relation_f1=_f1(c["rel_tp"], c["rel_p"], c["rel_g"]))
         keys += ["coref_link_f1", "relation_f1"]
+    if gold_f1 is not None:
+        r["relation_gold_f1"] = gold_f1
+        keys.append("relation_gold_f1")
     r = {k: round(v, 5) for k, v in r.items()}
     # One number to select best.pt on: every head counts equally.
     r["composite"] = round(sum(r[k] for k in keys) / len(keys), 5)
@@ -214,6 +224,9 @@ def main() -> int:
     ap.add_argument("--train-scope", choices=["all", "phase2"], default="all",
                     help="phase2: train only the phase-2 heads and their layer mixes; "
                          "everything else stays exactly as --init left it")
+    ap.add_argument("--redocred-train", type=int, default=0, metavar="N",
+                    help="add Re-DocRED train, N times per epoch, as relation-only "
+                         "supervision; its dev then joins best.pt selection (0 = off)")
     ap.add_argument("--p2-context", type=int, default=0, metavar="N",
                     help="transformer layers over words inside each phase-2 head "
                          "(for a frozen encoder; 0 = none)")
@@ -268,6 +281,18 @@ def main() -> int:
     dev = (featurise(spec, "dev", vocab, tok, limit=args.dev_limit, srl_sentences=cond,
                      phase2=args.phase2) if not args.probe else [])
     heads = HEADS + (PHASE2_HEADS if args.phase2 else ())
+    rd_dev = []
+    if args.redocred_train:
+        if not args.phase2:
+            raise SystemExit("--redocred-train needs --phase2")
+        from .data import redocred_features
+        st = Counter()
+        rd = redocred_features("train", tok, spec.max_subwords, vocab, st)
+        train = train + rd * args.redocred_train
+        rd_dev = (redocred_features("dev", tok, spec.max_subwords, vocab, st)
+                  if not args.probe else [])
+        print("Re-DocRED: " + ", ".join(f"{k} {v:,}" for k, v in sorted(st.items()))
+              + f"; train x{args.redocred_train}", flush=True)
 
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
                     attn_implementation=spec.attn_implementation,
@@ -334,6 +359,7 @@ def main() -> int:
                 "encoder": spec.asdict(),
                 "model_config": {"srl_mode": args.srl_mode, "phase2": args.phase2,
                                  "p2_context": args.p2_context,
+                                 "redocred_train": args.redocred_train,
                                  "init": args.init, "train_scope": args.train_scope}}
 
     def stop(state, reason=""):
@@ -448,7 +474,8 @@ def main() -> int:
 
                 if step % args.eval_every == 0 or step == total:
                     rs.status(state="evaluating")
-                    r = evaluate(model, dev, vocab, tok.pad_token_id, device, amp, micro * 2)
+                    r = evaluate(model, dev, vocab, tok.pad_token_id, device, amp, micro * 2,
+                                 rel_gold=rd_dev)
                     rs.event("eval", step=step, **r)
                     better = rs.maybe_save_best(model, r["composite"], extra())
                     rs.status(state="training", last_eval=r, push=True)
