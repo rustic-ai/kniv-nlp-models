@@ -286,7 +286,7 @@ class V6Model(nn.Module):
                  attn_implementation: str | None = None,
                  arc_dim: int = 512, rel_dim: int = 128, srl_dim: int = 256,
                  pretrained: bool = True, srl_mode: str = "joint",
-                 phase2: bool = False, p2_context: int = 0):
+                 phase2: bool = False, p2_context: int = 0, ent_head: bool = True):
         super().__init__()
         from transformers import AutoConfig, AutoModel
         # fp32 master weights for every encoder; bf16 autocast does the
@@ -341,12 +341,15 @@ class V6Model(nn.Module):
             # Phase 2 (TRAINING.md §4): coreference and relations, each with
             # its own layer mix; relations ride on entity clusters built from
             # NER and coref.
-            for k in ("coref", "relation", "ent"):
+            for k in ("coref", "relation") + (("ent",) if ent_head else ()):
                 self.mix[k] = ScalarMix(L)
-            from .data import ENT_TAGS
             # DocRED-style entity mentions, the relation head's entities at
             # inference (OntoNotes NER disagrees with DocRED on boundaries).
-            self.ent = classifier(H, H, len(ENT_TAGS), p)
+            # Off for checkpoints saved before the head existed.
+            self.ent = None
+            if ent_head:
+                from .data import ENT_TAGS
+                self.ent = classifier(H, H, len(ENT_TAGS), p)
             self.coref = CorefHead(H, context=p2_context)
             self.relation = RelationHead(H, S["relations"], p=p, context=p2_context)
         self.p2_context = p2_context
@@ -513,7 +516,8 @@ class V6Model(nn.Module):
                     batch["sent_of_word"])
             o["relation"], o["relation_sent_att"] = self.relation(
                 self._words(layers, "relation", first), batch)
-            o["ent"] = self.ent(self._words(layers, "ent", first))
+            if self.ent is not None:
+                o["ent"] = self.ent(self._words(layers, "ent", first))
         return o
 
 

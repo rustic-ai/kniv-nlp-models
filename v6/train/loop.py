@@ -386,7 +386,7 @@ def main() -> int:
         return {"loss_scale": scale, "calib": dict(calib), "vocab": vocab.to_json(),
                 "encoder": spec.asdict(),
                 "model_config": {"srl_mode": args.srl_mode, "phase2": args.phase2,
-                                 "p2_context": args.p2_context,
+                                 "p2_context": args.p2_context, "ent_head": True,
                                  "redocred_train": args.redocred_train,
                                  "init": args.init, "train_scope": args.train_scope}}
 
