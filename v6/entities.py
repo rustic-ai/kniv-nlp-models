@@ -34,6 +34,7 @@ TYPE_MAP = {
     "WORK_OF_ART": "MISC", "LAW": "MISC", "LANGUAGE": "MISC",
 }
 MERGEABLE = {"PER", "ORG", "LOC", "MISC"}
+DOCRED_TYPES = {"LOC", "MISC", "NUM", "ORG", "PER", "TIME"}
 
 # OntoNotes tags every bare count and rank -- "two", "12", "first" -- as
 # CARDINAL or ORDINAL. DocRED does not annotate those as entities at all, and
@@ -93,7 +94,9 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
         for ty, a, b in bio_spans(tags):
             if ty in DROP_TYPES:
                 continue
-            spans.append((TYPE_MAP.get(ty, "MISC"), s + a, s + b))
+            # DocRED types (from the entity-mention head) pass through as is.
+            spans.append((ty if ty in DOCRED_TYPES else TYPE_MAP.get(ty, "MISC"),
+                          s + a, s + b))
     if len(spans) < 2:
         return None, None
 

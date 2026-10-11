@@ -341,8 +341,12 @@ class V6Model(nn.Module):
             # Phase 2 (TRAINING.md §4): coreference and relations, each with
             # its own layer mix; relations ride on entity clusters built from
             # NER and coref.
-            for k in ("coref", "relation"):
+            for k in ("coref", "relation", "ent"):
                 self.mix[k] = ScalarMix(L)
+            from .data import ENT_TAGS
+            # DocRED-style entity mentions, the relation head's entities at
+            # inference (OntoNotes NER disagrees with DocRED on boundaries).
+            self.ent = classifier(H, H, len(ENT_TAGS), p)
             self.coref = CorefHead(H, context=p2_context)
             self.relation = RelationHead(H, S["relations"], p=p, context=p2_context)
         self.p2_context = p2_context
@@ -509,6 +513,7 @@ class V6Model(nn.Module):
                     batch["sent_of_word"])
             o["relation"], o["relation_sent_att"] = self.relation(
                 self._words(layers, "relation", first), batch)
+            o["ent"] = self.ent(self._words(layers, "ent", first))
         return o
 
 
@@ -534,7 +539,7 @@ def _ce(logits: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, int]:
                            ignore_index=IGNORE), n
 
 
-PHASE2_HEADS = ("coref", "coref_span", "relation", "relation_evidence")
+PHASE2_HEADS = ("coref", "coref_span", "relation", "relation_evidence", "ent")
 # Fixed weights on top of the per-head loss scale: DREEAM weighs its evidence
 # term at 0.1 of the relation loss.
 HEAD_WEIGHT = {"relation_evidence": 0.1}
@@ -593,6 +598,10 @@ def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
         out["relation"] = (atlop_loss(o["relation"], batch["pair_labels"]), len(o["relation"]))
     else:
         out["relation"] = (o["pos"].sum() * 0.0, 0)
+    if "ent" in o and "ent" in batch:
+        out["ent"] = _ce(o["ent"], batch["ent"])
+    else:
+        out["ent"] = (o["pos"].sum() * 0.0, 0)
     sa = o.get("relation_sent_att")
     if sa is not None and batch["pair_ev_ok"].any():
         ok = batch["pair_ev_ok"]

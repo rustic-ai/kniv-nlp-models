@@ -49,6 +49,11 @@ CORPUS = DATA_DIR / "v6-corpus" / "corpus"
 FEATURES = DATA_DIR / "v6-corpus" / "features"
 IGNORE = -100
 TOKEN_LAYERS = ("pos", "morph", "lemma", "ner")
+# Phase 2's entity-mention head tags DocRED's six types with DocRED's mention
+# boundaries -- the relation schema's own convention, which OntoNotes NER
+# does not follow. Fixed here rather than in the vocabulary.
+DOCRED_TYPES = ("LOC", "MISC", "NUM", "ORG", "PER", "TIME")
+ENT_TAGS = ["O"] + [f"{p}-{t}" for t in DOCRED_TYPES for p in ("B", "I")]
 COLUMNS = ["window_id", "domain", "tokens", "sentence_spans", "n_tokens",
            "pos", "ner", "dep", "dep_heads", "lemma", "morph", "srl_frames",
            "cls", "sentiment", "loss_mask"]
@@ -459,6 +464,20 @@ def redocred_features(split: str, tok, max_subwords: int, vocab: Vocab,
             if h in keep and t in keep and sents:
                 evidence.append((keep[h], keep[t], sents))
         stats["redocred_pairs_with_evidence"] += len(evidence)
+        # Mention tags in DocRED's convention; a mention overlapping one
+        # already tagged is left out rather than corrupting it.
+        ent = np.zeros(W, dtype=np.int16)
+        ent[~f["word_ok"]] = IGNORE
+        taken = np.zeros(W, dtype=bool)
+        for e in doc["entities"]:
+            for a, b in e["mentions"]:
+                if b >= W or taken[a:b + 1].any():
+                    stats["redocred_mentions_not_tagged"] += 1
+                    continue
+                ent[a] = ENT_TAGS.index(f"B-{e['type']}")
+                ent[a + 1:b + 1] = ENT_TAGS.index(f"I-{e['type']}")
+                taken[a:b + 1] = True
+        f["ent"] = ent
         f.update(coref=None, _n_rel=vocab.size("relations"),
                  rel={"spans": ents, "types": np.asarray(types, dtype=np.int32),
                       "triples": triples, "evidence": evidence})
@@ -582,6 +601,11 @@ def collate(items: list[dict], pad_id: int):
             row = torch.full((W,), IGNORE, dtype=torch.long)
             row[start:start + len(r)] = torch.from_numpy(r.astype(np.int64))
             fb.append(b); fp.append(p); roles.append(row)
+    if any("ent" in x for x in items):
+        out["ent"] = full((B, W), IGNORE, torch.long)
+        for b, x in enumerate(items):
+            if "ent" in x:
+                out["ent"][b, :len(x["ent"])] = torch.from_numpy(x["ent"].astype(np.int64))
     out["frame_batch"] = torch.tensor(fb, dtype=torch.long)
     out["frame_pred"] = torch.tensor(fp, dtype=torch.long)
     out["frame_roles"] = (torch.stack(roles) if roles

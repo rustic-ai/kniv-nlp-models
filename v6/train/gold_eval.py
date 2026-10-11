@@ -50,6 +50,7 @@ import numpy as np
 import torch
 
 from ..config import DATA_DIR, RUNS_DIR
+from ..entities import bio_spans as bio_spans_t
 from ..score.metrics import _feats_set, bio_spans
 from .data import IGNORE, blank_window, collate
 from .encoders import EncoderSpec
@@ -485,7 +486,9 @@ def run_phase2(model, feats: list[dict], tok, device, batch: int = 4) -> list[di
                 span = {w: (s, e) for w, s, e in zip(heads, st, en)}
             out[i] = {"coref": [[span[w] for w in c] for c in words],
                       "relation": rel[pair_b == j],
-                      "ner": torch.log_softmax(o["ner"][j, :W].float(), -1).cpu().numpy()}
+                      "ner": torch.log_softmax(o["ner"][j, :W].float(), -1).cpu().numpy(),
+                      "ent": (torch.log_softmax(o["ent"][j, :W].float(), -1).cpu().numpy()
+                              if "ent" in o else None)}
     return out
 
 
@@ -573,6 +576,8 @@ def eval_redocred(model, tok, spec, vocab, device, limit) -> dict:
     # 49k-wide bilinear input, and four of them exhaust a 48 GB Mac.
     outs = run_phase2(model, feats, tok, device, batch=1)
     offset = calibrate_offset(model, tok, spec, vocab, device)
+    from .data import ENT_TAGS
+    ent_allowed, ent_start = bio_constraints(ENT_TAGS)
     rows, feats2, order2 = [], [], []
     for n, (it, f, o) in enumerate(zip(items, feats, outs)):
         keep = f["_ent_keep"]
@@ -585,11 +590,19 @@ def eval_redocred(model, tok, spec, vocab, device, limit) -> dict:
         row["rel_reach"] = [sum(h in keep and t in keep for h, t, _ in gold), len(gold)]
         row["_offset"] = offset
         rows.append(row)
-        # End to end: the model's own entities.
+        # End to end: the model's own entities -- from the DocRED-style
+        # entity-mention head when the model has one, else OntoNotes NER.
         W = f["_W"]
         sp = [tuple(x) for x in it.layers["sentence_spans"]]
-        ner = [[tags[x] for x in viterbi(o["ner"][s:min(e, W)], allowed, start)]
-               if s < W else None for s, e in sp]
+        if o["ent"] is not None:
+            ner = [[ENT_TAGS[x] for x in viterbi(o["ent"][s:min(e, W)], ent_allowed, ent_start)]
+                   if s < W else None for s, e in sp]
+        else:
+            ner = [[tags[x] for x in viterbi(o["ner"][s:min(e, W)], allowed, start)]
+                   if s < W else None for s, e in sp]
+        pm = {(s + a, s + b) for (s, _), t in zip(sp, ner) if t for _, a, b in bio_spans_t(t)}
+        gm = {(a, e + 1) for en in it.entities for a, e in en["mentions"]}
+        rows[-1]["ent_mention_f1"] = [len(pm & gm), len(pm), len(gm)]
         sents, vertex = build_entities(it.tokens, [list(x) for x in sp], ner,
                                        [[list(m) for m in c] for c in o["coref"]])
         if vertex is None:
@@ -617,7 +630,10 @@ def eval_redocred(model, tok, spec, vocab, device, limit) -> dict:
         gold = {tuple(x) for x in it.layers["rel"]}
         rows[n]["rel_e2e_f1"] = [len(mapped & gold), pred_n, len(gold)]
         rows[n]["rel_e2e_docs"] = [1, 1]
+    for r in rows:
+        r.setdefault("ent_mention_f1", [0, 0, 0])
     return {"items": rows, "kinds": {"rel_f1": "f1", "rel_f1_cal": "f1", "rel_reach": "acc",
+                                     "ent_mention_f1": "f1",
                                      "rel_e2e_f1": "f1", "rel_e2e_docs": "acc"}}
 
 
@@ -682,7 +698,8 @@ REPORTED = [("ud", "pos", "POS acc"), ("ud", "lemma", "lemma acc"),
             ("redocred", "rel_f1", "relation triple-F1, gold entities"),
             ("redocred", "rel_f1_cal", "same, threshold calibrated on Re-DocRED dev"),
             ("redocred", "rel_e2e_f1", "relation triple-F1, own entities (relaxed)"),
-            ("redocred", "rel_reach", "relation gold triples inside the window")]
+            ("redocred", "rel_reach", "relation gold triples inside the window"),
+            ("redocred", "ent_mention_f1", "entity mentions, exact span (the e2e entities)")]
 # v5 from DECISIONS.md; its SRL split from its cached bake-off predictions on
 # the same items (EVALUATION.md).
 V5 = {"pos": 0.987, "uas": 0.949, "las": 0.925, "ner_f1": 0.889, "srl_f1": 0.843,

@@ -71,10 +71,9 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
     """Dev scores and their composite. ``rel_gold``: human-annotated relation
     documents (Re-DocRED dev), scored as ``relation_gold_f1`` and counted in
     the composite."""
-    gold_f1 = None
+    on_gold = None
     if rel_gold:
-        gold_f1 = evaluate(model, rel_gold, vocab, pad_id, device, amp,
-                           max(1, batch_size // 4))["relation_f1"]
+        on_gold = evaluate(model, rel_gold, vocab, pad_id, device, amp, max(1, batch_size // 4))
     model.eval()
     L = vocab.labels
     c = defaultdict(float)
@@ -120,6 +119,13 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
         c["sent_n"] += m.sum().item()
         if "coref_scores" in o:
             _coref_counts(o, b, c)
+        if "ent" in o and "ent" in b:
+            from .data import ENT_TAGS
+            for pp, gg in zip(o["ent"].argmax(-1).tolist(), b["ent"].tolist()):
+                g = [ENT_TAGS[x] if x != IGNORE else "O" for x in gg]
+                q = [ENT_TAGS[x] if y != IGNORE else "O" for x, y in zip(pp, gg)]
+                gs, ps = _spans(g), _spans(q)
+                c["ent_tp"] += len(gs & ps); c["ent_p"] += len(ps); c["ent_g"] += len(gs)
         if "relation" in o and len(o["relation"]):
             lg, gold = o["relation"], b["pair_labels"][:, 1:] > 0.5
             pred = lg[:, 1:] > lg[:, :1]
@@ -140,9 +146,14 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
                  if c["link_g"] else 0.0,
                  relation_f1=_f1(c["rel_tp"], c["rel_p"], c["rel_g"]))
         keys += ["coref_link_f1", "relation_f1"]
-    if gold_f1 is not None:
-        r["relation_gold_f1"] = gold_f1
+    if c["ent_g"]:
+        r["ent_f1"] = _f1(c["ent_tp"], c["ent_p"], c["ent_g"])
+    if on_gold is not None:
+        r["relation_gold_f1"] = on_gold["relation_f1"]
         keys.append("relation_gold_f1")
+        if "ent_f1" in on_gold:
+            r["ent_gold_f1"] = on_gold["ent_f1"]
+            keys.append("ent_gold_f1")
     r = {k: round(v, 5) for k, v in r.items()}
     # One number to select best.pt on: every head counts equally.
     r["composite"] = round(sum(r[k] for k in keys) / len(keys), 5)
@@ -189,7 +200,8 @@ def _load_init(model, init: str, vocab: Vocab) -> None:
             raise SystemExit(f"--init vocabulary differs from this one on {k!r}")
     missing, unexpected = model.load_state_dict(ck["model"], strict=False)
     fresh = [m for m in missing if not m.startswith(("coref.", "relation.",
-                                                      "mix.coref.", "mix.relation."))]
+                                                      "mix.coref.", "mix.relation.", "ent.",
+                                                      "mix.ent."))]
     if fresh or unexpected:
         raise SystemExit(f"--init does not fit this model: missing {fresh[:5]}, "
                          f"unexpected {unexpected[:5]}")
@@ -314,7 +326,7 @@ def main() -> int:
             raise SystemExit("--train-scope phase2 needs --phase2")
         for n, prm in model.named_parameters():
             prm.requires_grad = n.startswith(("coref.", "relation.", "mix.coref.",
-                                              "mix.relation."))
+                                              "mix.relation.", "ent.", "mix.ent."))
         model.freeze_encoder = True
         model.train()
     wrong = {str(p.dtype) for p in model.parameters()} - {"torch.float32"}
