@@ -44,7 +44,7 @@ import torch
 from ..config import RUNS_DIR
 from . import encoders
 from .data import IGNORE, batch_order, collate, featurise
-from .model import HEAD_WEIGHT, HEADS, PHASE2_HEADS, V6Model, losses
+from .model import HEAD_WEIGHT, HEADS, PHASE2_HEADS, RELATION_HEADS, V6Model, losses
 from .runstate import Hub, RunState, memory
 from .vocab import Vocab
 
@@ -72,6 +72,9 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
     documents (Re-DocRED dev), scored as ``relation_gold_f1`` and counted in
     the composite."""
     on_gold = None
+    sticky = model.rel_lora is not None and model.rel_lora.sticky
+    if sticky:                       # the plain pass must be plain while evaluating
+        model.rel_lora.sticky = model.rel_lora.on = False
     if rel_gold:
         on_gold = evaluate(model, rel_gold, vocab, pad_id, device, amp, max(1, batch_size // 4))
     model.eval()
@@ -132,6 +135,8 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
             c["rel_tp"] += (pred & gold).sum().item()
             c["rel_p"] += pred.sum().item(); c["rel_g"] += gold.sum().item()
     model.train()
+    if sticky:
+        model.rel_lora.sticky = True
     r = {h: c[f"{h}_ok"] / max(c[f"{h}_n"], 1) for h in ("pos", "morph", "lemma")}
     r.update(uas=c["uas_ok"] / max(c["dep_n"], 1), las=c["las_ok"] / max(c["dep_n"], 1),
              ner_f1=_f1(c["ner_tp"], c["ner_p"], c["ner_g"]),
@@ -201,7 +206,7 @@ def _load_init(model, init: str, vocab: Vocab) -> None:
     missing, unexpected = model.load_state_dict(ck["model"], strict=False)
     fresh = [m for m in missing if not m.startswith(("coref.", "relation.",
                                                       "mix.coref.", "mix.relation.", "ent.",
-                                                      "mix.ent."))]
+                                                      "mix.ent.", "rel_lora."))]
     if fresh or unexpected:
         raise SystemExit(f"--init does not fit this model: missing {fresh[:5]}, "
                          f"unexpected {unexpected[:5]}")
@@ -233,7 +238,10 @@ def main() -> int:
                     help="add the coreference and relation heads (TRAINING.md §4)")
     ap.add_argument("--init", help="start from a checkpoint: a best.pt path, or a run "
                                    "name in the hub repo (e.g. deberta-v3-large-srlft-full)")
-    ap.add_argument("--train-scope", choices=["all", "phase2"], default="all",
+    ap.add_argument("--rel-adapter", type=int, default=0, metavar="R",
+                    help="rank of a LoRA adapter for a second, relation-only encoder pass "
+                         "feeding the relation and entity heads (0 = none)")
+    ap.add_argument("--train-scope", choices=["all", "phase2", "relation"], default="all",
                     help="phase2: train only the phase-2 heads and their layer mixes; "
                          "everything else stays exactly as --init left it")
     ap.add_argument("--redocred-train", type=int, default=0, metavar="N",
@@ -318,7 +326,7 @@ def main() -> int:
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
                     attn_implementation=spec.attn_implementation,
                     srl_mode=args.srl_mode, phase2=args.phase2,
-                    p2_context=args.p2_context).to(device)
+                    p2_context=args.p2_context, rel_adapter=args.rel_adapter).to(device)
     if args.init:
         _load_init(model, args.init, vocab)
     if args.train_scope == "phase2":
@@ -329,6 +337,16 @@ def main() -> int:
                                               "mix.relation.", "ent.", "mix.ent."))
         model.freeze_encoder = True
         model.train()
+    elif args.train_scope == "relation":
+        # The relation adapter, relation and entity heads alone, on the adapted
+        # pass only: encoder weights, phase 1 and coref stay bit-identical.
+        if not args.rel_adapter:
+            raise SystemExit("--train-scope relation needs --rel-adapter")
+        for n, prm in model.named_parameters():
+            prm.requires_grad = n.startswith(("rel_lora.", "relation.", "mix.relation.",
+                                              "ent.", "mix.ent."))
+        heads = RELATION_HEADS
+        model.rel_lora.sticky = True
     wrong = {str(p.dtype) for p in model.parameters()} - {"torch.float32"}
     if wrong:
         raise SystemExit(f"parameters must be fp32 master weights; found {wrong}")
@@ -387,6 +405,7 @@ def main() -> int:
                 "encoder": spec.asdict(),
                 "model_config": {"srl_mode": args.srl_mode, "phase2": args.phase2,
                                  "p2_context": args.p2_context, "ent_head": True,
+                                 "rel_adapter": args.rel_adapter,
                                  "redocred_train": args.redocred_train,
                                  "init": args.init, "train_scope": args.train_scope}}
 
@@ -427,7 +446,7 @@ def main() -> int:
                 for m in range(m0, m0 + spec.grad_accum):
                     b = _to(collate([train[i] for i in batches[m]], tok.pad_token_id), device)
                     with amp():
-                        o = model(b)
+                        o = model(b, relation_only=args.train_scope == "relation")
                     L = losses(o, b)
                     vals = {h: l.item() for h, (l, n) in L.items() if n}
                     bad = [h for h, v in vals.items() if not math.isfinite(v)]

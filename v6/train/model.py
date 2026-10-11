@@ -281,12 +281,55 @@ def atlop_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     return (l1 + l2).mean()
 
 
+class RelationAdapter(nn.Module):
+    """LoRA on the encoder's transformer-layer linears, applied only while
+    switched on: the relation pass runs the encoder with it, every other head
+    reads the plain pass. Installed as forward hooks, so the encoder's own
+    parameter names -- and every existing checkpoint -- are unchanged.
+
+    ``B`` starts at zero, so the adapted pass starts identical to the plain
+    one and a trained relation head starts where it was."""
+
+    def __init__(self, encoder: nn.Module, r: int = 16, alpha: float = 32.0, p: float = 0.1):
+        super().__init__()
+        import math
+        import re
+        self.on = False
+        # Held on through backward in relation-only training: gradient
+        # checkpointing re-runs the forward during backward, and a switch
+        # turned off by then would recompute the plain pass instead.
+        self.sticky = False
+        self.scale = alpha / r
+        self.drop = nn.Dropout(p)
+        self.A, self.B = nn.ParameterDict(), nn.ParameterDict()
+        layer = re.compile(r"(^|\.)layers?\.\d+\.")
+        for name, m in encoder.named_modules():
+            if isinstance(m, nn.Linear) and layer.search(name):
+                key = name.replace(".", "__")
+                a = nn.Parameter(torch.empty(r, m.in_features))
+                nn.init.kaiming_uniform_(a, a=math.sqrt(5))
+                self.A[key] = a
+                self.B[key] = nn.Parameter(torch.zeros(m.out_features, r))
+                m.register_forward_hook(self._hook(key))
+        if not self.A:
+            raise ValueError("no transformer-layer linears found for the relation adapter")
+
+    def _hook(self, key):
+        def hook(module, inputs, output):
+            if not self.on:
+                return output
+            x = self.drop(inputs[0])
+            return output + (x @ self.A[key].to(x.dtype).T @ self.B[key].to(x.dtype).T) * self.scale
+        return hook
+
+
 class V6Model(nn.Module):
     def __init__(self, hf_id: str, sizes: dict[str, int], dropout: float = 0.1,
                  attn_implementation: str | None = None,
                  arc_dim: int = 512, rel_dim: int = 128, srl_dim: int = 256,
                  pretrained: bool = True, srl_mode: str = "joint",
-                 phase2: bool = False, p2_context: int = 0, ent_head: bool = True):
+                 phase2: bool = False, p2_context: int = 0, ent_head: bool = True,
+                 rel_adapter: int = 0):
         super().__init__()
         from transformers import AutoConfig, AutoModel
         # fp32 master weights for every encoder; bf16 autocast does the
@@ -353,6 +396,11 @@ class V6Model(nn.Module):
             self.coref = CorefHead(H, context=p2_context)
             self.relation = RelationHead(H, S["relations"], p=p, context=p2_context)
         self.p2_context = p2_context
+        # A rank-``rel_adapter`` LoRA for a second, relation-only encoder pass
+        # (0 = none): relations get encoder capacity of their own while every
+        # other head keeps the shared pass.
+        self.rel_lora = (RelationAdapter(self.encoder, rel_adapter)
+                         if phase2 and rel_adapter else None)
         # Set by a run that trains only heads: the encoder then runs without
         # gradient and without dropout, the features it will give at inference.
         self.freeze_encoder = False
@@ -442,19 +490,48 @@ class V6Model(nn.Module):
         return out
 
     # ── forward ────────────────────────────────────────────────────
+    def _relation_layers(self, batch: dict):
+        """The adapted encoder pass, for the relation and entity heads (the
+        plain pass when there is no adapter)."""
+        if self.rel_lora is None:
+            out = self.encoder(input_ids=batch["input_ids"],
+                               attention_mask=batch["attention_mask"],
+                               output_hidden_states=True)
+            return tuple(F.layer_norm(h, h.shape[-1:]) for h in out.hidden_states)
+        self.rel_lora.on = True
+        try:
+            out = self.encoder(input_ids=batch["input_ids"],
+                               attention_mask=batch["attention_mask"],
+                               output_hidden_states=True)
+        finally:
+            if not self.rel_lora.sticky:
+                self.rel_lora.on = False
+        return tuple(F.layer_norm(h, h.shape[-1:]) for h in out.hidden_states)
+
+    def _relation_heads(self, layers, batch: dict, o: dict) -> dict:
+        first = batch["first_subword"]
+        rw = self._words(layers, "relation", first)
+        o["_anchor"] = rw.sum() * 0.0          # a graph for an all-unsupervised batch
+        o["relation"], o["relation_sent_att"] = self.relation(rw, batch)
+        if self.ent is not None:
+            o["ent"] = self.ent(self._words(layers, "ent", first))
+        return o
+
     def forward(self, batch: dict, predict: bool = False,
-                predict_heads: bool | None = None) -> dict:
+                predict_heads: bool | None = None, relation_only: bool = False) -> dict:
         """Logits per head. ``predict`` decodes DEP heads and SRL predicates
         from the model instead of reading them from the batch; dev evaluation
         sets ``predict_heads`` alone, so LAS is scored on predicted arcs while
         SRL roles are still scored on gold predicates."""
         predict_heads = predict if predict_heads is None else predict_heads
+        first, wm = batch["first_subword"], batch["word_mask"]
+        if relation_only:
+            return self._relation_heads(self._relation_layers(batch), batch, {})
         with torch.set_grad_enabled(torch.is_grad_enabled() and not self.freeze_encoder):
             out = self.encoder(input_ids=batch["input_ids"],
                                attention_mask=batch["attention_mask"],
                                output_hidden_states=True)
         layers = tuple(F.layer_norm(h, h.shape[-1:]) for h in out.hidden_states)
-        first, wm = batch["first_subword"], batch["word_mask"]
         o = {}
         o["pos"] = self.pos(self._words(layers, "pos", first))
         o["morph"] = self.morph(self._words(layers, "morph", first))
@@ -514,10 +591,8 @@ class V6Model(nn.Module):
                 o["coref_span"], o["coref_span_pos"] = self.coref.spans(
                     o["coref_a"], batch["coref_batch"], batch["coref_head"],
                     batch["sent_of_word"])
-            o["relation"], o["relation_sent_att"] = self.relation(
-                self._words(layers, "relation", first), batch)
-            if self.ent is not None:
-                o["ent"] = self.ent(self._words(layers, "ent", first))
+            o = self._relation_heads(self._relation_layers(batch) if self.rel_lora is not None
+                                     else layers, batch, o)
         return o
 
 
@@ -544,6 +619,7 @@ def _ce(logits: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, int]:
 
 
 PHASE2_HEADS = ("coref", "coref_span", "relation", "relation_evidence", "ent")
+RELATION_HEADS = ("relation", "relation_evidence", "ent")
 # Fixed weights on top of the per-head loss scale: DREEAM weighs its evidence
 # term at 0.1 of the relation loss.
 HEAD_WEIGHT = {"relation_evidence": 0.1}
@@ -563,6 +639,10 @@ def coref_targets(batch: dict, cand: torch.Tensor, scores: torch.Tensor) -> torc
     return torch.cat([dummy, gold], -1)
 
 
+def _zero(o: dict) -> torch.Tensor:
+    return (o["pos"] if "pos" in o else o["_anchor"]).sum() * 0.0
+
+
 def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
     out = {}
     ok = batch["coref_ok"]
@@ -579,7 +659,7 @@ def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
         bce = F.binary_cross_entropy_with_logits(s[real].clamp(-50, 50), gold[real].float())
         out["coref"] = (nll[wm].mean() + 0.5 * bce, n)
     else:
-        out["coref"] = (o["pos"].sum() * 0.0, 0)
+        out["coref"] = (_zero(o), 0)
     if "coref_span" in o:
         lg, pos = o["coref_span"], o["coref_span_pos"]
         st = (pos == batch["coref_start"].unsqueeze(1)).float().argmax(1)
@@ -597,15 +677,15 @@ def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
         else:
             out["coref_span"] = (lg.sum() * 0.0, 0)
     else:
-        out["coref_span"] = (o["pos"].sum() * 0.0, 0)
+        out["coref_span"] = (_zero(o), 0)
     if "relation" in o and len(o["relation"]):
         out["relation"] = (atlop_loss(o["relation"], batch["pair_labels"]), len(o["relation"]))
     else:
-        out["relation"] = (o["pos"].sum() * 0.0, 0)
+        out["relation"] = (_zero(o), 0)
     if "ent" in o and "ent" in batch:
         out["ent"] = _ce(o["ent"], batch["ent"])
     else:
-        out["ent"] = (o["pos"].sum() * 0.0, 0)
+        out["ent"] = (_zero(o), 0)
     sa = o.get("relation_sent_att")
     if sa is not None and batch["pair_ev_ok"].any():
         ok = batch["pair_ev_ok"]
@@ -613,12 +693,14 @@ def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
         kl = (t * (torch.log(t.clamp(min=1e-12)) - torch.log(sa[ok].clamp(min=1e-12)))).sum(-1)
         out["relation_evidence"] = (kl.mean(), int(ok.sum()))
     else:
-        out["relation_evidence"] = (o["pos"].sum() * 0.0, 0)
+        out["relation_evidence"] = (_zero(o), 0)
     return out
 
 
 def losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
     out = phase2_losses(o, batch) if "coref_ok" in batch else {}
+    if "pos" not in o:                         # a relation-only pass
+        return {h: v for h, v in out.items() if h in RELATION_HEADS}
     for h in HEADS:
         if h == "cls":
             ok = batch["cls_ok"]
