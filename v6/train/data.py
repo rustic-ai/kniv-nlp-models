@@ -401,15 +401,24 @@ def prepare_redocred(path: Path = REDOCRED_REL) -> dict:
     """Re-DocRED train and dev as plain documents, written once locally so a
     VM needs neither GitHub nor Wikidata (relation names are resolved there).
     Test is never written: it stays held out for the gold evaluation."""
-    from ..gold.redocred import load_rel_items
+    from ..gold.redocred import download, load_rel_items
     out = {}
     for split in ("train", "dev"):
-        out[split] = [{"id": it.id, "tokens": it.tokens,
-                       "sentence_spans": it.layers["sentence_spans"],
-                       "entities": [{"type": e["type"], "mentions": e["mentions"]}
-                                    for e in it.entities],
-                       "triples": it.layers["rel"]}
-                      for it in load_rel_items(split, max_tokens=10 ** 6)]
+        raw = json.loads(download(split).read_text())
+        docs = []
+        for it in load_rel_items(split, max_tokens=10 ** 6):
+            # Evidence sentences per (head, tail), the union over its
+            # relations: DREEAM's supervision for the pair attention.
+            ev: dict[tuple, set] = {}
+            for lab in raw[int(it.id.rsplit("-", 1)[1])]["labels"]:
+                ev.setdefault((lab["h"], lab["t"]), set()).update(lab.get("evidence") or [])
+            docs.append({"id": it.id, "tokens": it.tokens,
+                         "sentence_spans": it.layers["sentence_spans"],
+                         "entities": [{"type": e["type"], "mentions": e["mentions"]}
+                                      for e in it.entities],
+                         "triples": it.layers["rel"],
+                         "evidence": [[h, t, sorted(v)] for (h, t), v in sorted(ev.items()) if v]})
+        out[split] = docs
     path.write_text(json.dumps(out))
     return out
 
@@ -444,9 +453,15 @@ def redocred_features(split: str, tok, max_subwords: int, vocab: Vocab,
         if len(ents) < 2:
             stats["redocred_docs_dropped"] += 1
             continue
+        evidence = []
+        for h, t, sents in doc.get("evidence", []):
+            sents = [j for j in sents if j < f["_S"] and spans[j][0] < W]
+            if h in keep and t in keep and sents:
+                evidence.append((keep[h], keep[t], sents))
+        stats["redocred_pairs_with_evidence"] += len(evidence)
         f.update(coref=None, _n_rel=vocab.size("relations"),
                  rel={"spans": ents, "types": np.asarray(types, dtype=np.int32),
-                      "triples": triples})
+                      "triples": triples, "evidence": evidence})
         stats["redocred_docs"] += 1
         stats["redocred_triples"] += len(triples)
         feats.append(f)
@@ -590,7 +605,8 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
     import torch
     cb, ch, cs, ce, cc, cok = [], [], [], [], [], []
     eb, et, me, ms, mx = [], [], [], [], []
-    pb, ph, pt, plab = [], [], [], []
+    pb, ph, pt, plab, pev = [], [], [], [], []
+    S_max = max(len(x["sent_whole"]) for x in items)
     n_rel = None
     cluster_base = ent_base = 0
     for b, x in enumerate(items):
@@ -612,12 +628,14 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
         lab = {}
         for h, tl, k in r["triples"]:
             lab.setdefault((int(h), int(tl)), set()).add(int(k))
+        ev = {(int(h), int(tl)): sents for h, tl, sents in r.get("evidence", [])}
         for h in range(E):
             for tl in range(E):
                 if h == tl:
                     continue
                 pb.append(b); ph.append(ent_base + h); pt.append(ent_base + tl)
                 plab.append(lab.get((h, tl), set()))
+                pev.append(ev.get((h, tl)))
         ent_base += E
     L = torch.long
     out = {"coref_batch": torch.tensor(cb, dtype=L), "coref_head": torch.tensor(ch, dtype=L),
@@ -636,6 +654,14 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
         else:
             labels[i, 0] = 1.0
     out["pair_labels"] = labels
+    # Evidence: a distribution over the window's sentences per pair, uniform
+    # over the annotated ones; rows without evidence are not supervised.
+    target = torch.zeros(len(pev), S_max)
+    for i, sents in enumerate(pev):
+        if sents:
+            target[i, list(sents)] = 1.0 / len(sents)
+    out["pair_evidence"] = target
+    out["pair_ev_ok"] = torch.tensor([bool(x) for x in pev], dtype=torch.bool)
     return out
 
 

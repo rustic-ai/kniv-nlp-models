@@ -230,7 +230,7 @@ class RelationHead(nn.Module):
         x = self.proj(contextualise(self.context, words, batch["word_mask"]))  # [B,W,d]
         E = len(batch["ent_batch"])
         if E == 0 or len(batch["pair_h"]) == 0:
-            return x.new_zeros(0, self.bilinear.out_features)
+            return x.new_zeros(0, self.bilinear.out_features), None
         men = x[batch["ent_batch"][batch["men_ent"]], batch["men_start"]].float()  # [Mm,d]
         # log-sum-exp per entity, via a max shift for stability
         ent_max = torch.full((E, men.size(1)), -1e4, device=x.device)
@@ -244,18 +244,27 @@ class RelationHead(nn.Module):
         keys = self.kp(x).float()
         qs = self.q(torch.cat([eh, et], -1).to(x.dtype)).float()
         wm = batch["word_mask"]
+        evid = "pair_ev_ok" in batch and bool(batch["pair_ev_ok"].any())
+        sent_att = (torch.zeros(len(eh), batch["pair_evidence"].size(1), device=x.device)
+                    if evid else None)
         for b in batch["pair_batch"].unique().tolist():
             sel = batch["pair_batch"] == b
             att = (qs[sel] @ keys[b].T) / keys.size(-1) ** 0.5             # [Pb,W]
             att = att.masked_fill(~wm[b].unsqueeze(0), NEG).softmax(-1)
             ctx[sel] = (att @ x[b].float()).to(ctx.dtype)   # autocast returns bf16
+            if evid and batch["pair_ev_ok"][sel].any():
+                # The pair's attention summed per sentence (DREEAM).
+                sw = batch["sent_of_word"][b]
+                onehot = F.one_hot(sw.clamp(min=0), sent_att.size(1)).float() \
+                    * (sw >= 0).unsqueeze(-1)
+                sent_att[sel] = (att @ onehot).to(sent_att.dtype)
         zs = torch.tanh(self.head_ext(torch.cat([eh, ctx], -1)))
         zo = torch.tanh(self.tail_ext(torch.cat([et, ctx], -1)))
         P, d = zs.shape
         b1 = zs.view(P, d // self.block, self.block)
         b2 = zo.view(P, d // self.block, self.block)
         bl = (b1.unsqueeze(3) * b2.unsqueeze(2)).view(P, d * self.block)
-        return self.bilinear(bl).float()                                # [P, R+1]
+        return self.bilinear(bl).float(), sent_att                      # [P, R+1]
 
 
 def atlop_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -498,7 +507,8 @@ class V6Model(nn.Module):
                 o["coref_span"], o["coref_span_pos"] = self.coref.spans(
                     o["coref_a"], batch["coref_batch"], batch["coref_head"],
                     batch["sent_of_word"])
-            o["relation"] = self.relation(self._words(layers, "relation", first), batch)
+            o["relation"], o["relation_sent_att"] = self.relation(
+                self._words(layers, "relation", first), batch)
         return o
 
 
@@ -524,7 +534,10 @@ def _ce(logits: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, int]:
                            ignore_index=IGNORE), n
 
 
-PHASE2_HEADS = ("coref", "coref_span", "relation")
+PHASE2_HEADS = ("coref", "coref_span", "relation", "relation_evidence")
+# Fixed weights on top of the per-head loss scale: DREEAM weighs its evidence
+# term at 0.1 of the relation loss.
+HEAD_WEIGHT = {"relation_evidence": 0.1}
 
 
 def coref_targets(batch: dict, cand: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
@@ -580,6 +593,14 @@ def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
         out["relation"] = (atlop_loss(o["relation"], batch["pair_labels"]), len(o["relation"]))
     else:
         out["relation"] = (o["pos"].sum() * 0.0, 0)
+    sa = o.get("relation_sent_att")
+    if sa is not None and batch["pair_ev_ok"].any():
+        ok = batch["pair_ev_ok"]
+        t = batch["pair_evidence"][ok]
+        kl = (t * (torch.log(t.clamp(min=1e-12)) - torch.log(sa[ok].clamp(min=1e-12)))).sum(-1)
+        out["relation_evidence"] = (kl.mean(), int(ok.sum()))
+    else:
+        out["relation_evidence"] = (o["pos"].sum() * 0.0, 0)
     return out
 
 

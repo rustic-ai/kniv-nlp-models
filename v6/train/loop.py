@@ -44,7 +44,7 @@ import torch
 from ..config import RUNS_DIR
 from . import encoders
 from .data import IGNORE, batch_order, collate, featurise
-from .model import HEADS, PHASE2_HEADS, V6Model, losses
+from .model import HEAD_WEIGHT, HEADS, PHASE2_HEADS, V6Model, losses
 from .runstate import Hub, RunState, memory
 from .vocab import Vocab
 
@@ -412,7 +412,8 @@ def main() -> int:
                     bad = [h for h, v in vals.items() if not math.isfinite(v)]
                     if bad:
                         break                  # never backpropagate a non-finite loss
-                    loss = sum(scale[h] * l for h, (l, _) in L.items()) / spec.grad_accum
+                    loss = sum(scale.get(h, 1.0) * HEAD_WEIGHT.get(h, 1.0) * l
+                               for h, (l, _) in L.items()) / spec.grad_accum
                     loss.backward()
                     for h, v in vals.items():
                         this[h] += v / spec.grad_accum
