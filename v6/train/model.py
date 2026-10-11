@@ -215,9 +215,12 @@ class RelationHead(nn.Module):
     """
 
     def __init__(self, H: int, n_rel: int, d: int = 768, block: int = 64, p: float = 0.1,
-                 context: int = 0):
+                 context: int = 0, pool: str = "first"):
         super().__init__()
         self.block = block
+        # A mention as its first word ("first"), or the mean over its words
+        # ("mean") -- ATLOP's marker token stands for the whole span.
+        self.pool = pool
         self.context = context_layer(H, context, p)
         self.proj = mlp(H, d, p)
         self.q = nn.Linear(2 * d, d)
@@ -231,7 +234,13 @@ class RelationHead(nn.Module):
         E = len(batch["ent_batch"])
         if E == 0 or len(batch["pair_h"]) == 0:
             return x.new_zeros(0, self.bilinear.out_features), None
-        men = x[batch["ent_batch"][batch["men_ent"]], batch["men_start"]].float()  # [Mm,d]
+        mb = batch["ent_batch"][batch["men_ent"]]
+        if self.pool == "mean":
+            cs = torch.cat([torch.zeros_like(x[:, :1]), x.float().cumsum(1)], 1)   # [B,W+1,d]
+            n = (batch["men_end"] - batch["men_start"]).clamp(min=1).unsqueeze(1).float()
+            men = (cs[mb, batch["men_end"]] - cs[mb, batch["men_start"]]) / n        # [Mm,d]
+        else:
+            men = x[mb, batch["men_start"]].float()                                  # [Mm,d]
         # log-sum-exp per entity, via a max shift for stability
         ent_max = torch.full((E, men.size(1)), -1e4, device=x.device)
         ent_max = ent_max.scatter_reduce(0, batch["men_ent"].unsqueeze(1).expand_as(men),

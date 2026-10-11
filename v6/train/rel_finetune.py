@@ -51,9 +51,8 @@ def cache_words(model, feats: list[dict], tok, device, batch: int = 8) -> list[t
         b = {n: v.to(device) for n, v in collate([feats[i] for i in idx],
                                                  tok.pad_token_id).items()
              if n in ("input_ids", "attention_mask", "first_subword")}
-        enc = model.encoder(input_ids=b["input_ids"], attention_mask=b["attention_mask"],
-                            output_hidden_states=True)
-        layers = tuple(F.layer_norm(h, h.shape[-1:]) for h in enc.hidden_states)
+        # The relation pass: through the relation adapter when there is one.
+        layers = model._relation_layers(b)
         w = model._words(layers, "relation", b["first_subword"])
         for j, i in enumerate(idx):
             out[i] = w[j, :len(feats[i]["first_subword"])].to(torch.float16).cpu()
@@ -69,7 +68,7 @@ def head_batch(feats: list[dict], words: list[torch.Tensor], pad_id: int, device
     x = torch.zeros(B, W, words[0].size(-1))
     for j, w in enumerate(words):
         x[j, :len(w)] = w.float()
-    keep = ("word_mask", "sent_of_word", "ent_batch", "men_ent", "men_start", "pair_batch",
+    keep = ("word_mask", "sent_of_word", "ent_batch", "men_ent", "men_start", "men_end", "pair_batch",
             "pair_h", "pair_t", "pair_labels", "pair_evidence", "pair_ev_ok")
     return x.to(device), {k: b[k].to(device) for k in keep if k in b}
 
@@ -112,6 +111,10 @@ def main() -> int:
     ap.add_argument("--patience", type=int, default=3)
     ap.add_argument("--corpus-dev", type=int, default=600,
                     help="corpus dev windows for the generalisation check (0 = skip)")
+    ap.add_argument("--pool", choices=["first", "mean"], default="first",
+                    help="mention representation: first word, or mean over the span")
+    ap.add_argument("--reinit", action="store_true",
+                    help="train a freshly initialised relation head")
     ap.add_argument("--seed", type=int, default=13)
     ap.add_argument("--device")
     ap.add_argument("--local", type=Path, help="read <dir>/<run>/best.pt instead of the hub, "
@@ -125,6 +128,15 @@ def main() -> int:
     model, tok, spec, vocab, best = load_run(args.run, HF_REPO, device, args.local)
     if not model.phase2:
         raise SystemExit(f"{args.run} has no relation head")
+    model.relation.pool = args.pool
+    if args.reinit:
+        # A fresh head: compares mention poolings on equal footing, instead
+        # of one inheriting a head trained for the other.
+        from .model import RelationHead
+        old = model.relation
+        model.relation = RelationHead(old.proj[0].in_features, old.bilinear.out_features - 1,
+                                      context=len(old.context.layers) if old.context else 0,
+                                      pool=args.pool).to(device)
     model.eval()
     for n, p in model.named_parameters():
         p.requires_grad = n.startswith(REL_PARAMS)
