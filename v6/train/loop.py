@@ -331,6 +331,13 @@ def main() -> int:
         # Worst case: the longest windows, every step.
         longest = sorted(range(len(train)), key=lambda i: -len(train[i]["input_ids"]))
         order = [longest[i:i + micro] for i in range(0, micro * spec.grad_accum, micro)]
+        if args.phase2:
+            # The relation head grows with entity pairs, not length: the last
+            # micro-batch is the windows with the most pairs instead.
+            def n_pairs(i):
+                r = train[i].get("rel")
+                return len(r["spans"]) ** 2 if r else 0
+            order[-1] = sorted(range(len(train)), key=lambda i: -n_pairs(i))[:micro]
         return _probe(model, opt, train, order, args.probe, spec, tok, device, amp)
 
     per_epoch = len(batch_order(train, micro, args.seed, 0)) // spec.grad_accum
