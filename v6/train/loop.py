@@ -241,7 +241,8 @@ def main() -> int:
     ap.add_argument("--rel-adapter", type=int, default=0, metavar="R",
                     help="rank of a LoRA adapter for a second, relation-only encoder pass "
                          "feeding the relation and entity heads (0 = none)")
-    ap.add_argument("--train-scope", choices=["all", "phase2", "relation"], default="all",
+    ap.add_argument("--train-scope", choices=["all", "phase2", "relation", "relation-full"],
+                    default="all",
                     help="phase2: train only the phase-2 heads and their layer mixes; "
                          "everything else stays exactly as --init left it")
     ap.add_argument("--relation-data", choices=["all", "redocred"], default="all",
@@ -322,7 +323,7 @@ def main() -> int:
         st = Counter()
         rd = redocred_features("train", tok, spec.max_subwords, vocab, st)
         if args.relation_data == "redocred":
-            if args.train_scope != "relation":
+            if not args.train_scope.startswith("relation"):
                 raise SystemExit("--relation-data redocred needs --train-scope relation: "
                                  "the corpus windows supervise every other head")
             train = rd * args.redocred_train
@@ -347,6 +348,17 @@ def main() -> int:
                                               "mix.relation.", "ent.", "mix.ent."))
         model.freeze_encoder = True
         model.train()
+    elif args.train_scope == "relation-full":
+        # Diagnostic only: the whole encoder fine-tuned through the relation
+        # pass, as ATLOP is. It bounds what a relation adapter could reach
+        # with this head, and breaks the shared encoder for every other head:
+        # its checkpoint is a measurement, never a deployment candidate.
+        if args.rel_adapter:
+            raise SystemExit("--train-scope relation-full trains the encoder itself; drop --rel-adapter")
+        for n, prm in model.named_parameters():
+            prm.requires_grad = n.startswith(("encoder.", "relation.", "mix.relation.",
+                                              "ent.", "mix.ent."))
+        heads = RELATION_HEADS
     elif args.train_scope == "relation":
         # The relation adapter, relation and entity heads alone, on the adapted
         # pass only: encoder weights, phase 1 and coref stay bit-identical.
@@ -457,7 +469,7 @@ def main() -> int:
                 for m in range(m0, m0 + spec.grad_accum):
                     b = _to(collate([train[i] for i in batches[m]], tok.pad_token_id), device)
                     with amp():
-                        o = model(b, relation_only=args.train_scope == "relation")
+                        o = model(b, relation_only=args.train_scope.startswith("relation"))
                     L = losses(o, b)
                     vals = {h: l.item() for h, (l, n) in L.items() if n}
                     bad = [h for h, v in vals.items() if not math.isfinite(v)]
