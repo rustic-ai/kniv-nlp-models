@@ -234,8 +234,12 @@ def build_bundles() -> tuple[Path, Path, str]:
     # Phase 2 reads the relation entities beside the corpus.
     extra = [p for p in (corpus / "entities_docred.json", corpus / "redocred_rel.json")
              if p.exists()]
-    data = BUNDLE / (f"corpus-{stamp}-{int(vocab.stat().st_mtime)}"
-                     f"{'-p2' if extra else ''}{len(extra) if len(extra) > 1 else ''}.tar.gz")
+    # Keyed by every bundled side file's size and mtime: a name that ignores
+    # one ships a stale copy of it (the Re-DocRED evidence was lost that way).
+    import hashlib
+    sig = hashlib.sha1("|".join(f"{p.name}:{p.stat().st_size}:{int(p.stat().st_mtime)}"
+                                for p in [vocab, *extra]).encode()).hexdigest()[:10]
+    data = BUNDLE / f"corpus-{stamp}-{sig}.tar.gz"
     if not data.exists():
         with tarfile.open(data, "w:gz") as t:
             for p in [corpus / "corpus", vocab, corpus / "MANIFEST.json", *extra]:
