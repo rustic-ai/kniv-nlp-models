@@ -86,7 +86,7 @@ def step_loss(model, x, b) -> torch.Tensor:
 
 
 @torch.no_grad()
-def triple_f1(model, feats, words, pad_id, device, batch: int = 8) -> float:
+def triple_f1(model, feats, words, pad_id, device, batch: int = 2) -> float:
     """Micro F1 over (pair, relation) with gold entities, threshold at the
     learned class -- the training-time relation metric."""
     model.eval()
@@ -148,6 +148,12 @@ def main() -> int:
     w_dev = cache_words(model, dev, tok, device)
     w_corpus = cache_words(model, corpus, tok, device) if corpus else []
     print(f"cached in {time.time() - t0:.0f}s", flush=True)
+    # Only the relation head runs from here: free the encoder's memory.
+    model.encoder.to("cpu")
+    if device.type == "mps":
+        torch.mps.empty_cache()
+    elif device.type == "cuda":
+        torch.cuda.empty_cache()
 
     pad = tok.pad_token_id
     before = {"redocred_dev": triple_f1(model, dev, w_dev, pad, device),
