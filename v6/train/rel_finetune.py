@@ -148,10 +148,16 @@ def main() -> int:
     w_dev = cache_words(model, dev, tok, device)
     w_corpus = cache_words(model, corpus, tok, device) if corpus else []
     print(f"cached in {time.time() - t0:.0f}s", flush=True)
-    # Only the relation head runs from here: free the encoder's memory.
+    # Only the relation head runs from here. On MPS it moves to the CPU: the
+    # pair count changes every batch, so every batch is a new shape, and the
+    # MPS graph cache grows with each one until it exhausts memory.
     model.encoder.to("cpu")
     if device.type == "mps":
+        model.to("cpu")
         torch.mps.empty_cache()
+        device = torch.device("cpu")
+        torch.set_num_threads(max(1, (torch.get_num_threads() or 1)))
+        print("training the relation head on the CPU (MPS shape cache)", flush=True)
     elif device.type == "cuda":
         torch.cuda.empty_cache()
 
