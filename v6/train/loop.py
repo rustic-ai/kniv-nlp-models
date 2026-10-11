@@ -227,6 +227,9 @@ def main() -> int:
     ap.add_argument("--redocred-train", type=int, default=0, metavar="N",
                     help="add Re-DocRED train, N times per epoch, as relation-only "
                          "supervision; its dev then joins best.pt selection (0 = off)")
+    ap.add_argument("--head-weight", action="append", default=[], metavar="HEAD=W",
+                    help="fixed weight on a head's scaled loss, e.g. relation=3 to give "
+                         "it a larger share of the encoder update (repeatable)")
     ap.add_argument("--p2-context", type=int, default=0, metavar="N",
                     help="transformer layers over words inside each phase-2 head "
                          "(for a frozen encoder; 0 = none)")
@@ -281,6 +284,12 @@ def main() -> int:
     dev = (featurise(spec, "dev", vocab, tok, limit=args.dev_limit, srl_sentences=cond,
                      phase2=args.phase2) if not args.probe else [])
     heads = HEADS + (PHASE2_HEADS if args.phase2 else ())
+    weight = dict(HEAD_WEIGHT)
+    for hw in args.head_weight:
+        h, _, w = hw.partition("=")
+        if h not in heads or not w:
+            raise SystemExit(f"--head-weight {hw!r}: expected HEAD=W with HEAD one of {heads}")
+        weight[h] = float(w)
     rd_dev = []
     if args.redocred_train:
         if not args.phase2:
@@ -412,7 +421,7 @@ def main() -> int:
                     bad = [h for h, v in vals.items() if not math.isfinite(v)]
                     if bad:
                         break                  # never backpropagate a non-finite loss
-                    loss = sum(scale.get(h, 1.0) * HEAD_WEIGHT.get(h, 1.0) * l
+                    loss = sum(scale.get(h, 1.0) * weight.get(h, 1.0) * l
                                for h, (l, _) in L.items()) / spec.grad_accum
                     loss.backward()
                     for h, v in vals.items():
