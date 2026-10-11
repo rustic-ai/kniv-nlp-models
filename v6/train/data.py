@@ -398,6 +398,47 @@ def relation_features(row: dict, W: int, rep, vocab: Vocab, phase2: dict,
 
 
 # ── features on disk ────────────────────────────────────────────────
+# ── phase 2: ATLOP entity markers ────────────────────────────────────
+MARKER = "*"
+# The marker pass reads up to this many subwords: markers lengthen a document
+# by two per mention, and DeBERTa-v3, with relative positions only, reads
+# past its 512 pre-training length (ATLOP splits long documents instead).
+MARKER_MAX_SUBWORDS = 1024
+
+
+def marker_features(tokens: list[str], sentence_spans, entities, tok,
+                    max_subwords: int = MARKER_MAX_SUBWORDS) -> dict:
+    """ATLOP's input for the relation pass: ``*`` before and after every
+    entity mention. ``entities`` holds each entity's ``(start, end_exclusive)``
+    mentions in word positions. Returns the subword ids, each mention's start
+    marker position (``-1`` past the limit), in ``entities`` order, and each
+    subword's sentence (``-1`` for special tokens)."""
+    starts, ends = set(), set()
+    for ms in entities:
+        for a, b in ms:
+            starts.add(int(a)); ends.add(int(b) - 1)
+    sent = np.full(len(tokens), -1, dtype=np.int64)
+    for j, (s, e) in enumerate(sentence_spans):
+        sent[s:e] = j
+    words, wsent, marker_of = [], [], {}
+    for i, w in enumerate(tokens):
+        if i in starts:
+            marker_of[i] = len(words)
+            words.append(MARKER); wsent.append(sent[i])
+        words.append(w); wsent.append(sent[i])
+        if i in ends:
+            words.append(MARKER); wsent.append(sent[i])
+    ids, first, limit = align(words, tok, max_subwords)
+    tsent = np.full(len(ids), -1, dtype=np.int32)
+    valid = [(f, wsent[j]) for j, f in enumerate(first[:limit]) if f >= 0]
+    for k, (f, sj) in enumerate(valid):
+        end = valid[k + 1][0] if k + 1 < len(valid) else len(ids) - 1      # [SEP]
+        tsent[f:end] = sj
+    pos = [np.asarray([first[marker_of[int(a)]] if marker_of[int(a)] < limit else -1
+                       for a, _ in ms], dtype=np.int64) for ms in entities]
+    return {"ids": np.asarray(ids, dtype=np.int32), "men_pos": pos, "sent_of_tok": tsent}
+
+
 # ── phase 2: Re-DocRED as relation supervision ──────────────────────
 REDOCRED_REL = DATA_DIR / "v6-corpus" / "redocred_rel.json"
 
@@ -429,7 +470,7 @@ def prepare_redocred(path: Path = REDOCRED_REL) -> dict:
 
 
 def redocred_features(split: str, tok, max_subwords: int, vocab: Vocab,
-                      stats: Counter | None = None) -> list[dict]:
+                      stats: Counter | None = None, markers: bool = False) -> list[dict]:
     """Human-annotated documents that supervise the relation head alone:
     every other label is IGNORE and coref is absent (``coref_ok`` false)."""
     if not REDOCRED_REL.exists():
@@ -481,6 +522,10 @@ def redocred_features(split: str, tok, max_subwords: int, vocab: Vocab,
         f.update(coref=None, _n_rel=vocab.size("relations"),
                  rel={"spans": ents, "types": np.asarray(types, dtype=np.int32),
                       "triples": triples, "evidence": evidence})
+        if markers:
+            f["rm"] = marker_features(doc["tokens"], spans, ents, tok)
+            stats["redocred_marker_mentions_past_limit"] += int(
+                sum((p < 0).sum() for p in f["rm"]["men_pos"]))
         stats["redocred_docs"] += 1
         stats["redocred_triples"] += len(triples)
         feats.append(f)
@@ -615,7 +660,36 @@ def collate(items: list[dict], pad_id: int):
     if "coref" in items[0]:
         out.update(_collate_phase2(items, len(items[0]["rel"]["types"])
                                    if items[0].get("rel") else None))
+    if any("rm" in x for x in items):
+        out.update(_collate_markers(items, pad_id))
     return out
+
+
+def _collate_markers(items: list[dict], pad_id: int) -> dict:
+    """The marker pass's inputs, and each mention's start-marker position in
+    the order ``_collate_phase2`` lays mentions out (``-1``: past the limit,
+    or a window without markers)."""
+    import torch
+    T = max(len(x["rm"]["ids"]) for x in items if "rm" in x)
+    ids = torch.full((len(items), T), pad_id, dtype=torch.long)
+    mask = torch.zeros(len(items), T, dtype=torch.long)
+    tsent = torch.full((len(items), T), -1, dtype=torch.long)
+    pos, ok = [], []
+    for b, x in enumerate(items):
+        rm = x.get("rm")
+        ok.append(rm is not None)
+        if rm is not None:
+            n = len(rm["ids"])
+            ids[b, :n] = torch.from_numpy(rm["ids"].astype(np.int64))
+            mask[b, :n] = 1
+            tsent[b, :n] = torch.from_numpy(rm["sent_of_tok"].astype(np.int64))
+        r = x.get("rel")
+        if r is None:
+            continue
+        for k, spans in enumerate(r["spans"]):
+            pos += (rm["men_pos"][k].tolist() if rm is not None else [-1] * len(spans))
+    return {"rm_input_ids": ids, "rm_attention_mask": mask, "rm_sent_of_tok": tsent,
+            "rm_men_pos": torch.tensor(pos, dtype=torch.long), "rm_ok": torch.tensor(ok)}
 
 
 def _collate_phase2(items: list[dict], _unused=None) -> dict:

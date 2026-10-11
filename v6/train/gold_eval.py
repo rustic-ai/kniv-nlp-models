@@ -82,7 +82,8 @@ def load_run(run: str, repo: str, device, local: Path | None = None) -> tuple:
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
                     pretrained=False, srl_mode=cfg.get("srl_mode", "joint"),
                     phase2=cfg.get("phase2", False), p2_context=cfg.get("p2_context", 0),
-                    ent_head=cfg.get("ent_head", False), rel_adapter=cfg.get("rel_adapter", 0))
+                    ent_head=cfg.get("ent_head", False), rel_adapter=cfg.get("rel_adapter", 0),
+                    rel_markers=cfg.get("rel_markers", False))
     model.load_state_dict(ck["model"])          # strict: a mismatch raises
     model.to(device).eval()
     tok = AutoTokenizer.from_pretrained(spec.hf_id)
@@ -389,7 +390,8 @@ def eval_cls(model, tok, spec, vocab, device, limit, context: int = 6) -> dict:
 
 # ── phase 2: coreference and relations ──────────────────────────────
 def phase2_window(tokens: list[str], spans: list[tuple[int, int]], tok, spec,
-                  vocab: Vocab, entities: list[list[tuple[int, int]]] | None = None) -> dict:
+                  vocab: Vocab, entities: list[list[tuple[int, int]]] | None = None,
+                  markers: bool = False) -> dict:
     """``window`` plus the phase-2 inputs: no coref targets, and ``entities``
     (each a list of ``(start, end_exclusive)`` mentions) as the relation
     head's input with every pair unlabelled. ``_ent_keep`` maps the kept
@@ -407,6 +409,9 @@ def phase2_window(tokens: list[str], spans: list[tuple[int, int]], tok, spec,
         f["rel"] = {"spans": kept, "types": np.zeros(len(kept), dtype=np.int32),
                     "triples": []}
         f["_ent_keep"] = keep
+        if markers:
+            from .data import marker_features
+            f["rm"] = marker_features(tokens, spans, kept, tok)
     return f
 
 
@@ -468,7 +473,8 @@ def run_phase2(model, feats: list[dict], tok, device, batch: int = 4) -> list[di
         o = model(b, predict=False, predict_heads=True)
         best = o["coref_scores"].argmax(-1).cpu()                    # [B,W]
         cand = o["coref_cand"].cpu()
-        rel = o["relation"].float().cpu().numpy()
+        rel = (o["relation"].float().cpu().numpy() if "relation" in o
+               else np.zeros((0, model.sizes["relations"] + 1), dtype=np.float32))
         pair_b = b["pair_batch"].cpu().numpy()
         for j, i in enumerate(idx):
             W = feats[i]["_W"]
@@ -531,7 +537,8 @@ def calibrate_offset(model, tok, spec, vocab, device) -> float:
     names = vocab.labels["relations"]
     feats = [phase2_window(it.tokens, [tuple(x) for x in it.layers["sentence_spans"]], tok,
                            spec, vocab, [[(a, e + 1) for a, e in en["mentions"]]
-                                         for en in it.entities]) for it in items]
+                                         for en in it.entities],
+                           markers=model.rel_markers) for it in items]
     outs = run_phase2(model, feats, tok, device, batch=1)
 
     def f1(off):
@@ -572,7 +579,8 @@ def eval_redocred(model, tok, spec, vocab, device, limit) -> dict:
     for it in items:
         sp = [tuple(x) for x in it.layers["sentence_spans"]]
         ents = [[(a, e + 1) for a, e in en["mentions"]] for en in it.entities]
-        feats.append(phase2_window(it.tokens, sp, tok, spec, vocab, ents))
+        feats.append(phase2_window(it.tokens, sp, tok, spec, vocab, ents,
+                                   markers=model.rel_markers))
     # One document at a time: a 40-entity document is 1,560 pairs, each a
     # 49k-wide bilinear input, and four of them exhaust a 48 GB Mac.
     outs = run_phase2(model, feats, tok, device, batch=1)
@@ -610,7 +618,8 @@ def eval_redocred(model, tok, spec, vocab, device, limit) -> dict:
             continue
         ents = [[(sp[m["sent_id"]][0] + m["pos"][0], sp[m["sent_id"]][0] + m["pos"][1])
                  for m in v] for v in vertex]
-        feats2.append(phase2_window(it.tokens, sp, tok, spec, vocab, ents))
+        feats2.append(phase2_window(it.tokens, sp, tok, spec, vocab, ents,
+                                    markers=model.rel_markers))
         order2.append((n, ents))
     outs2 = run_phase2(model, feats2, tok, device, batch=1)
     for r in rows:

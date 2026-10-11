@@ -276,6 +276,74 @@ class RelationHead(nn.Module):
         return self.bilinear(bl).float(), sent_att                      # [P, R+1]
 
 
+class MarkerRelationHead(nn.Module):
+    """ATLOP (Zhou et al. 2021), ported from its ``model.py``, over the marker
+    pass: the document encoded with ``*`` around every entity mention.
+
+    A mention is its start marker's last-layer vector; an entity, the
+    log-sum-exp of its mentions'. Localized context pooling: each entity's
+    last-layer attention is the mean over its start markers' attention rows;
+    a pair's context is the encoder output weighted by the product of the two
+    entities' attentions, averaged over heads. Head and tail extractors and the
+    grouped bilinear are ATLOP's (768 wide, blocks of 64). The pooled
+    attention, summed per sentence, is what DREEAM's evidence term supervises.
+    """
+
+    def __init__(self, H: int, n_rel: int, emb: int = 768, block: int = 64):
+        super().__init__()
+        self.emb, self.block = emb, block
+        self.head_extractor = nn.Linear(2 * H, emb)
+        self.tail_extractor = nn.Linear(2 * H, emb)
+        self.bilinear = nn.Linear(emb * block, n_rel + 1)
+
+    def forward(self, seq, att, batch):
+        """``seq [B,T,H]`` last hidden layer, ``att [B,heads,T,T]`` last-layer
+        attention. Returns ``(logits [P, R+1], sentence attention [P, S] or None)``."""
+        E = len(batch["ent_batch"])
+        if E == 0 or len(batch["pair_h"]) == 0:
+            return seq.new_zeros(0, self.bilinear.out_features), None
+        seq = seq.float()
+        mb = batch["ent_batch"][batch["men_ent"]]
+        pos = batch["rm_men_pos"]
+        ok = pos >= 0
+        pc = pos.clamp(min=0)
+        m_emb = seq[mb, pc]                                              # [M,H]
+        m_att = att[mb, :, pc].float()                                   # [M,heads,T]
+        ent_idx = batch["men_ent"]
+        # log-sum-exp over each entity's mentions (missing ones excluded)
+        m_emb = m_emb.masked_fill(~ok.unsqueeze(1), -1e4)
+        e_max = torch.full((E, seq.size(-1)), -1e4, device=seq.device).scatter_reduce(
+            0, ent_idx.unsqueeze(1).expand_as(m_emb), m_emb, reduce="amax", include_self=True)
+        ex = torch.exp(m_emb - e_max[ent_idx]) * ok.unsqueeze(1)
+        ent = e_max + torch.log(torch.zeros(E, seq.size(-1), device=seq.device)
+                                .index_add_(0, ent_idx, ex).clamp(min=1e-30))
+        ent = torch.where(ent > -1e3, ent, torch.zeros_like(ent))       # no usable mention
+        cnt = torch.zeros(E, device=seq.device).index_add_(0, ent_idx, ok.float()).clamp(min=1)
+        e_att = torch.zeros(E, *m_att.shape[1:], device=seq.device).index_add_(
+            0, ent_idx, m_att * ok.view(-1, 1, 1)) / cnt.view(-1, 1, 1)  # [E,heads,T]
+        hs, ts = ent[batch["pair_h"]], ent[batch["pair_t"]]
+        rs = torch.zeros_like(hs)
+        evid = "pair_ev_ok" in batch and bool(batch["pair_ev_ok"].any())
+        S = batch["pair_evidence"].size(1) if evid else 0
+        sent_att = torch.zeros(len(hs), S, device=seq.device) if evid else None
+        for b in batch["pair_batch"].unique().tolist():
+            sel = batch["pair_batch"] == b
+            ht = (e_att[batch["pair_h"][sel]] * e_att[batch["pair_t"][sel]]).mean(1)   # [Pb,T]
+            ht = ht / (ht.sum(1, keepdim=True) + 1e-5)
+            rs[sel] = ht @ seq[b]
+            if evid and batch["pair_ev_ok"][sel].any():
+                ts_ = batch["rm_sent_of_tok"][b]
+                onehot = F.one_hot(ts_.clamp(min=0), S).float() * (ts_ >= 0).unsqueeze(-1)
+                sent_att[sel] = ht @ onehot
+        zs = torch.tanh(self.head_extractor(torch.cat([hs, rs], -1)))
+        zo = torch.tanh(self.tail_extractor(torch.cat([ts, rs], -1)))
+        P = zs.size(0)
+        b1 = zs.view(P, self.emb // self.block, self.block)
+        b2 = zo.view(P, self.emb // self.block, self.block)
+        bl = (b1.unsqueeze(3) * b2.unsqueeze(2)).view(P, self.emb * self.block)
+        return self.bilinear(bl).float(), sent_att
+
+
 def atlop_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """ATLOP's adaptive-threshold loss. ``labels[:, 0]`` marks no-relation
     pairs; positive relations must beat the threshold class and the threshold
@@ -338,7 +406,7 @@ class V6Model(nn.Module):
                  arc_dim: int = 512, rel_dim: int = 128, srl_dim: int = 256,
                  pretrained: bool = True, srl_mode: str = "joint",
                  phase2: bool = False, p2_context: int = 0, ent_head: bool = True,
-                 rel_adapter: int = 0):
+                 rel_adapter: int = 0, rel_markers: bool = False):
         super().__init__()
         from transformers import AutoConfig, AutoModel
         # fp32 master weights for every encoder; bf16 autocast does the
@@ -403,8 +471,11 @@ class V6Model(nn.Module):
                 from .data import ENT_TAGS
                 self.ent = classifier(H, H, len(ENT_TAGS), p)
             self.coref = CorefHead(H, context=p2_context)
-            self.relation = RelationHead(H, S["relations"], p=p, context=p2_context)
+            # ATLOP over a marker pass, or the shared-pass head.
+            self.relation = (MarkerRelationHead(H, S["relations"]) if rel_markers else
+                             RelationHead(H, S["relations"], p=p, context=p2_context))
         self.p2_context = p2_context
+        self.rel_markers = phase2 and rel_markers
         # A rank-``rel_adapter`` LoRA for a second, relation-only encoder pass
         # (0 = none): relations get encoder capacity of their own while every
         # other head keeps the shared pass.
@@ -517,6 +588,33 @@ class V6Model(nn.Module):
                 self.rel_lora.on = False
         return tuple(F.layer_norm(h, h.shape[-1:]) for h in out.hidden_states)
 
+    def _marker_pass(self, batch: dict):
+        """The marker pass, through the relation adapter when there is one:
+        last hidden layer and last-layer attention."""
+        if self.rel_lora is not None:
+            self.rel_lora.on = True
+        try:
+            out = self.encoder(input_ids=batch["rm_input_ids"],
+                               attention_mask=batch["rm_attention_mask"],
+                               output_attentions=True)
+        finally:
+            if self.rel_lora is not None and not self.rel_lora.sticky:
+                self.rel_lora.on = False
+        return out.last_hidden_state, out.attentions[-1]
+
+    def _marker_heads(self, plain_layers, batch: dict, o: dict) -> dict:
+        """Marker mode: the entity head reads the plain pass (entities must be
+        known before the markers can be placed), relations the marker pass."""
+        first = batch["first_subword"]
+        if self.ent is not None:
+            o["ent"] = self.ent(self._words(plain_layers, "ent", first))
+            o["_anchor"] = o["ent"].sum() * 0.0
+        if "rm_input_ids" in batch and bool(batch["rm_ok"].all()):
+            seq, att = self._marker_pass(batch)
+            o["relation"], o["relation_sent_att"] = self.relation(seq, att, batch)
+            o["_anchor"] = seq.sum() * 0.0
+        return o
+
     def _relation_heads(self, layers, batch: dict, o: dict) -> dict:
         first = batch["first_subword"]
         rw = self._words(layers, "relation", first)
@@ -535,7 +633,18 @@ class V6Model(nn.Module):
         predict_heads = predict if predict_heads is None else predict_heads
         first, wm = batch["first_subword"], batch["word_mask"]
         if relation_only:
+            if self.rel_markers:
+                if self.rel_lora is not None:
+                    self.rel_lora.on = False      # the plain pass is plain
+                with torch.no_grad():
+                    out = self.encoder(input_ids=batch["input_ids"],
+                                       attention_mask=batch["attention_mask"],
+                                       output_hidden_states=True)
+                plain = tuple(F.layer_norm(h, h.shape[-1:]) for h in out.hidden_states)
+                return self._marker_heads(plain, batch, {})
             return self._relation_heads(self._relation_layers(batch), batch, {})
+        if self.rel_lora is not None and not self.rel_lora.sticky:
+            self.rel_lora.on = False              # the plain pass is plain
         with torch.set_grad_enabled(torch.is_grad_enabled() and not self.freeze_encoder):
             out = self.encoder(input_ids=batch["input_ids"],
                                attention_mask=batch["attention_mask"],
@@ -600,8 +709,11 @@ class V6Model(nn.Module):
                 o["coref_span"], o["coref_span_pos"] = self.coref.spans(
                     o["coref_a"], batch["coref_batch"], batch["coref_head"],
                     batch["sent_of_word"])
-            o = self._relation_heads(self._relation_layers(batch) if self.rel_lora is not None
-                                     else layers, batch, o)
+            if self.rel_markers:
+                o = self._marker_heads(layers, batch, o)
+            else:
+                o = self._relation_heads(self._relation_layers(batch) if self.rel_lora is not None
+                                         else layers, batch, o)
         return o
 
 

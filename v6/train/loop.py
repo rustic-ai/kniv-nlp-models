@@ -203,7 +203,12 @@ def _load_init(model, init: str, vocab: Vocab) -> None:
     for k, labels in ck["vocab"]["labels"].items():
         if vocab.labels.get(k) != labels:
             raise SystemExit(f"--init vocabulary differs from this one on {k!r}")
-    missing, unexpected = model.load_state_dict(ck["model"], strict=False)
+    state = ck["model"]
+    if getattr(model, "rel_markers", False):
+        # ATLOP's head shares no meaning with the shared-pass head's weights
+        # (only the bilinear's name and shape coincide): it starts fresh.
+        state = {k: v for k, v in state.items() if not k.startswith("relation.")}
+    missing, unexpected = model.load_state_dict(state, strict=False)
     fresh = [m for m in missing if not m.startswith(("coref.", "relation.",
                                                       "mix.coref.", "mix.relation.", "ent.",
                                                       "mix.ent.", "rel_lora."))]
@@ -238,6 +243,9 @@ def main() -> int:
                     help="add the coreference and relation heads (TRAINING.md §4)")
     ap.add_argument("--init", help="start from a checkpoint: a best.pt path, or a run "
                                    "name in the hub repo (e.g. deberta-v3-large-srlft-full)")
+    ap.add_argument("--rel-markers", action="store_true",
+                    help="ATLOP's relation head over a marker pass (entity mentions "
+                         "wrapped in *); the entity head moves to the plain pass")
     ap.add_argument("--rel-adapter", type=int, default=0, metavar="R",
                     help="rank of a LoRA adapter for a second, relation-only encoder pass "
                          "feeding the relation and entity heads (0 = none)")
@@ -321,7 +329,8 @@ def main() -> int:
             raise SystemExit("--redocred-train needs --phase2")
         from .data import redocred_features
         st = Counter()
-        rd = redocred_features("train", tok, spec.max_subwords, vocab, st)
+        rd = redocred_features("train", tok, spec.max_subwords, vocab, st,
+                               markers=args.rel_markers)
         if args.relation_data == "redocred":
             if not args.train_scope.startswith("relation"):
                 raise SystemExit("--relation-data redocred needs --train-scope relation: "
@@ -329,7 +338,8 @@ def main() -> int:
             train = rd * args.redocred_train
         else:
             train = train + rd * args.redocred_train
-        rd_dev = (redocred_features("dev", tok, spec.max_subwords, vocab, st)
+        rd_dev = (redocred_features("dev", tok, spec.max_subwords, vocab, st,
+                                    markers=args.rel_markers)
                   if not args.probe else [])
         print("Re-DocRED: " + ", ".join(f"{k} {v:,}" for k, v in sorted(st.items()))
               + f"; train x{args.redocred_train}", flush=True)
@@ -337,7 +347,8 @@ def main() -> int:
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
                     attn_implementation=spec.attn_implementation,
                     srl_mode=args.srl_mode, phase2=args.phase2,
-                    p2_context=args.p2_context, rel_adapter=args.rel_adapter).to(device)
+                    p2_context=args.p2_context, rel_adapter=args.rel_adapter,
+                    rel_markers=args.rel_markers).to(device)
     if args.init:
         _load_init(model, args.init, vocab)
     if args.train_scope == "phase2":
@@ -427,7 +438,7 @@ def main() -> int:
                 "encoder": spec.asdict(),
                 "model_config": {"srl_mode": args.srl_mode, "phase2": args.phase2,
                                  "p2_context": args.p2_context, "ent_head": True,
-                                 "rel_adapter": args.rel_adapter,
+                                 "rel_adapter": args.rel_adapter, "rel_markers": args.rel_markers,
                                  "redocred_train": args.redocred_train,
                                  "relation_data": args.relation_data,
                                  "init": args.init, "train_scope": args.train_scope}}
