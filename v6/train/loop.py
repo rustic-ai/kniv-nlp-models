@@ -244,6 +244,10 @@ def main() -> int:
     ap.add_argument("--train-scope", choices=["all", "phase2", "relation"], default="all",
                     help="phase2: train only the phase-2 heads and their layer mixes; "
                          "everything else stays exactly as --init left it")
+    ap.add_argument("--relation-data", choices=["all", "redocred"], default="all",
+                    help="redocred: train on Re-DocRED documents alone, without the "
+                         "corpus windows and their teacher relation labels "
+                         "(with --train-scope relation, where nothing else trains)")
     ap.add_argument("--redocred-train", type=int, default=0, metavar="N",
                     help="add Re-DocRED train, N times per epoch, as relation-only "
                          "supervision; its dev then joins best.pt selection (0 = off)")
@@ -317,7 +321,13 @@ def main() -> int:
         from .data import redocred_features
         st = Counter()
         rd = redocred_features("train", tok, spec.max_subwords, vocab, st)
-        train = train + rd * args.redocred_train
+        if args.relation_data == "redocred":
+            if args.train_scope != "relation":
+                raise SystemExit("--relation-data redocred needs --train-scope relation: "
+                                 "the corpus windows supervise every other head")
+            train = rd * args.redocred_train
+        else:
+            train = train + rd * args.redocred_train
         rd_dev = (redocred_features("dev", tok, spec.max_subwords, vocab, st)
                   if not args.probe else [])
         print("Re-DocRED: " + ", ".join(f"{k} {v:,}" for k, v in sorted(st.items()))
@@ -407,6 +417,7 @@ def main() -> int:
                                  "p2_context": args.p2_context, "ent_head": True,
                                  "rel_adapter": args.rel_adapter,
                                  "redocred_train": args.redocred_train,
+                                 "relation_data": args.relation_data,
                                  "init": args.init, "train_scope": args.train_scope}}
 
     def stop(state, reason=""):
