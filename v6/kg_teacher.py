@@ -364,7 +364,7 @@ def main() -> int:
     ap.add_argument("--windows", type=int, default=500)
     ap.add_argument("--docs", type=int, default=100)
     ap.add_argument("--second", type=float, default=0.3)
-    ap.add_argument("--annotator", default="astra")
+    ap.add_argument("--annotator", default="sol61")
     ap.add_argument("--gold-entities", action="store_true",
                     help="bakeoff: give the teacher Re-DocRED's entities; measure relations only")
     args = ap.parse_args()
