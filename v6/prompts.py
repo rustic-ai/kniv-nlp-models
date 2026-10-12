@@ -13,7 +13,7 @@ prompt changes so stale responses are re-fetched rather than silently reused.
 """
 from __future__ import annotations
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
 
 _COMMON = (
     "You are an expert linguistic annotator working to Universal "
@@ -243,6 +243,24 @@ SYSTEM["kg"] = (
     "author or narrator.\n"
     "- time: the id of the time entity the fact is anchored to, or -1.\n"
     "- evidence: the sentence numbers that support it."
+    "\n"
+    "\n"
+    "HOW TO WORK. Extraction here is usually incomplete, not wrong: a typical passage supports many facts, and labels are only useful if they are complete.\n"
+    "1. Read the whole passage. List every entity of every listed type: every named thing, and every specific unnamed one the text refers to (a product, a feature, a document, a date, an amount, a role). Merge mentions of the same thing.\n"
+    "2. Go through the relations one by one. For each, check every pair of entities that could fill it, sentence by sentence, including pairs in different sentences.\n"
+    "3. Count a fact when the text states it or it follows directly from the wording: appositions ('X, the CEO of Y'), possessives ('Y's CEO X'), lists, headings, and what a speaker says about themselves ('I work at Y' -> the speaker works for Y). Do not skip a fact because it seems obvious, is repeated, or is also true in the other direction.\n"
+    "4. Never add a fact the text does not support, and never use a relation outside the schema."
+)
+
+
+SYSTEM["kgjudge"] = (
+    "You check facts extracted from a passage. Each fact links two entities "
+    "(given by their mentions in the passage) by a relation with a "
+    "definition, read head to tail. A fact is supported if the passage "
+    "states it or clearly implies it, in that direction, with the stated "
+    "polarity. It is not supported if the passage does not say it, says "
+    "something else, or the direction or relation is wrong. Judge each fact "
+    "on its own, from the passage alone."
 )
 
 

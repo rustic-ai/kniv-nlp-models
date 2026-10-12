@@ -142,6 +142,12 @@ def validate_payload(layer: str, payload: object, n: int,
             return None, "kg validation needs its item (annotate through KGAnnotator)", "parse"
         return validate_kg(payload, item)
 
+    if layer == "kgjudge":
+        if not isinstance(payload, list):
+            return None, "verdicts is not a list", "parse"
+        return {int(v["fact"]): bool(v["supported"]) for v in payload
+                if isinstance(v, dict) and "fact" in v and "supported" in v}, None, None
+
     if layer == "bankmerge":
         if not isinstance(payload, list) or not payload:
             return None, "relations is empty or not a list", "parse"

@@ -327,11 +327,29 @@ def kg_schema(type_names: list[str], relation_names: list[str]) -> dict:
         "additionalProperties": False}})
 
 
+KGJUDGE_SCHEMA = _envelope("fact_verdicts", {
+    "verdicts": _array_of(
+        {
+            "type": "object",
+            "properties": {
+                "fact": {"type": "integer", "description": "the fact's number"},
+                "supported": {"type": "boolean",
+                              "description": "true if the passage states or clearly implies it, "
+                                             "head to tail as the definition reads"},
+            },
+            "required": ["fact", "supported"], "additionalProperties": False,
+        },
+        "One verdict per listed fact.",
+    ),
+})
+
+
 SCHEMAS = {
     # The real kg schema is built per window (annotate/kg.py); this default
     # only lets the shared request builder start before it is replaced.
     "kg": kg_schema(["entity"], ["related to"]),
     "bankmerge": BANKMERGE_SCHEMA,
+    "kgjudge": KGJUDGE_SCHEMA,
     "discover": DISCOVER_SCHEMA,
     "cls": CLS_SCHEMA,
     "sentiment": SENTIMENT_SCHEMA,
@@ -352,7 +370,7 @@ PAYLOAD_KEY = {
     "pos": "tags", "lemma": "lemmas", "morph": "feats",
     "dep": "arcs", "srl": "tags", "rel": "triples",
     "cls": "labels", "sentiment": "sentiment", "keywords": "keywords",
-    "discover": "relations", "bankmerge": "relations", "kg": "knowledge",
+    "discover": "relations", "bankmerge": "relations", "kg": "knowledge", "kgjudge": "verdicts",
 }
 
 
