@@ -50,30 +50,65 @@ def _rng(key: str) -> np.random.Generator:
     return np.random.default_rng(int(hashlib.sha1(key.encode()).hexdigest()[:12], 16))
 
 
+STOP = {"of", "by", "the", "a", "an", "is", "to", "in", "on", "for", "with", "has", "have", "was"}
+
+
+def _forms(r: dict) -> set[str]:
+    """A relation's name and multi-word aliases, without function words: two
+    relations sharing one are near-synonyms."""
+    out = set()
+    # Wikidata's alias lists are broad ('child' lists 'father'), and its
+    # relations are already annotated together, exhaustively, in Re-DocRED:
+    # only their names count.
+    names = [r["name"]] + ([] if r["source"] in ("redocred", "fewrel") else list(r.get("aliases") or []))
+    for x in names:
+        w = tuple(t for t in x.lower().replace("/", " ").split() if t not in STOP)
+        if w and (len(w) > 1 or len(w[0]) > 4):
+            out.add(" ".join(w))
+    return out
+
+
 class SchemaSampler:
-    def __init__(self, bank: dict, general: list[dict]):
+    """Per-window relation and type schemas from the label bank.
+
+    Near-synonyms never share a schema: shown 'employer' and 'employed by'
+    together, a teacher picks one and the other becomes a false negative."""
+
+    def __init__(self, bank: dict, general: list[dict] | None = None):
         self.types = bank["entity_types"]
         self.coarse = [t for t in self.types if t["source"] == "docred"]
         self.fine = [t for t in self.types if t["source"] == "fewnerd"]
         self.always = [t for t in self.coarse if t["code"] in ("TIME", "NUM")]
-        wiki = [dict(r, category="wikidata") for r in bank["relations"] if r.get("train", True)]
-        gen = [{"name": r["name"], "description": r["description"], "aliases": r["aliases"],
-                "category": r["category"] or "other", "domains": r.get("domains", {}),
-                "support": r.get("support", 1), "source": "general"} for r in general]
-        self.relations = wiki + gen
-        names = [r["name"] for r in self.relations]
-        if len(set(names)) != len(names):            # a general name colliding with Wikidata's
-            seen, keep = set(), []
-            for r in self.relations:
-                if r["name"] not in seen:
-                    seen.add(r["name"]); keep.append(r)
-            self.relations = keep
+        gen_business = [float(r.get("domains", {}).get("business", 0))
+                        for r in bank["relations"] if r["source"] == "general"]
+        # The business pack has no discovery counts: weigh it like a typical
+        # general relation seen in business text.
+        b_w = float(np.median([x for x in gen_business if x > 0])) if any(gen_business) else 1.0
+        self.relations = []
+        for r in bank["relations"]:
+            if not r.get("train", True):
+                continue
+            if r["source"] in ("redocred", "fewrel"):
+                self.relations.append(dict(r, category="wikidata"))
+            elif r["source"] == "general":
+                self.relations.append(dict(r, category=r.get("category") or "other"))
+            elif r["source"] == "business":
+                self.relations.append(dict(r, category="business:" + (r.get("category") or "other"),
+                                           domains={"business": b_w}))
+        forms = [_forms(r) for r in self.relations]
+        owner = defaultdict(set)
+        for i, f in enumerate(forms):
+            for x in f:
+                owner[x].add(i)
+        wiki = {i for i, r in enumerate(self.relations) if r["category"] == "wikidata"}
+        self.conflicts = [(set().union(*(owner[x] for x in f)) - {i} if f else set())
+                          - (wiki if i in wiki else set()) for i, f in enumerate(forms)]
         self.by_cat = defaultdict(list)
         for i, r in enumerate(self.relations):
             self.by_cat[r["category"]].append(i)
 
     def prior(self, domain: str) -> np.ndarray:
-        w = np.array([float(r.get("domains", {}).get(domain, 0)) if r["source"] == "general"
+        w = np.array([float(r.get("domains", {}).get(domain, 0)) if r["source"] in ("general", "business")
                       else (1.0 if domain in WIKI_DOMAINS else 0.0) for r in self.relations])
         return w + 1e-3
 
@@ -84,13 +119,16 @@ class SchemaSampler:
         avail = np.array([i not in exclude for i in range(len(self.relations))])
 
         def draw(weights, k):
-            w = weights * avail
-            for i in pick:
-                w[i] = 0
-            k = min(k, int((w > 0).sum()))
-            if k <= 0:
-                return
-            pick.extend(rng.choice(len(w), size=k, replace=False, p=w / w.sum()).tolist())
+            # one at a time, so each pick's near-synonyms leave the pool
+            for _ in range(k):
+                w = weights * avail
+                for i in pick:
+                    w[i] = 0
+                    for j in self.conflicts[i]:
+                        w[j] = 0
+                if w.sum() <= 0:
+                    return
+                pick.append(int(rng.choice(len(w), p=w / w.sum())))
 
         draw(self.prior(domain), round(n * 0.5))
         neigh = np.zeros(len(self.relations))
@@ -331,8 +369,7 @@ def main() -> int:
                     help="bakeoff: give the teacher Re-DocRED's entities; measure relations only")
     args = ap.parse_args()
     bank = load_bank()
-    general = json.loads(GENERAL.read_text())["relations"] if GENERAL.exists() else []
-    sampler = SchemaSampler(bank, general)
+    sampler = SchemaSampler(bank)
     print(f"schema pool: {len(sampler.relations)} relations, {len(sampler.types)} entity types", flush=True)
     if args.cmd == "bakeoff":
         return bakeoff(args.docs, args.annotator, sampler, args.gold_entities)

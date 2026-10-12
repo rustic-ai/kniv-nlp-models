@@ -13,8 +13,11 @@ Ids are stable and append-only. Relations ``0..95`` are Re-DocRED's in the
 vocabulary's order, so ``pair_labels`` built from the vocabulary index the
 bank directly. Then FewRel's training relations Re-DocRED lacks, then
 FewRel's validation relations no training source has -- those carry
-``train: false`` and are only ever evaluated (true zero-shot). Later sources
-(the general bank, the teacher's schemas) append.
+``train: false`` and are only ever evaluated (true zero-shot). Then the
+discovered general relations (``general_relations.json``) and the business
+pack (``business_relations.json``), which the teacher annotates against; a
+name already in the bank keeps its first entry. These are training
+material, not a fixed ontology: a caller passes its own labels by text.
 
 ``holdout``: a fixed set of 20 Re-DocRED relations, chosen once by hash
 among those with at least 20 test and 10 dev triples. They are excluded from
@@ -32,7 +35,7 @@ from pathlib import Path
 from .config import DATA_DIR
 
 BANK_PATH = DATA_DIR / "v6-corpus" / "label_bank.json"
-VERSION = 3
+VERSION = 4
 N_HOLDOUT = 20
 
 # DocRED's coarse entity types, described for the label pass.
@@ -88,6 +91,22 @@ def build() -> dict:
                           "train": split == "train", "fewrel": split})
     if len({r["name"] for r in relations}) != len(relations):
         raise RuntimeError("two relations share a name")
+    seen = {r["name"].lower() for r in relations}
+    for fname, source in (("general_relations.json", "general"),
+                          ("business_relations.json", "business")):
+        path = DATA_DIR / "v6-corpus" / fname
+        if not path.exists():
+            continue
+        for r in json.loads(path.read_text())["relations"]:
+            if r["name"].lower() in seen:
+                continue
+            seen.add(r["name"].lower())
+            relations.append({"id": len(relations), "name": r["name"],
+                              "description": r["description"], "aliases": r.get("aliases") or [],
+                              "source": source, "code": None, "holdout": False, "train": True,
+                              "category": r.get("category") or "other",
+                              "domains": r.get("domains") or {},
+                              "inverse": r.get("inverse")})
     types = [{"id": i, "name": name, "description": desc, "aliases": [], "source": "docred",
               "code": code, "mergeable": code in ("PER", "ORG", "LOC", "MISC"),
               "temporal": code == "TIME"}
