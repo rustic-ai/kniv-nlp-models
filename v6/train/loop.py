@@ -308,6 +308,13 @@ def main() -> int:
                     help="with --init and --rel-markers: drop the checkpoint's relation "
                          "head (default; from a shared-pass checkpoint), keep it, or "
                          "transplant its ATLOP bilinear into the label head exactly")
+    ap.add_argument("--label-pass", choices=["plain", "adapter"], default="plain",
+                    help="read label texts with the plain frozen encoder (only the label "
+                         "projection learns) or through the relation adapter")
+    ap.add_argument("--kd-weight", type=float, default=0.0,
+                    help="with --init-relation transplant: distil the new head's margins "
+                         "toward the transplanted ATLOP head's, at this weight decaying "
+                         "linearly to 0 over the first half of training")
     ap.add_argument("--label-holdout", action="store_true",
                     help="train without the label bank's held-out relations and report "
                          "zero-shot F1 on them (relation_gold_zs_f1); diagnostic runs")
@@ -419,7 +426,8 @@ def main() -> int:
                     attn_implementation=spec.attn_implementation,
                     srl_mode=args.srl_mode, phase2=args.phase2,
                     p2_context=args.p2_context, rel_adapter=args.rel_adapter,
-                    rel_markers=args.rel_markers, rel_head=args.rel_head).to(device)
+                    rel_markers=args.rel_markers, rel_head=args.rel_head,
+                    label_plain=args.label_pass == "plain").to(device)
     init_relation = args.init_relation or "drop"
     if init_relation == "transplant" and args.rel_head != "label":
         raise SystemExit("--init-relation transplant needs --rel-head label")
@@ -438,6 +446,11 @@ def main() -> int:
             if init_state is None or "relation.bilinear.weight" not in init_state:
                 raise SystemExit("--init-relation transplant needs an --init with an ATLOP head")
             _transplant(model, init_state, label_coll_dev, device)
+            if args.kd_weight > 0:
+                bil = torch.nn.Linear(1, 1)
+                bil.weight = torch.nn.Parameter(init_state["relation.bilinear.weight"].to(device))
+                bil.bias = torch.nn.Parameter(init_state["relation.bilinear.bias"].to(device))
+                model.relation.keep_teacher(bil)
     if args.train_scope == "phase2":
         if not args.phase2:
             raise SystemExit("--train-scope phase2 needs --phase2")
@@ -531,6 +544,7 @@ def main() -> int:
                                  "p2_context": args.p2_context, "ent_head": True,
                                  "rel_adapter": args.rel_adapter, "rel_markers": args.rel_markers,
                                  "rel_head": args.rel_head,
+                                 "label_plain": args.label_pass == "plain",
                                  "redocred_train": args.redocred_train,
                                  "relation_data": args.relation_data,
                                  "init": args.init, "train_scope": args.train_scope}}
@@ -579,6 +593,9 @@ def main() -> int:
                     bad = [h for h, v in vals.items() if not math.isfinite(v)]
                     if bad:
                         break                  # never backpropagate a non-finite loss
+                    if args.kd_weight:
+                        weight["relation_kd"] = args.kd_weight * max(
+                            0.0, 1.0 - rs.p.step / max(total / 2, 1))
                     loss = sum(scale.get(h, 1.0) * weight.get(h, 1.0) * l
                                for h, (l, _) in L.items()) / spec.grad_accum
                     loss.backward()
@@ -632,6 +649,10 @@ def main() -> int:
                 if step == args.calib_steps:
                     scale = {h: 1.0 / max(sum(calib[h]) / len(calib[h]), 1e-3)
                              if calib[h] else 1.0 for h in heads}
+                    # Distillation starts at ~0 (the transplant is exact), so
+                    # calibrating it would multiply it a thousandfold; its
+                    # strength is --kd-weight's alone.
+                    scale["relation_kd"] = 1.0
                     rs.event("loss_scale", scale=scale)
                     print("  loss scales: " + " ".join(
                         f"{h} {s:.3f}" for h, s in scale.items()), flush=True)

@@ -84,7 +84,8 @@ def load_run(run: str, repo: str, device, local: Path | None = None) -> tuple:
                     phase2=cfg.get("phase2", False), p2_context=cfg.get("p2_context", 0),
                     ent_head=cfg.get("ent_head", False), rel_adapter=cfg.get("rel_adapter", 0),
                     rel_markers=cfg.get("rel_markers", False),
-                    rel_head=cfg.get("rel_head", "bilinear"))
+                    rel_head=cfg.get("rel_head", "bilinear"),
+                    label_plain=cfg.get("label_plain", False))
     model.load_state_dict(ck["model"])          # strict: a mismatch raises
     model.to(device).eval()
     tok = AutoTokenizer.from_pretrained(spec.hf_id)

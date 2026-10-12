@@ -382,11 +382,21 @@ class LabelRelationHead(MarkerRelationHead):
         if len(batch["ent_batch"]) == 0 or len(batch["pair_h"]) == 0:
             return seq.new_zeros(0, K + 1), None
         bl, sent_att = self.pair_features(seq, att, batch)
+        if getattr(self, "kd_w", None) is not None and self.training:
+            # The transplanted ATLOP head, frozen: its logits for every known
+            # relation, for the distillation term (``kd_margins``).
+            self.kd_logits = (bl @ self.kd_w.T + self.kd_b).float()
         p = self.pair_proj(bl).float()                                   # [P,D]
         q = self.label_proj(label_emb).float()                           # [K,D]
         b = self.label_bias(label_emb).float().squeeze(-1)               # [K]
         logits = torch.cat([(p @ self.th.float()).unsqueeze(1), p @ q.T + b], 1)
         return logits, sent_att
+
+    def keep_teacher(self, bilinear: nn.Linear) -> None:
+        """Keep the bilinear being replaced, frozen and unsaved, so training
+        can distil from it (``--kd-weight``)."""
+        self.register_buffer("kd_w", bilinear.weight.detach().clone(), persistent=False)
+        self.register_buffer("kd_b", bilinear.bias.detach().clone(), persistent=False)
 
     @torch.no_grad()
     def transplant(self, bilinear: nn.Linear, label_emb: torch.Tensor) -> float:
@@ -424,6 +434,16 @@ class LabelEncoder(nn.Module):
         m = mask.unsqueeze(-1).to(hidden.dtype)
         pooled = (hidden * m).sum(1) / m.sum(1).clamp(min=1)
         return self.proj(self.norm(pooled.float()))
+
+
+def kd_margin_loss(new: torch.Tensor, old: torch.Tensor, cols: torch.Tensor) -> torch.Tensor:
+    """Distillation from the transplanted head: the new head's margins (each
+    listed relation's logit minus the threshold's) pulled toward the old
+    head's for the same relations. ``cols`` are the batch's label-bank ids,
+    which for Re-DocRED are the old head's columns minus one."""
+    nm = new[:, 1:] - new[:, :1]
+    om = old[:, 1 + cols] - old[:, :1]
+    return F.smooth_l1_loss(nm, om.detach())
 
 
 def atlop_loss(logits: torch.Tensor, labels: torch.Tensor,
@@ -500,7 +520,8 @@ class V6Model(nn.Module):
                  pretrained: bool = True, srl_mode: str = "joint",
                  phase2: bool = False, p2_context: int = 0, ent_head: bool = True,
                  rel_adapter: int = 0, rel_markers: bool = False,
-                 rel_head: str = "bilinear", label_dim: int = 1024):
+                 rel_head: str = "bilinear", label_dim: int = 1024,
+                 label_plain: bool = True):
         super().__init__()
         from transformers import AutoConfig, AutoModel
         # fp32 master weights for every encoder; bf16 autocast does the
@@ -579,6 +600,7 @@ class V6Model(nn.Module):
                 self.relation = (MarkerRelationHead(H, S["relations"]) if rel_markers else
                                  RelationHead(H, S["relations"], p=p, context=p2_context))
         self.rel_kind = rel_head if phase2 else "bilinear"
+        self.label_plain = label_plain
         self.p2_context = p2_context
         self.rel_markers = phase2 and rel_markers
         # A rank-``rel_adapter`` LoRA for a second, relation-only encoder pass
@@ -708,10 +730,26 @@ class V6Model(nn.Module):
         return out.last_hidden_state, out.attentions[-1]
 
     def label_embeddings(self, ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """The label pass: label texts through the encoder (and the relation
-        adapter, when there is one) into ``[K, label_dim]``. At inference a
-        schema's embeddings are computed once and passed as
-        ``batch["rel_label_emb"]``."""
+        """The label pass: label texts through the encoder into ``[K,
+        label_dim]``. At inference a schema's embeddings are computed once and
+        passed as ``batch["rel_label_emb"]``.
+
+        ``label_plain`` (default): the plain, frozen encoder reads the label
+        texts and only ``label_enc`` learns -- the relation adapter then
+        serves the marker pass alone, so learning label embeddings cannot
+        move the pair features. Otherwise the texts go through the adapter
+        too."""
+        if self.label_plain:
+            prev = self.rel_lora.on if self.rel_lora is not None else False
+            if self.rel_lora is not None:
+                self.rel_lora.on = False
+            try:
+                with torch.no_grad():
+                    out = self.encoder(input_ids=ids, attention_mask=mask)
+            finally:
+                if self.rel_lora is not None:
+                    self.rel_lora.on = prev
+            return self.label_enc(out.last_hidden_state, mask)
         if self.rel_lora is not None:
             self.rel_lora.on = True
         try:
@@ -735,6 +773,9 @@ class V6Model(nn.Module):
                 if emb is None:
                     emb = self.label_embeddings(batch["rel_label_ids"], batch["rel_label_mask"])
                 o["relation"], o["relation_sent_att"] = self.relation(seq, att, batch, emb)
+                if getattr(self.relation, "kd_logits", None) is not None and self.training:
+                    o["relation_kd_old"] = self.relation.kd_logits
+                    self.relation.kd_logits = None
             else:
                 o["relation"], o["relation_sent_att"] = self.relation(seq, att, batch)
             o["_anchor"] = seq.sum() * 0.0
@@ -865,7 +906,7 @@ def _ce(logits: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, int]:
 
 
 PHASE2_HEADS = ("coref", "coref_span", "relation", "relation_evidence", "ent")
-RELATION_HEADS = ("relation", "relation_evidence", "ent")
+RELATION_HEADS = ("relation", "relation_evidence", "ent", "relation_kd")
 # Fixed weights on top of the per-head loss scale: DREEAM weighs its evidence
 # term at 0.1 of the relation loss.
 HEAD_WEIGHT = {"relation_evidence": 0.1}
@@ -933,6 +974,12 @@ def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
         out["ent"] = _ce(o["ent"], batch["ent"])
     else:
         out["ent"] = (_zero(o), 0)
+    kd = o.get("relation_kd_old")
+    if kd is not None and len(o.get("relation", [])) and "rel_label_cols" in batch:
+        out["relation_kd"] = (kd_margin_loss(o["relation"], kd, batch["rel_label_cols"]),
+                              len(o["relation"]))
+    else:
+        out["relation_kd"] = (_zero(o), 0)
     sa = o.get("relation_sent_att")
     if sa is not None and batch["pair_ev_ok"].any():
         ok = batch["pair_ev_ok"]
