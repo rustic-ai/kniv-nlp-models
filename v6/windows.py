@@ -265,6 +265,10 @@ def build_windows(doc: Document, tokenize, max_tokens: int = 512,
                 "tokens": list(cur_tokens),
                 "sentence_spans": [list(s) for s in cur_spans],
                 "unit_idx": sorted(set(cur_units)),
+                # Per sentence: its unit (turn, paragraph) and that unit's
+                # speaker. Additive -- the window id does not depend on them.
+                "sentence_units": list(cur_units),
+                "sentence_speakers": [doc.speakers[u] for u in cur_units],
                 "n_tokens": len(cur_tokens),
             })
         cur_tokens.clear(); cur_spans.clear(); cur_units.clear()

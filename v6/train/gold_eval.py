@@ -83,7 +83,8 @@ def load_run(run: str, repo: str, device, local: Path | None = None) -> tuple:
                     pretrained=False, srl_mode=cfg.get("srl_mode", "joint"),
                     phase2=cfg.get("phase2", False), p2_context=cfg.get("p2_context", 0),
                     ent_head=cfg.get("ent_head", False), rel_adapter=cfg.get("rel_adapter", 0),
-                    rel_markers=cfg.get("rel_markers", False))
+                    rel_markers=cfg.get("rel_markers", False),
+                    rel_head=cfg.get("rel_head", "bilinear"))
     model.load_state_dict(ck["model"])          # strict: a mismatch raises
     model.to(device).eval()
     tok = AutoTokenizer.from_pretrained(spec.hf_id)
@@ -461,15 +462,32 @@ def relation_triples(logits: np.ndarray, pairs: list[tuple[int, int]],
 
 
 @torch.no_grad()
+def schema_embeddings(model, tok, device, cols: list[int] | None = None):
+    """The label pass over a schema, once: the bank's relations (all, in bank
+    order = the vocabulary's, unless ``cols`` picks some), by name and
+    description. ``[K, label_dim]``, passed to the model as ``rel_label_emb``."""
+    from ..label_bank import load as load_bank
+    from .kdata import label_text
+    rels = load_bank()["relations"]
+    cols = list(range(len(rels))) if cols is None else cols
+    enc = tok([label_text(rels[c]) for c in cols], padding=True, truncation=True,
+              max_length=48, return_tensors="pt").to(device)
+    return model.label_embeddings(enc["input_ids"], enc["attention_mask"])
+
+
+@torch.no_grad()
 def run_phase2(model, feats: list[dict], tok, device, batch: int = 4) -> list[dict]:
     """Per window: predicted coref clusters (inclusive word spans), relation
     logits per ordered entity pair, and NER log-probabilities."""
     order = sorted(range(len(feats)), key=lambda i: len(feats[i]["input_ids"]))
     out: list[dict | None] = [None] * len(feats)
+    label_emb = schema_embeddings(model, tok, device) if model.rel_kind == "label" else None
     for k in range(0, len(order), batch):
         idx = order[k:k + batch]
         b = {n: v.to(device) for n, v in collate([feats[i] for i in idx],
                                                  tok.pad_token_id).items()}
+        if label_emb is not None:
+            b["rel_label_emb"] = label_emb
         o = model(b, predict=False, predict_heads=True)
         best = o["coref_scores"].argmax(-1).cpu()                    # [B,W]
         cand = o["coref_cand"].cpu()

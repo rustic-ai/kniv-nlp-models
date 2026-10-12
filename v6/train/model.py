@@ -299,9 +299,15 @@ class MarkerRelationHead(nn.Module):
     def forward(self, seq, att, batch):
         """``seq [B,T,H]`` last hidden layer, ``att [B,heads,T,T]`` last-layer
         attention. Returns ``(logits [P, R+1], sentence attention [P, S] or None)``."""
-        E = len(batch["ent_batch"])
-        if E == 0 or len(batch["pair_h"]) == 0:
+        if len(batch["ent_batch"]) == 0 or len(batch["pair_h"]) == 0:
             return seq.new_zeros(0, self.bilinear.out_features), None
+        bl, sent_att = self.pair_features(seq, att, batch)
+        return self.bilinear(bl).float(), sent_att
+
+    def pair_features(self, seq, att, batch):
+        """``(bl [P, emb*block], sentence attention)``: everything up to the
+        grouped bilinear's input, shared with the label-conditioned head."""
+        E = len(batch["ent_batch"])
         seq = seq.float()
         mb = batch["ent_batch"][batch["men_ent"]]
         pos = batch["rm_men_pos"]
@@ -341,17 +347,104 @@ class MarkerRelationHead(nn.Module):
         b1 = zs.view(P, self.emb // self.block, self.block)
         b2 = zo.view(P, self.emb // self.block, self.block)
         bl = (b1.unsqueeze(3) * b2.unsqueeze(2)).view(P, self.emb * self.block)
-        return self.bilinear(bl).float(), sent_att
+        return bl, sent_att
 
 
-def atlop_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+class LabelRelationHead(MarkerRelationHead):
+    """ATLOP's head with the relation inventory as input: each relation is a
+    vector from the label pass (its name and description, read by the
+    encoder), so a caller can ask for relations the model never trained on.
+
+    The grouped bilinear's fixed ``[R+1]`` projection becomes ``p =
+    pair_proj(bl)`` scored against ``q_r = label_proj(e_r)``, plus a per-label
+    bias predicted from ``e_r``; ATLOP's adaptive threshold becomes a learned
+    vector ``th`` scored the same way, so it still moves with each pair.
+    Column 0 stays the threshold: logits are ``[P, K+1]`` for the batch's K
+    labels, the shape ``atlop_loss`` and decoding already use.
+    """
+
+    def __init__(self, H: int, label_dim: int = 1024, dim: int = 1024,
+                 emb: int = 768, block: int = 64):
+        nn.Module.__init__(self)
+        self.emb, self.block = emb, block
+        self.head_extractor = nn.Linear(2 * H, emb)
+        self.tail_extractor = nn.Linear(2 * H, emb)
+        self.pair_proj = nn.Linear(emb * block, dim)
+        self.label_proj = nn.Linear(label_dim, dim, bias=False)
+        self.label_bias = nn.Linear(label_dim, 1)
+        nn.init.zeros_(self.label_bias.weight); nn.init.zeros_(self.label_bias.bias)
+        self.th = nn.Parameter(torch.zeros(dim))
+        nn.init.normal_(self.th, std=0.02)
+
+    def forward(self, seq, att, batch, label_emb):
+        """``label_emb [K, label_dim]`` for the batch's labels, in column order."""
+        K = label_emb.size(0)
+        if len(batch["ent_batch"]) == 0 or len(batch["pair_h"]) == 0:
+            return seq.new_zeros(0, K + 1), None
+        bl, sent_att = self.pair_features(seq, att, batch)
+        p = self.pair_proj(bl).float()                                   # [P,D]
+        q = self.label_proj(label_emb).float()                           # [K,D]
+        b = self.label_bias(label_emb).float().squeeze(-1)               # [K]
+        logits = torch.cat([(p @ self.th.float()).unsqueeze(1), p @ q.T + b], 1)
+        return logits, sent_att
+
+    @torch.no_grad()
+    def transplant(self, bilinear: nn.Linear, label_emb: torch.Tensor) -> float:
+        """Reproduce a trained ATLOP bilinear exactly: ``pair_proj``'s first
+        ``R+1`` rows take its weights, ``th`` the threshold column, and
+        ``label_proj`` is solved by least squares so the R known labels'
+        embeddings land on their own columns. Returns the residual."""
+        R1 = bilinear.out_features
+        if R1 > self.pair_proj.out_features:
+            raise ValueError("pair_proj narrower than the bilinear it replaces")
+        if label_emb.size(0) != R1 - 1:
+            raise ValueError(f"{label_emb.size(0)} label embeddings for {R1 - 1} relations")
+        self.pair_proj.weight.zero_(); self.pair_proj.bias.zero_()
+        self.pair_proj.weight[:R1] = bilinear.weight
+        self.pair_proj.bias[:R1] = bilinear.bias
+        self.th.zero_(); self.th[0] = 1.0
+        target = torch.zeros(R1 - 1, self.pair_proj.out_features, device=label_emb.device)
+        target[torch.arange(R1 - 1), torch.arange(1, R1)] = 1.0           # label r -> column r+1
+        sol = torch.linalg.lstsq(label_emb.double(), target.double()).solution   # [d, D]
+        self.label_proj.weight.copy_(sol.T.to(self.label_proj.weight.dtype))
+        self.label_bias.weight.zero_(); self.label_bias.bias.zero_()
+        return float((label_emb.double() @ sol - target.double()).abs().max())
+
+
+class LabelEncoder(nn.Module):
+    """A relation or entity type as a vector: the encoder's last layer over
+    its label text, mean-pooled, normalised and projected."""
+
+    def __init__(self, H: int, label_dim: int = 1024):
+        super().__init__()
+        self.norm = nn.LayerNorm(H)
+        self.proj = nn.Linear(H, label_dim)
+
+    def forward(self, hidden, mask):
+        m = mask.unsqueeze(-1).to(hidden.dtype)
+        pooled = (hidden * m).sum(1) / m.sum(1).clamp(min=1)
+        return self.proj(self.norm(pooled.float()))
+
+
+def atlop_loss(logits: torch.Tensor, labels: torch.Tensor,
+               mask: torch.Tensor | None = None) -> torch.Tensor:
     """ATLOP's adaptive-threshold loss. ``labels[:, 0]`` marks no-relation
     pairs; positive relations must beat the threshold class and the threshold
-    must beat every negative relation."""
+    must beat every negative relation.
+
+    ``mask [P, K+1]``: 0 where a relation was not in that pair's schema. Such
+    a column is neither a positive nor a negative -- a teacher shown 30
+    relations says nothing about the other 66 -- so it is removed from both
+    terms. Without a mask every column counts, as in ATLOP."""
     labels = labels.clone()
     th = torch.zeros_like(labels)
     th[:, 0] = 1.0
     labels[:, 0] = 0.0
+    if mask is not None:
+        mask = mask.to(logits.dtype).clone()
+        mask[:, 0] = 1.0
+        labels = labels * mask
+        logits = logits - (1 - mask) * 1e4
     p_mask, n_mask = labels + th, 1 - labels
     l1 = -(F.log_softmax(logits - (1 - p_mask) * 1e4, -1) * labels).sum(1)
     l2 = -(F.log_softmax(logits - (1 - n_mask) * 1e4, -1) * th).sum(1)
@@ -406,7 +499,8 @@ class V6Model(nn.Module):
                  arc_dim: int = 512, rel_dim: int = 128, srl_dim: int = 256,
                  pretrained: bool = True, srl_mode: str = "joint",
                  phase2: bool = False, p2_context: int = 0, ent_head: bool = True,
-                 rel_adapter: int = 0, rel_markers: bool = False):
+                 rel_adapter: int = 0, rel_markers: bool = False,
+                 rel_head: str = "bilinear", label_dim: int = 1024):
         super().__init__()
         from transformers import AutoConfig, AutoModel
         # fp32 master weights for every encoder; bf16 autocast does the
@@ -472,8 +566,19 @@ class V6Model(nn.Module):
                 self.ent = classifier(H, H, len(ENT_TAGS), p)
             self.coref = CorefHead(H, context=p2_context)
             # ATLOP over a marker pass, or the shared-pass head.
-            self.relation = (MarkerRelationHead(H, S["relations"]) if rel_markers else
-                             RelationHead(H, S["relations"], p=p, context=p2_context))
+            if rel_head not in ("bilinear", "label"):
+                raise ValueError(f"rel_head must be bilinear or label, not {rel_head!r}")
+            if rel_head == "label" and not rel_markers:
+                raise ValueError("the label-conditioned relation head needs rel_markers")
+            # ATLOP over a marker pass -- with a fixed relation inventory, or
+            # with relations as label texts -- or the shared-pass head.
+            if rel_head == "label":
+                self.relation = LabelRelationHead(H, label_dim=label_dim)
+                self.label_enc = LabelEncoder(H, label_dim)
+            else:
+                self.relation = (MarkerRelationHead(H, S["relations"]) if rel_markers else
+                                 RelationHead(H, S["relations"], p=p, context=p2_context))
+        self.rel_kind = rel_head if phase2 else "bilinear"
         self.p2_context = p2_context
         self.rel_markers = phase2 and rel_markers
         # A rank-``rel_adapter`` LoRA for a second, relation-only encoder pass
@@ -602,6 +707,20 @@ class V6Model(nn.Module):
                 self.rel_lora.on = False
         return out.last_hidden_state, out.attentions[-1]
 
+    def label_embeddings(self, ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """The label pass: label texts through the encoder (and the relation
+        adapter, when there is one) into ``[K, label_dim]``. At inference a
+        schema's embeddings are computed once and passed as
+        ``batch["rel_label_emb"]``."""
+        if self.rel_lora is not None:
+            self.rel_lora.on = True
+        try:
+            out = self.encoder(input_ids=ids, attention_mask=mask)
+        finally:
+            if self.rel_lora is not None and not self.rel_lora.sticky:
+                self.rel_lora.on = False
+        return self.label_enc(out.last_hidden_state, mask)
+
     def _marker_heads(self, plain_layers, batch: dict, o: dict) -> dict:
         """Marker mode: the entity head reads the plain pass (entities must be
         known before the markers can be placed), relations the marker pass."""
@@ -611,7 +730,13 @@ class V6Model(nn.Module):
             o["_anchor"] = o["ent"].sum() * 0.0
         if "rm_input_ids" in batch and bool(batch["rm_ok"].all()):
             seq, att = self._marker_pass(batch)
-            o["relation"], o["relation_sent_att"] = self.relation(seq, att, batch)
+            if isinstance(self.relation, LabelRelationHead):
+                emb = batch.get("rel_label_emb")
+                if emb is None:
+                    emb = self.label_embeddings(batch["rel_label_ids"], batch["rel_label_mask"])
+                o["relation"], o["relation_sent_att"] = self.relation(seq, att, batch, emb)
+            else:
+                o["relation"], o["relation_sent_att"] = self.relation(seq, att, batch)
             o["_anchor"] = seq.sum() * 0.0
         return o
 
@@ -800,7 +925,8 @@ def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
     else:
         out["coref_span"] = (_zero(o), 0)
     if "relation" in o and len(o["relation"]):
-        out["relation"] = (atlop_loss(o["relation"], batch["pair_labels"]), len(o["relation"]))
+        out["relation"] = (atlop_loss(o["relation"], batch["pair_labels"],
+                                      batch.get("pair_label_mask")), len(o["relation"]))
     else:
         out["relation"] = (_zero(o), 0)
     if "ent" in o and "ent" in batch:

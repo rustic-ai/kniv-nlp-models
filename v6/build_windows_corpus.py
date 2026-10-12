@@ -421,6 +421,43 @@ async def stage_srl(windows: list[dict], cache_dir: Path) -> None:
     print(f"kniv-v5/srl: {n_ok}/{len(items)} ok", flush=True)
 
 
+SPEAKERS = OUT / "speakers.json"
+
+
+def stage_speakers(windows: list[dict]) -> int:
+    """Per-sentence speakers for the conversation windows, as a sidecar.
+
+    The adapter loads each turn's speaker, but windows.jsonl was written
+    before windows carried them. Rebuilding the conversation windows from the
+    raw files reproduces their ids (``sha1(doc_id:index)``); a window is
+    accepted only if its tokens are identical to the stored one, so a raw
+    file that changed since cannot attach the wrong speakers. Values are
+    roles as the sources record them (user, assistant, system), not names.
+    """
+    stored = {w["window_id"]: w["tokens"] for w in windows if w["domain"] == "conversation"}
+    out: dict[str, list] = {}
+    mismatch = 0
+    for doc in iter_documents("conversation"):
+        for w in build_windows(doc, tokenize):
+            toks = stored.get(w["window_id"])
+            if toks is None:
+                continue
+            if toks != w["tokens"]:
+                mismatch += 1
+                continue
+            out[w["window_id"]] = w["sentence_speakers"]
+    SPEAKERS.write_text(json.dumps(out))
+    roles = defaultdict(int)
+    for sp in out.values():
+        for r in sp:
+            roles[r] += 1
+    print(f"speakers for {len(out):,} of {len(stored):,} conversation windows; "
+          f"{mismatch} rebuilt windows differ from the stored ones (skipped)")
+    print("sentence roles: " + ", ".join(f"{k} {v:,}" for k, v in sorted(roles.items(), key=str)))
+    print(f"wrote {SPEAKERS}")
+    return 0 if mismatch == 0 and len(out) == len(stored) else 1
+
+
 def stage_entities(windows: list[dict], cache_dir: Path) -> None:
     cache = CacheStore(cache_dir, CACHE_VERSION)
     docs, skipped = [], 0
@@ -1042,7 +1079,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--stage", required=True,
                     choices=["windows", "annotate", "llm", "entities",
-                             "assemble", "srl"])
+                             "assemble", "srl", "speakers"])
     ap.add_argument("--annotator")
     ap.add_argument("--layers", help="comma-separated subset")
     ap.add_argument("--limit", type=int)
@@ -1066,6 +1103,8 @@ def main() -> int:
     if args.stage == "entities":
         stage_entities(windows, args.cache_dir)
         return 0
+    if args.stage == "speakers":
+        return stage_speakers(windows)
     if args.stage == "srl":
         asyncio.run(stage_srl(windows, args.cache_dir))
         return 0

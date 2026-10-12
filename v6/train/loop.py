@@ -67,22 +67,30 @@ def _f1(tp: float, n_pred: float, n_gold: float) -> float:
 
 @torch.no_grad()
 def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
-             batch_size: int, rel_gold: list | None = None) -> dict:
+             batch_size: int, rel_gold: list | None = None,
+             label_coll=None, label_coll_zs=None) -> dict:
     """Dev scores and their composite. ``rel_gold``: human-annotated relation
     documents (Re-DocRED dev), scored as ``relation_gold_f1`` and counted in
-    the composite."""
-    on_gold = None
+    the composite. ``label_coll``: the label-conditioned head's batch labels;
+    ``label_coll_zs``: the held-out relations only, scored on ``rel_gold`` as
+    ``relation_gold_zs_f1`` (reported, never in the composite)."""
+    on_gold = on_zs = None
     sticky = model.rel_lora is not None and model.rel_lora.sticky
     if sticky:                       # the plain pass must be plain while evaluating
         model.rel_lora.sticky = model.rel_lora.on = False
     if rel_gold:
-        on_gold = evaluate(model, rel_gold, vocab, pad_id, device, amp, max(1, batch_size // 4))
+        on_gold = evaluate(model, rel_gold, vocab, pad_id, device, amp, max(1, batch_size // 4),
+                           label_coll=label_coll)
+        if label_coll_zs is not None:
+            on_zs = evaluate(model, rel_gold, vocab, pad_id, device, amp, max(1, batch_size // 4),
+                             label_coll=label_coll_zs)
     model.eval()
     L = vocab.labels
     c = defaultdict(float)
     order = sorted(range(len(feats)), key=lambda i: len(feats[i]["input_ids"]))
     for k in range(0, len(order), batch_size):
-        b = _to(collate([feats[i] for i in order[k:k + batch_size]], pad_id), device)
+        b = collate([feats[i] for i in order[k:k + batch_size]], pad_id)
+        b = _to(label_coll(b) if label_coll is not None else b, device)
         with amp():
             o = model(b, predict_heads=True)
         for h in ("pos", "morph", "lemma"):
@@ -153,6 +161,8 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
         keys += ["coref_link_f1", "relation_f1"]
     if c["ent_g"]:
         r["ent_f1"] = _f1(c["ent_tp"], c["ent_p"], c["ent_g"])
+    if on_zs is not None:
+        r["relation_gold_zs_f1"] = on_zs["relation_f1"]
     if on_gold is not None:
         r["relation_gold_f1"] = on_gold["relation_f1"]
         keys.append("relation_gold_f1")
@@ -192,9 +202,15 @@ def _coref_counts(o: dict, b: dict, c: dict) -> None:
     c["link_g"] += (has_prev & ok).sum().item()
 
 
-def _load_init(model, init: str, vocab: Vocab) -> None:
-    """Weights from a phase-1 checkpoint; the phase-2 heads start fresh. A
-    vocabulary that disagrees on any shared inventory refuses to load."""
+def _load_init(model, init: str, vocab: Vocab, relation: str = "drop") -> dict:
+    """Weights from a checkpoint; heads it lacks start fresh. A vocabulary
+    that disagrees on any shared inventory refuses to load.
+
+    ``relation``, for a marker-pass model: ``drop`` starts the relation head
+    fresh (from a shared-pass checkpoint, whose head means nothing here);
+    ``keep`` loads it as is; ``transplant`` loads what the label-conditioned
+    head shares with an ATLOP head (its extractors) and leaves the rest to
+    ``LabelRelationHead.transplant``. Returns the checkpoint's state dict."""
     path = Path(init)
     if not path.exists():
         from huggingface_hub import hf_hub_download
@@ -205,18 +221,60 @@ def _load_init(model, init: str, vocab: Vocab) -> None:
             raise SystemExit(f"--init vocabulary differs from this one on {k!r}")
     state = ck["model"]
     if getattr(model, "rel_markers", False):
-        # ATLOP's head shares no meaning with the shared-pass head's weights
-        # (only the bilinear's name and shape coincide): it starts fresh.
-        state = {k: v for k, v in state.items() if not k.startswith("relation.")}
+        if relation == "drop":
+            # ATLOP's head shares no meaning with the shared-pass head's weights
+            # (only the bilinear's name and shape coincide): it starts fresh.
+            state = {k: v for k, v in state.items() if not k.startswith("relation.")}
+        elif relation == "transplant":
+            state = {k: v for k, v in state.items() if not k.startswith("relation.bilinear")}
     missing, unexpected = model.load_state_dict(state, strict=False)
     fresh = [m for m in missing if not m.startswith(("coref.", "relation.",
                                                       "mix.coref.", "mix.relation.", "ent.",
-                                                      "mix.ent.", "rel_lora."))]
+                                                      "mix.ent.", "rel_lora.", "label_enc."))]
     if fresh or unexpected:
         raise SystemExit(f"--init does not fit this model: missing {fresh[:5]}, "
                          f"unexpected {unexpected[:5]}")
     print(f"initialised from {init}: {len(ck['model'])} tensors loaded, "
           f"{len(missing)} phase-2 tensors fresh", flush=True)
+    return ck["model"]
+
+
+@torch.no_grad()
+def _transplant(model, init_state: dict, coll, device) -> None:
+    """Make the label-conditioned head reproduce the checkpoint's ATLOP head:
+    embed the bank's relations (in the bilinear's column order, by name and
+    description) with the starting model, then solve for the projections."""
+    from .model import LabelRelationHead
+    if not isinstance(model.relation, LabelRelationHead):
+        raise SystemExit("transplant needs the label-conditioned relation head")
+    bil = torch.nn.Linear(init_state["relation.bilinear.weight"].size(1),
+                          init_state["relation.bilinear.weight"].size(0))
+    bil.weight.copy_(init_state["relation.bilinear.weight"])
+    bil.bias.copy_(init_state["relation.bilinear.bias"])
+    cols = list(range(bil.out_features - 1))
+    texts = [coll.rels[c] for c in cols]
+    from .kdata import label_text
+    tok = coll.tok
+    enc = tok([label_text(r) for r in texts], padding=True, truncation=True,
+              max_length=48, return_tensors="pt").to(device)
+    was = model.training
+    model.eval()
+    emb = model.label_embeddings(enc["input_ids"], enc["attention_mask"])
+    model.train(was)
+    resid = model.relation.transplant(bil.to(device), emb.float())
+    print(f"transplanted the ATLOP head into the label head: {len(cols)} labels, "
+          f"least-squares residual {resid:.2e}", flush=True)
+
+
+def _frozen_digest(model) -> str:
+    """sha1 over every parameter not being trained, in name order."""
+    import hashlib
+    h = hashlib.sha1()
+    for n, p in sorted(model.named_parameters(), key=lambda x: x[0]):
+        if not p.requires_grad:
+            h.update(n.encode())
+            h.update(p.detach().to("cpu").contiguous().numpy().tobytes())
+    return h.hexdigest()
 
 
 def _to(batch: dict, device) -> dict:
@@ -243,6 +301,19 @@ def main() -> int:
                     help="add the coreference and relation heads (TRAINING.md §4)")
     ap.add_argument("--init", help="start from a checkpoint: a best.pt path, or a run "
                                    "name in the hub repo (e.g. deberta-v3-large-srlft-full)")
+    ap.add_argument("--rel-head", choices=["bilinear", "label"], default="bilinear",
+                    help="label: relations are label texts read by the encoder (schema-"
+                         "conditioned); bilinear: ATLOP's fixed 96-way projection")
+    ap.add_argument("--init-relation", choices=["drop", "keep", "transplant"],
+                    help="with --init and --rel-markers: drop the checkpoint's relation "
+                         "head (default; from a shared-pass checkpoint), keep it, or "
+                         "transplant its ATLOP bilinear into the label head exactly")
+    ap.add_argument("--label-holdout", action="store_true",
+                    help="train without the label bank's held-out relations and report "
+                         "zero-shot F1 on them (relation_gold_zs_f1); diagnostic runs")
+    ap.add_argument("--assert-frozen", action="store_true",
+                    help="at every evaluation, check every untrained tensor is still "
+                         "bit-identical to its value at the start; abort if not")
     ap.add_argument("--rel-markers", action="store_true",
                     help="ATLOP's relation head over a marker pass (entity mentions "
                          "wrapped in *); the entity head moves to the plain pass")
@@ -348,9 +419,25 @@ def main() -> int:
                     attn_implementation=spec.attn_implementation,
                     srl_mode=args.srl_mode, phase2=args.phase2,
                     p2_context=args.p2_context, rel_adapter=args.rel_adapter,
-                    rel_markers=args.rel_markers).to(device)
-    if args.init:
-        _load_init(model, args.init, vocab)
+                    rel_markers=args.rel_markers, rel_head=args.rel_head).to(device)
+    init_relation = args.init_relation or "drop"
+    if init_relation == "transplant" and args.rel_head != "label":
+        raise SystemExit("--init-relation transplant needs --rel-head label")
+    init_state = _load_init(model, args.init, vocab, init_relation) if args.init else None
+    label_coll = label_coll_dev = label_coll_zs = None
+    if args.rel_head == "label":
+        from ..label_bank import load as load_bank
+        from .kdata import LabelCollator
+        bank = load_bank()
+        label_coll = LabelCollator(tok, bank, train=True, seed=args.seed,
+                                   exclude_holdout=args.label_holdout)
+        label_coll_dev = LabelCollator(tok, bank, train=False, exclude_holdout=args.label_holdout)
+        if args.label_holdout:
+            label_coll_zs = LabelCollator(tok, bank, train=False, only_holdout=True)
+        if init_relation == "transplant":
+            if init_state is None or "relation.bilinear.weight" not in init_state:
+                raise SystemExit("--init-relation transplant needs an --init with an ATLOP head")
+            _transplant(model, init_state, label_coll_dev, device)
     if args.train_scope == "phase2":
         if not args.phase2:
             raise SystemExit("--train-scope phase2 needs --phase2")
@@ -377,9 +464,13 @@ def main() -> int:
             raise SystemExit("--train-scope relation needs --rel-adapter")
         for n, prm in model.named_parameters():
             prm.requires_grad = n.startswith(("rel_lora.", "relation.", "mix.relation.",
-                                              "ent.", "mix.ent."))
+                                              "ent.", "mix.ent.", "label_enc."))
         heads = RELATION_HEADS
         model.rel_lora.sticky = True
+    frozen_digest = _frozen_digest(model) if args.assert_frozen else None
+    if frozen_digest is not None:
+        n_frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+        print(f"--assert-frozen: {n_frozen:,} untrained parameters fingerprinted", flush=True)
     wrong = {str(p.dtype) for p in model.parameters()} - {"torch.float32"}
     if wrong:
         raise SystemExit(f"parameters must be fp32 master weights; found {wrong}")
@@ -410,7 +501,7 @@ def main() -> int:
                 r = train[i].get("rel")
                 return len(r["spans"]) ** 2 if r else 0
             order[-1] = sorted(range(len(train)), key=lambda i: -n_pairs(i))[:micro]
-        return _probe(model, opt, train, order, args.probe, spec, tok, device, amp)
+        return _probe(model, opt, train, order, args.probe, spec, tok, device, amp, label_coll)
 
     per_epoch = len(batch_order(train, micro, args.seed, 0)) // spec.grad_accum
     total = args.max_steps or per_epoch * args.epochs
@@ -439,6 +530,7 @@ def main() -> int:
                 "model_config": {"srl_mode": args.srl_mode, "phase2": args.phase2,
                                  "p2_context": args.p2_context, "ent_head": True,
                                  "rel_adapter": args.rel_adapter, "rel_markers": args.rel_markers,
+                                 "rel_head": args.rel_head,
                                  "redocred_train": args.redocred_train,
                                  "relation_data": args.relation_data,
                                  "init": args.init, "train_scope": args.train_scope}}
@@ -478,7 +570,8 @@ def main() -> int:
             for m0 in range(start, per_epoch * spec.grad_accum, spec.grad_accum):
                 this, seen, bad = defaultdict(float), set(), []
                 for m in range(m0, m0 + spec.grad_accum):
-                    b = _to(collate([train[i] for i in batches[m]], tok.pad_token_id), device)
+                    b = collate([train[i] for i in batches[m]], tok.pad_token_id)
+                    b = _to(label_coll(b) if label_coll is not None else b, device)
                     with amp():
                         o = model(b, relation_only=args.train_scope.startswith("relation"))
                     L = losses(o, b)
@@ -557,7 +650,13 @@ def main() -> int:
                 if step % args.eval_every == 0 or step == total:
                     rs.status(state="evaluating")
                     r = evaluate(model, dev, vocab, tok.pad_token_id, device, amp, micro * 2,
-                                 rel_gold=rd_dev)
+                                 rel_gold=rd_dev, label_coll=label_coll_dev,
+                                 label_coll_zs=label_coll_zs)
+                    if frozen_digest is not None and _frozen_digest(model) != frozen_digest:
+                        why = f"a frozen tensor changed by step {step}"
+                        rs.event("abort", reason=why)
+                        rs.status(state="failed", reason=why, push=True)
+                        raise SystemExit(f"STOPPED: {why}")
                     rs.event("eval", step=step, **r)
                     better = rs.maybe_save_best(model, r["composite"], extra())
                     rs.status(state="training", last_eval=r, push=True)
@@ -597,7 +696,7 @@ def main() -> int:
     return 0
 
 
-def _probe(model, opt, train, order, steps, spec, tok, device, amp) -> int:
+def _probe(model, opt, train, order, steps, spec, tok, device, amp, label_coll=None) -> int:
     """Run ``steps`` optimiser steps on the longest windows and report peak
     memory and speed. This is the A100 fit check: batch size, gradient
     checkpointing and bf16 are measured here, not assumed."""
@@ -609,7 +708,8 @@ def _probe(model, opt, train, order, steps, spec, tok, device, amp) -> int:
     for s in range(steps):
         t0 = time.time()
         for idx in order:
-            b = _to(collate([train[i] for i in idx], tok.pad_token_id), device)
+            b = collate([train[i] for i in idx], tok.pad_token_id)
+            b = _to(label_coll(b) if label_coll is not None else b, device)
             with amp():
                 L = losses(model(b), b)
             (sum(l for l, _ in L.values()) / len(order)).backward()

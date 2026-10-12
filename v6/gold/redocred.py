@@ -76,6 +76,42 @@ def resolve_relation_names(codes: list[str]) -> dict[str, str]:
     return known
 
 
+def resolve_relation_info(codes: list[str]) -> dict[str, dict]:
+    """Wikidata property code -> ``{"label", "description", "aliases"}``,
+    cached on disk beside ``rel_info.json`` (which, with the vocabulary built
+    from it, is left untouched).
+
+    The schema-conditioned relation head reads a relation's name and
+    description as text, so a model can be given relations it never saw in
+    training; aliases serve as paraphrases in training.
+    """
+    cache = REDOCRED_DIR / "rel_info_desc.json"
+    known: dict[str, dict] = json.loads(cache.read_text()) if cache.exists() else {}
+    missing = [c for c in codes if c not in known]
+    for i in range(0, len(missing), 50):
+        batch = missing[i:i + 50]
+        url = (f"{WIKIDATA_API}?action=wbgetentities&format=json"
+               f"&props=labels|descriptions|aliases&languages=en&ids={'|'.join(batch)}")
+        req = urllib.request.Request(url, headers={"User-Agent": "kniv-v6/1.0"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            payload = json.load(r)
+        for code, ent in payload.get("entities", {}).items():
+            label = ent.get("labels", {}).get("en", {}).get("value")
+            if label:
+                known[code] = {
+                    "label": label,
+                    "description": ent.get("descriptions", {}).get("en", {}).get("value", ""),
+                    "aliases": [a["value"] for a in ent.get("aliases", {}).get("en", [])],
+                }
+        time.sleep(0.4)
+    still_missing = [c for c in codes if c not in known]
+    if still_missing:
+        raise RuntimeError(f"Wikidata did not resolve: {still_missing}")
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(known, indent=1, sort_keys=True))
+    return known
+
+
 def relation_inventory(splits: tuple[str, ...] = ("test", "dev")) -> tuple[list[str], dict[str, str]]:
     """Return (sorted relation names, name -> Wikidata code).
 
