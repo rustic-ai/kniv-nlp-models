@@ -413,12 +413,14 @@ class LabelRelationHead(MarkerRelationHead):
         self.pair_proj.weight[:R1] = bilinear.weight
         self.pair_proj.bias[:R1] = bilinear.bias
         self.th.zero_(); self.th[0] = 1.0
-        target = torch.zeros(R1 - 1, self.pair_proj.out_features, device=label_emb.device)
+        # Solved in float64 on the CPU (MPS has no float64).
+        E = label_emb.detach().float().cpu().double()
+        target = torch.zeros(R1 - 1, self.pair_proj.out_features, dtype=torch.float64)
         target[torch.arange(R1 - 1), torch.arange(1, R1)] = 1.0           # label r -> column r+1
-        sol = torch.linalg.lstsq(label_emb.double(), target.double()).solution   # [d, D]
-        self.label_proj.weight.copy_(sol.T.to(self.label_proj.weight.dtype))
+        sol = torch.linalg.lstsq(E, target).solution                     # [d, D]
+        self.label_proj.weight.copy_(sol.T.float().to(self.label_proj.weight.device))
         self.label_bias.weight.zero_(); self.label_bias.bias.zero_()
-        return float((label_emb.double() @ sol - target.double()).abs().max())
+        return float((E @ sol - target).abs().max())
 
 
 class LabelEncoder(nn.Module):
