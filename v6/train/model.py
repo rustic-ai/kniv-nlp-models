@@ -438,6 +438,66 @@ class LabelEncoder(nn.Module):
         return self.proj(self.norm(pooled.float()))
 
 
+class SpanTypeHead(nn.Module):
+    """Schema-conditioned entity spans: each candidate span (up to 12 words,
+    inside a sentence) scored against entity types read as text, with a
+    learned threshold column -- the entity counterpart of
+    ``LabelRelationHead``, after GLiNER.
+
+    A span is ``[first word; last word; mean; width]`` through an MLP; a type
+    is its label-pass embedding projected into the same space. Logits are
+    ``[N, K+1]``, column 0 the threshold, so ``atlop_loss`` (with its schema
+    mask) trains it and a type is predicted where it beats the threshold."""
+
+    def __init__(self, H: int, label_dim: int = 1024, dim: int = 768,
+                 max_width: int = 12, p: float = 0.1):
+        super().__init__()
+        self.width = nn.Embedding(max_width, 64)
+        self.span = nn.Sequential(nn.Linear(3 * H + 64, dim), nn.GELU(), nn.Dropout(p),
+                                  nn.Linear(dim, dim))
+        self.type_proj = nn.Linear(label_dim, dim)
+        self.th = nn.Parameter(torch.zeros(dim))
+        self.type_bias = nn.Linear(label_dim, 1)
+        nn.init.zeros_(self.type_bias.weight)
+        nn.init.zeros_(self.type_bias.bias)
+
+    def forward(self, words: torch.Tensor, batch: dict, type_emb: torch.Tensor) -> torch.Tensor:
+        """``words [B, W, H]`` (one vector per word), the batch's candidate
+        spans (``span_batch``, ``span_start``, ``span_end`` exclusive) and
+        ``type_emb [K, label_dim]``."""
+        b, s, e = batch["span_batch"], batch["span_start"], batch["span_end"]
+        if len(b) == 0:
+            return words.new_zeros(0, type_emb.size(0) + 1, dtype=torch.float32)
+        w = words.float()
+        cs = torch.cat([torch.zeros_like(w[:, :1]), w.cumsum(1)], 1)   # [B, W+1, H]
+        n = (e - s).clamp(min=1)
+        mean = (cs[b, e] - cs[b, s]) / n.unsqueeze(1).float()
+        rep = torch.cat([w[b, s], w[b, e - 1], mean,
+                         self.width((n - 1).clamp(max=self.width.num_embeddings - 1)).float()], -1)
+        x = self.span(rep.to(words.dtype)).float()                     # [N, dim]
+        q = self.type_proj(type_emb.to(self.type_proj.weight.dtype)).float()   # [K, dim]
+        bias = self.type_bias(type_emb.to(self.type_bias.weight.dtype)).float().squeeze(-1)
+        return torch.cat([x @ self.th.float().unsqueeze(1), x @ q.T + bias], 1)
+
+
+def hybrid_logits(label: torch.Tensor, cols: torch.Tensor, legacy: torch.Tensor) -> torch.Tensor:
+    """One relation decision per schema column from two heads: the fixed
+    ATLOP head (``legacy [P, R+1]``) for the relations it was trained on
+    (bank ids ``< R``), the label head (``label [P, K+1]``) for the rest.
+
+    ATLOP predicts a relation when its logit beats the pair's threshold
+    logit, independently per relation, so each column is returned as its
+    head's margin (logit minus threshold) with a zero threshold column: the
+    two heads' decisions combine without calibrating one to the other.
+    Margins are comparable within a head, not across."""
+    R = legacy.size(1) - 1
+    out = label[:, 1:] - label[:, :1]
+    old = cols < R
+    if bool(old.any()):
+        out[:, old] = legacy[:, 1 + cols[old]] - legacy[:, :1]
+    return torch.cat([torch.zeros_like(out[:, :1]), out], 1)
+
+
 def kd_margin_loss(new: torch.Tensor, old: torch.Tensor, cols: torch.Tensor) -> torch.Tensor:
     """Distillation from the transplanted head: the new head's margins (each
     listed relation's logit minus the threshold's) pulled toward the old
@@ -527,7 +587,8 @@ class V6Model(nn.Module):
                  phase2: bool = False, p2_context: int = 0, ent_head: bool = True,
                  rel_adapter: int = 0, rel_markers: bool = False,
                  rel_head: str = "bilinear", label_dim: int = 1024,
-                 label_plain: bool = True):
+                 label_plain: bool = True, legacy_relation: bool = False,
+                 span_head: bool = False):
         super().__init__()
         from transformers import AutoConfig, AutoModel
         # fp32 master weights for every encoder; bf16 autocast does the
@@ -614,6 +675,22 @@ class V6Model(nn.Module):
         # other head keeps the shared pass.
         self.rel_lora = (RelationAdapter(self.encoder, rel_adapter)
                          if phase2 and rel_adapter else None)
+        # The hybrid: a frozen ATLOP path (its own adapter and head, from the
+        # run that trained them) answers the relations it was trained on;
+        # the label head answers every other relation (``hybrid_logits``).
+        self.legacy_relation = self.legacy_lora = None
+        if legacy_relation:
+            if rel_head != "label" or not rel_markers or not rel_adapter:
+                raise ValueError("legacy_relation needs the label head over an adapted marker pass")
+            self.legacy_lora = RelationAdapter(self.encoder, rel_adapter)
+            self.legacy_relation = MarkerRelationHead(H, S["relations"])
+        # Schema-conditioned entity spans, read off the plain pass.
+        self.span = None
+        if span_head:
+            if rel_head != "label":
+                raise ValueError("span_head needs the label encoder (rel_head='label')")
+            self.mix["ent_span"] = ScalarMix(L)
+            self.span = SpanTypeHead(H, label_dim, p=p)
         # Set by a run that trains only heads: the encoder then runs without
         # gradient and without dropout, the features it will give at inference.
         self.freeze_encoder = False
@@ -765,6 +842,21 @@ class V6Model(nn.Module):
                 self.rel_lora.on = False
         return self.label_enc(out.last_hidden_state, mask)
 
+    def _legacy_logits(self, batch: dict) -> torch.Tensor:
+        """The frozen ATLOP path: the marker pass through its own adapter (the
+        label path's switched off), then its head. Never trained."""
+        prev = self.rel_lora.on
+        self.rel_lora.on, self.legacy_lora.on = False, True
+        try:
+            with torch.no_grad():
+                out = self.encoder(input_ids=batch["rm_input_ids"],
+                                   attention_mask=batch["rm_attention_mask"],
+                                   output_attentions=True)
+                logits, _ = self.legacy_relation(out.last_hidden_state, out.attentions[-1], batch)
+        finally:
+            self.legacy_lora.on, self.rel_lora.on = False, prev
+        return logits
+
     def _marker_heads(self, plain_layers, batch: dict, o: dict) -> dict:
         """Marker mode: the entity head reads the plain pass (entities must be
         known before the markers can be placed), relations the marker pass."""
@@ -772,6 +864,12 @@ class V6Model(nn.Module):
         if self.ent is not None:
             o["ent"] = self.ent(self._words(plain_layers, "ent", first))
             o["_anchor"] = o["ent"].sum() * 0.0
+        if self.span is not None and "span_batch" in batch:
+            temb = batch.get("type_label_emb")
+            if temb is None:
+                temb = self.label_embeddings(batch["type_label_ids"], batch["type_label_mask"])
+            o["span"] = self.span(self._words(plain_layers, "ent_span", first), batch, temb)
+            o["_anchor"] = o["span"].sum() * 0.0
         if "rm_input_ids" in batch and bool(batch["rm_ok"].all()):
             seq, att = self._marker_pass(batch)
             if isinstance(self.relation, LabelRelationHead):
@@ -782,6 +880,12 @@ class V6Model(nn.Module):
                 if getattr(self.relation, "kd_logits", None) is not None and self.training:
                     o["relation_kd_old"] = self.relation.kd_logits
                     self.relation.kd_logits = None
+                if self.legacy_relation is not None and not self.training \
+                        and "rel_label_cols" in batch and len(o["relation"]):
+                    o["relation_label"] = o["relation"]
+                    o["relation_legacy"] = self._legacy_logits(batch)
+                    o["relation"] = hybrid_logits(o["relation"], batch["rel_label_cols"],
+                                                  o["relation_legacy"])
             else:
                 o["relation"], o["relation_sent_att"] = self.relation(seq, att, batch)
             o["_anchor"] = seq.sum() * 0.0
@@ -912,7 +1016,7 @@ def _ce(logits: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, int]:
 
 
 PHASE2_HEADS = ("coref", "coref_span", "relation", "relation_evidence", "ent")
-RELATION_HEADS = ("relation", "relation_evidence", "ent", "relation_kd")
+RELATION_HEADS = ("relation", "relation_evidence", "ent", "relation_kd", "ent_span")
 # Fixed weights on top of the per-head loss scale: DREEAM weighs its evidence
 # term at 0.1 of the relation loss.
 HEAD_WEIGHT = {"relation_evidence": 0.1}
@@ -980,6 +1084,11 @@ def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
         out["ent"] = _ce(o["ent"], batch["ent"])
     else:
         out["ent"] = (_zero(o), 0)
+    if "span" in o and len(o["span"]):
+        out["ent_span"] = (atlop_loss(o["span"], batch["span_labels"], batch.get("span_label_mask")),
+                           len(o["span"]))
+    else:
+        out["ent_span"] = (_zero(o), 0)
     kd = o.get("relation_kd_old")
     if kd is not None and len(o.get("relation", [])) and "rel_label_cols" in batch:
         out["relation_kd"] = (kd_margin_loss(o["relation"], kd, batch["rel_label_cols"]),

@@ -85,7 +85,9 @@ def load_run(run: str, repo: str, device, local: Path | None = None) -> tuple:
                     ent_head=cfg.get("ent_head", False), rel_adapter=cfg.get("rel_adapter", 0),
                     rel_markers=cfg.get("rel_markers", False),
                     rel_head=cfg.get("rel_head", "bilinear"),
-                    label_plain=cfg.get("label_plain", False))
+                    label_plain=cfg.get("label_plain", False),
+                    legacy_relation=cfg.get("legacy_relation", False),
+                    span_head=cfg.get("span_head", False))
     model.load_state_dict(ck["model"])          # strict: a mismatch raises
     model.to(device).eval()
     tok = AutoTokenizer.from_pretrained(spec.hf_id)
@@ -486,12 +488,18 @@ def run_phase2(model, feats: list[dict], tok, device, batch: int = 4,
     out: list[dict | None] = [None] * len(feats)
     label_emb = (schema_embeddings(model, tok, device, cols) if model.rel_kind == "label"
                  else None)
+    if label_emb is not None:
+        from ..label_bank import load as load_bank
+        ids = cols if cols is not None else [r["id"] for r in load_bank()["relations"]
+                                              if r["source"] == "redocred"]
+        label_cols = torch.tensor(ids, device=device)
     for k in range(0, len(order), batch):
         idx = order[k:k + batch]
         b = {n: v.to(device) for n, v in collate([feats[i] for i in idx],
                                                  tok.pad_token_id).items()}
         if label_emb is not None:
             b["rel_label_emb"] = label_emb
+            b["rel_label_cols"] = label_cols     # the hybrid routes columns by bank id
         o = model(b, predict=False, predict_heads=True)
         best = o["coref_scores"].argmax(-1).cpu()                    # [B,W]
         cand = o["coref_cand"].cpu()

@@ -30,6 +30,8 @@ name and description, in bank order.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import Counter
 
 import numpy as np
@@ -38,6 +40,11 @@ import torch
 LABEL_MAX_SUBWORDS = 48
 # name / name + description / alias + description
 TEXT_MODES = (("name", 0.2), ("name_desc", 0.6), ("alias_desc", 0.2))
+
+
+def type_text(t: dict) -> str:
+    return f"entity type: {t['name']}. {t['description']}" if t.get("description") \
+        else f"entity type: {t['name']}"
 
 
 def label_text(rel: dict, mode: str = "name_desc", rng=None) -> str:
@@ -55,7 +62,7 @@ class LabelCollator:
                  min_labels: int = 16, max_labels: int = 96,
                  exclude_holdout: bool = False, only_holdout: bool = False,
                  sources: tuple[str, ...] = ("redocred",), text_modes=None,
-                 unlabelled_keep: float = 0.5):
+                 unlabelled_keep: float | None = None):
         self.tok, self.train = tok, train
         self.unlabelled_keep = unlabelled_keep
         self.text_modes = tuple(text_modes or TEXT_MODES)
@@ -102,6 +109,7 @@ class LabelCollator:
             return batch
         schemas = batch.pop("rel_schemas", None)
         partial = batch.pop("rel_partial", None)
+        keeps = batch.pop("rel_keep", None)
         old = batch["pair_labels"]                                       # [P, R+1]
         if schemas is None:
             cols = self.columns()
@@ -126,8 +134,12 @@ class LabelCollator:
             had = old[:, 1:].sum(1) > 0
             drop = part & had & (none.squeeze(1) > 0)        # its positives fell outside
             if self.train:
-                drop |= part & ~had & (torch.as_tensor(
-                    self.rng.random(len(had))) >= self.unlabelled_keep)
+                # An explicit collator setting wins; otherwise each source's own.
+                keep = torch.as_tensor([self.unlabelled_keep if self.unlabelled_keep is not None
+                                        else (0.5 if k is None else k)
+                                        for k in (keeps or [None] * len(per))],
+                                       dtype=torch.float64)[batch["pair_batch"]]
+                drop |= part & ~had & (torch.as_tensor(self.rng.random(len(had))) >= keep)
             mask[drop] = 0
             batch["pair_labels"] = torch.cat([none, new], 1) * (~drop).unsqueeze(1)
             batch["pair_label_mask"] = mask
@@ -200,7 +212,14 @@ def teacher_features(item, payload: dict, tok, max_subwords: int, bank: dict, n_
              rel={"spans": ents, "types": np.zeros(len(ents), dtype=np.int32),
                   "triples": triples, "attrs": attrs, "n_participants": n_part,
                   "evidence": [(h, t, sorted(v)) for (h, t), v in sorted(ev.items())],
-                  "schema": schema, "partial": True})
+                  "schema": schema, "partial": True,
+                  "unlabelled_keep": UNLABELLED_KEEP["teacher"]})
+    tname = {t["name"]: t["id"] for t in bank["entity_types"]}
+    typed = [(tname[e["type"]], a, b) for e in payload["entities"] if e["type"] in tname
+             for a, b in e["spans"]]
+    f["_domain"] = item.domain
+    f["ents"] = span_targets(typed, W, f["word_ok"],
+                             [tname[t["name"]] for t in item.types if t["name"] in tname], True)
     if markers:
         part_turns = [(s, keep[p]) for s, p in turns if p in keep]
         f["rm"] = marker_features(item.tokens, spans, ents[n_part:], tok,
@@ -209,3 +228,359 @@ def teacher_features(item, payload: dict, tok, max_subwords: int, bank: dict, n_
     stats["kg_windows"] += 1
     stats["kg_triples"] += len(triples)
     return f
+
+
+class TypeCollator:
+    """Candidate spans and their typed targets for the span-type head, from
+    the ``span_items`` collation left in a batch.
+
+    Candidates are every span of up to ``max_width`` words inside one
+    sentence. Training keeps every gold span and a sample of the rest
+    (``max_neg`` per item); evaluation keeps all. Columns are the batch's
+    entity types (a sample of at most ``max_types`` in training); a column
+    outside an item's type schema is masked for its spans, and for a partial
+    source (the teacher) an unlabelled span is kept as a negative only with
+    probability ``unlabelled_keep``."""
+
+    def __init__(self, tok, bank: dict, train: bool, seed: int = 17, max_width: int = 12,
+                 max_neg: int = 128, max_types: int = 48, unlabelled_keep: float = 0.5):
+        self.tok, self.train = tok, train
+        self.types = bank["entity_types"]
+        self.rng = np.random.default_rng(seed)
+        self.max_width, self.max_neg, self.max_types = max_width, max_neg, max_types
+        self.unlabelled_keep = unlabelled_keep
+        self._tok_cache: dict[str, list[int]] = {}
+
+    def _ids(self, text: str) -> list[int]:
+        if text not in self._tok_cache:
+            self._tok_cache[text] = self.tok(text, truncation=True,
+                                             max_length=LABEL_MAX_SUBWORDS)["input_ids"]
+        return self._tok_cache[text]
+
+    def candidates(self, sent_of_word: np.ndarray, word_ok: np.ndarray) -> list[tuple[int, int]]:
+        out = []
+        n = len(sent_of_word)
+        for s in range(n):
+            if not word_ok[s] or sent_of_word[s] < 0:
+                continue
+            for e in range(s + 1, min(s + self.max_width, n) + 1):
+                if sent_of_word[e - 1] != sent_of_word[s]:
+                    break
+                if word_ok[e - 1]:
+                    out.append((s, e))
+        return out
+
+    def __call__(self, batch: dict) -> dict:
+        items = batch.pop("span_items", None)
+        if not items or all(x is None for x in items):
+            return batch
+        sow = batch["sent_of_word"].numpy()
+        wok = batch["word_mask"].numpy()
+        pool = sorted({t for x in items if x is not None for t in x["schema"]})
+        cols = np.asarray(pool, dtype=np.int64)
+        if self.train and len(cols) > self.max_types:
+            cols = np.sort(self.rng.choice(cols, size=self.max_types, replace=False))
+        col_of = {int(c): j for j, c in enumerate(cols)}
+        sb, ss, se, lab, msk = [], [], [], [], []
+        for b, x in enumerate(items):
+            if x is None:
+                continue
+            gold: dict[tuple[int, int], set] = {}
+            for s, e, t in x["spans"].tolist():
+                gold.setdefault((s, e), set()).add(t)
+            cand = self.candidates(sow[b], wok[b])
+            if self.train:
+                neg = [c for c in cand if c not in gold]
+                if len(neg) > self.max_neg:
+                    pick = self.rng.choice(len(neg), size=self.max_neg, replace=False)
+                    neg = [neg[i] for i in sorted(pick)]
+                cand = sorted(set(gold) | set(neg))
+            known = np.zeros(len(cols) + 1, dtype=np.float32)
+            known[0] = 1
+            for t in x["schema"]:
+                if t in col_of:
+                    known[1 + col_of[t]] = 1
+            for s, e in cand:
+                row = np.zeros(len(cols) + 1, dtype=np.float32)
+                types = gold.get((s, e), set())
+                hit = [col_of[t] for t in types if t in col_of]
+                if hit:
+                    row[[1 + j for j in hit]] = 1
+                else:
+                    row[0] = 1
+                m = known.copy()
+                if types and not hit:                 # its types fell outside the columns
+                    m[:] = 0
+                elif x["partial"] and not types and self.train \
+                        and self.rng.random() >= self.unlabelled_keep:
+                    m[:] = 0
+                sb.append(b); ss.append(s); se.append(e); lab.append(row); msk.append(m)
+        L = torch.long
+        batch["span_batch"] = torch.tensor(sb, dtype=L)
+        batch["span_start"] = torch.tensor(ss, dtype=L)
+        batch["span_end"] = torch.tensor(se, dtype=L)
+        K = len(cols) + 1
+        batch["span_labels"] = torch.tensor(np.asarray(lab).reshape(-1, K))
+        batch["span_label_mask"] = torch.tensor(np.asarray(msk).reshape(-1, K))
+        ids = [self._ids(type_text(self.types[c])) for c in cols]
+        Lm = max((len(x) for x in ids), default=1)
+        pad = self.tok.pad_token_id
+        batch["type_label_ids"] = torch.tensor([x + [pad] * (Lm - len(x)) for x in ids]).reshape(len(ids), Lm)
+        batch["type_label_mask"] = torch.tensor([[1] * len(x) + [0] * (Lm - len(x)) for x in ids]).reshape(len(ids), Lm)
+        batch["type_label_cols"] = torch.as_tensor(cols)
+        return batch
+
+
+def decode_spans(logits: torch.Tensor, batch: dict) -> list[list[tuple[int, int, int]]]:
+    """Greedy flat decoding: per item, spans whose best type beats the
+    threshold, highest margin first, skipping any that overlap one taken.
+    ``(start, end_exclusive, bank type id)``."""
+    if len(logits) == 0:
+        return []
+    margin = logits[:, 1:] - logits[:, :1]
+    best, j = margin.max(1)
+    cols = batch["type_label_cols"]
+    out: dict[int, list] = {}
+    taken: dict[int, np.ndarray] = {}
+    for i in torch.argsort(best, descending=True).tolist():
+        if best[i] <= 0:
+            break
+        b = int(batch["span_batch"][i]); s = int(batch["span_start"][i]); e = int(batch["span_end"][i])
+        t = taken.setdefault(b, np.zeros(int(batch["word_mask"].size(1)) + 1, dtype=bool))
+        if t[s:e].any():
+            continue
+        t[s:e] = True
+        out.setdefault(b, []).append((s, e, int(cols[j[i]])))
+    return [sorted(out.get(b, [])) for b in range(int(batch["word_mask"].size(0)))]
+
+
+# ── public sources for the knowledge layer ───────────────────────────
+# Each is written once, locally, as a compact JSON beside the corpus (label
+# ids already resolved against the bank), so a VM needs neither the network
+# nor the raw datasets. ``knowledge_features`` turns any of them -- and the
+# teacher export -- into feature dicts the collators batch together.
+def _corpus():
+    from ..config import DATA_DIR
+    return DATA_DIR / "v6-corpus"
+
+
+KNOWLEDGE_FILES = {"fewrel": "fewrel_rel.json", "fewnerd": "fewnerd_spans.json",
+                   "docred_distant": "docred_distant_rel.json"}
+# Unlabelled pairs of a partial source kept as negatives, per source: FewRel
+# labels one pair per sentence and says nothing of the others.
+# Bump whenever a featuriser's output changes: the feature cache is keyed on it.
+FEATURE_VERSION = 2
+UNLABELLED_KEEP = {"teacher": 0.5, "docred_distant": 0.5, "fewrel": 0.0}
+
+
+def _ids(bank: dict) -> tuple[dict, dict, dict]:
+    code = {r["code"]: r["id"] for r in bank["relations"] if r.get("code")}
+    tname = {t["name"]: t["id"] for t in bank["entity_types"]}
+    tcode = {t["code"]: t["id"] for t in bank["entity_types"] if t.get("code")}
+    return code, tname, tcode
+
+
+def prepare_knowledge(bank: dict, distant_docs: int = 40000) -> dict:
+    """Write the public sources' JSONs; returns per-file counts."""
+    from ..gold import docred_distant, fewnerd, fewrel
+    code, _, tcode = _ids(bank)
+    out = {}
+    fr = []
+    for x in fewrel.load("train"):
+        if x["code"] in code:
+            fr.append({"tokens": x["tokens"], "head": x["head"], "tail": x["tail"],
+                       "rel": code[x["code"]]})
+    schema = sorted({r["rel"] for r in fr})
+    (_corpus() / KNOWLEDGE_FILES["fewrel"]).write_text(json.dumps({"train": fr, "schema": schema}))
+    out["fewrel"] = {"train": len(fr), "relations": len(schema)}
+    fn = {}
+    for split in ("train", "dev"):
+        fn[split] = [{"tokens": x["tokens"],
+                      "spans": [[tcode[c], s, e] for c, s, e in x["spans"]]}
+                     for x in fewnerd.load(split)]
+    fn["schema"] = sorted(t["id"] for t in bank["entity_types"] if t["source"] == "fewnerd")
+    (_corpus() / KNOWLEDGE_FILES["fewnerd"]).write_text(json.dumps(fn))
+    out["fewnerd"] = {k: len(v) for k, v in fn.items()}
+    dd, missing = [], Counter()
+    for d in docred_distant.load(distant_docs):
+        trip = []
+        for h, t, c in d["triples"]:
+            if c in code:
+                trip.append([h, t, code[c]])
+            else:
+                missing[c] += 1
+        dd.append({"id": d["id"], "tokens": d["tokens"], "sentence_spans": d["sentence_spans"],
+                   "entities": [{"type": tcode[e["type"]], "mentions": e["mentions"]}
+                                for e in d["entities"]],
+                   "triples": trip})
+    rschema = sorted(r["id"] for r in bank["relations"] if r["source"] == "redocred")
+    tschema = sorted(t["id"] for t in bank["entity_types"] if t["source"] == "docred")
+    (_corpus() / KNOWLEDGE_FILES["docred_distant"]).write_text(
+        json.dumps({"train": dd, "schema": rschema, "type_schema": tschema}))
+    out["docred_distant"] = {"train": len(dd), "triples": sum(len(x["triples"]) for x in dd),
+                             "codes_not_in_bank": dict(missing.most_common(5))}
+    return out
+
+
+def span_targets(spans, W: int, word_ok, schema, partial: bool,
+                 stats: Counter | None = None, tag: str = "") -> dict:
+    """Typed entity spans for the span-type head: ``(start, end_exclusive,
+    type id)`` inside the window, the type schema the source was annotated
+    against, and whether its spans are partial."""
+    keep = [(int(s), int(e), int(t)) for t, s, e in spans if e <= W and word_ok[s]]
+    if stats is not None:
+        stats[f"{tag}_spans_past_limit"] += len(spans) - len(keep)
+        stats[f"{tag}_spans"] += len(keep)
+    return {"spans": np.asarray(sorted(set(keep)), dtype=np.int32).reshape(-1, 3),
+            "schema": sorted(set(int(x) for x in schema)), "partial": partial}
+
+
+def _rel(ents, triples, schema, n_rel, partial, keep, evidence=()):
+    return {"spans": ents, "types": np.zeros(len(ents), dtype=np.int32), "triples": triples,
+            "evidence": list(evidence), "schema": schema, "partial": partial,
+            "unlabelled_keep": keep}
+
+
+def fewrel_features(x: dict, schema, tok, max_subwords: int, n_rel: int, n_cls: int,
+                    stats: Counter, markers: bool = True) -> dict | None:
+    from .data import blank_window, marker_features
+    spans = [(0, len(x["tokens"]))]
+    f = blank_window(x["tokens"], spans, tok, max_subwords, n_cls)
+    W = f["_W"]
+    ents = []
+    for side in (x["head"], x["tail"]):
+        ms = [(a, b) for a, b in side if b <= W and f["word_ok"][a]]
+        if not ms:
+            stats["fewrel_past_limit"] += 1
+            return None
+        ents.append(np.asarray(ms, dtype=np.int32))
+    f.update(coref=None, _n_rel=n_rel,
+             rel=_rel(ents, [(0, 1, x["rel"])], schema, n_rel, True, UNLABELLED_KEEP["fewrel"]))
+    if markers:
+        f["rm"] = marker_features(x["tokens"], spans, ents, tok)
+    stats["fewrel_items"] += 1
+    return f
+
+
+def fewnerd_features(x: dict, schema, tok, max_subwords: int, n_cls: int,
+                     stats: Counter) -> dict:
+    from .data import blank_window
+    spans = [(0, len(x["tokens"]))]
+    f = blank_window(x["tokens"], spans, tok, max_subwords, n_cls)
+    f.update(coref=None, rel=None,
+             ents=span_targets(x["spans"], f["_W"], f["word_ok"], schema, False, stats, "fewnerd"))
+    stats["fewnerd_items"] += 1
+    return f
+
+
+def distant_features(d: dict, schema, type_schema, tok, max_subwords: int, n_rel: int,
+                     n_cls: int, stats: Counter, markers: bool = True) -> dict | None:
+    from .data import blank_window, marker_features
+    spans = [tuple(s) for s in d["sentence_spans"]]
+    f = blank_window(d["tokens"], spans, tok, max_subwords, n_cls)
+    W = f["_W"]
+    keep, ents, typed = {}, [], []
+    for i, e in enumerate(d["entities"]):
+        ms = [(a, b) for a, b in e["mentions"] if b <= W and f["word_ok"][a]]
+        if ms:
+            keep[i] = len(ents)
+            ents.append(np.asarray(ms, dtype=np.int32))
+            typed += [(e["type"], a, b) for a, b in ms]
+    if len(ents) < 2:
+        stats["distant_docs_dropped"] += 1
+        return None
+    trip = [(keep[h], keep[t], r) for h, t, r in d["triples"] if h in keep and t in keep]
+    stats["distant_triples_past_limit"] += len(d["triples"]) - len(trip)
+    f.update(coref=None, _n_rel=n_rel,
+             rel=_rel(ents, trip, schema, n_rel, True, UNLABELLED_KEEP["docred_distant"]),
+             ents=span_targets(typed, W, f["word_ok"], type_schema, False))
+    if markers:
+        f["rm"] = marker_features(d["tokens"], spans, ents, tok)
+    stats["distant_docs"] += 1
+    stats["distant_triples"] += len(trip)
+    return f
+
+
+def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: int,
+                       bank: dict, markers: bool = True, limit: int | None = None,
+                       stats: Counter | None = None) -> list[dict]:
+    """Feature dicts for one knowledge source, cached on disk per (source,
+    split, tokenizer, limit, markers, bank hash, source file)."""
+    import pickle
+    from .data import FEATURES
+    stats = Counter() if stats is None else stats
+    if source == "teacher":
+        path = _corpus() / "kg_teacher.json"
+    else:
+        path = _corpus() / KNOWLEDGE_FILES[source]
+    if not path.exists():
+        raise SystemExit(f"{path} missing; run python -m v6.train.kdata --prep")
+    st = path.stat()
+    key = hashlib.sha256(json.dumps([FEATURE_VERSION, source, split, tok.name_or_path,
+                                     max_subwords, markers, limit,
+                                     bank.get("hash"), st.st_size, st.st_mtime_ns]).encode()
+                         ).hexdigest()[:16]
+    cache = FEATURES / f"knowledge-{source}-{split}-{key}.pkl"
+    if cache.exists():
+        with cache.open("rb") as fh:
+            feats, saved = pickle.load(fh)
+        stats.update(saved)
+        return feats
+    n_rel = len(bank["relations"])
+    local = Counter()
+    if source == "teacher":
+        from ..kg_teacher import load_export
+        feats = [f for it, p in load_export(path)[:limit]
+                 if (f := teacher_features(it, p, tok, max_subwords, bank, n_cls, local, markers))]
+    else:
+        data = json.loads(path.read_text())
+        rows = data[split][:limit]
+        if source == "fewrel":
+            feats = [f for x in rows if (f := fewrel_features(
+                x, data["schema"], tok, max_subwords, n_rel, n_cls, local, markers))]
+        elif source == "fewnerd":
+            feats = [fewnerd_features(x, data["schema"], tok, max_subwords, n_cls, local)
+                     for x in rows]
+        else:
+            feats = [f for x in rows if (f := distant_features(
+                x, data["schema"], data["type_schema"], tok, max_subwords, n_rel, n_cls,
+                local, markers))]
+    FEATURES.mkdir(parents=True, exist_ok=True)
+    tmp = cache.with_suffix(".tmp")
+    with tmp.open("wb") as fh:
+        pickle.dump((feats, dict(local)), fh, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp.replace(cache)
+    stats.update(local)
+    return feats
+
+
+def main() -> int:
+    import argparse
+    import time
+    from transformers import AutoTokenizer
+    from ..label_bank import load as load_bank
+    from .encoders import get
+    from .vocab import Vocab
+    ap = argparse.ArgumentParser(description="prepare and featurise the knowledge sources")
+    ap.add_argument("--prep", action="store_true", help="write the public sources' JSONs")
+    ap.add_argument("--featurise", default="teacher,fewrel,fewnerd,docred_distant")
+    ap.add_argument("--encoder", default="deberta-v3-large")
+    ap.add_argument("--distant-docs", type=int, default=40000)
+    args = ap.parse_args()
+    bank = load_bank()
+    if args.prep:
+        print(json.dumps(prepare_knowledge(bank, args.distant_docs), indent=1), flush=True)
+    spec = get(args.encoder)
+    tok = AutoTokenizer.from_pretrained(spec.hf_id)
+    n_cls = Vocab.load().size("cls")
+    for src in [s for s in args.featurise.split(",") if s]:
+        for split in (("train", "dev") if src == "fewnerd" else ("train",)):
+            t0, st = time.time(), Counter()
+            feats = knowledge_features(src, split, tok, spec.max_subwords, n_cls, bank, stats=st)
+            print(f"{src}/{split}: {len(feats):,} items in {time.time() - t0:.0f}s; "
+                  + ", ".join(f"{k} {v:,}" for k, v in sorted(st.items())), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

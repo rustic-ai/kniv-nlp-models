@@ -197,6 +197,82 @@ def main() -> int:
         L = losses(B_(mo, relation_only=True), mo)
     check("mixed Re-DocRED + teacher batch trains", all(torch.isfinite(l) for l, _ in L.values()),
           ", ".join(f"{k} {l.item():.3f}" for k, (l, _) in L.items()))
+    # 8. the hybrid: a frozen ATLOP path for its relations, the label head for the rest
+    import tempfile
+    from .kdata import TypeCollator, knowledge_features
+    from .loop import Chain, _load_legacy
+    from .model import SpanTypeHead  # noqa: F401
+    H_ = V6Model(spec.hf_id, sizes, phase2=True, rel_adapter=4, rel_markers=True,
+                 rel_head="label", legacy_relation=True, span_head=True).eval()
+    no_dropout(H_)
+    H_.load_state_dict({k: v for k, v in B_.state_dict().items()
+                        if not k.startswith(("rel_lora.", "relation.", "ent.", "mix.ent."))
+                        or True}, strict=False)
+    with tempfile.TemporaryDirectory() as td:
+        torch.save({"model": A.state_dict()}, f"{td}/best.pt")
+        _load_legacy(H_, f"{td}/best.pt")
+    rd_cols = torch.tensor([r["id"] for r in bank["relations"] if r["source"] == "redocred"])
+    hb = full(collate(feats, tok.pad_token_id))
+    hb["rel_label_cols"] = rd_cols
+    with torch.no_grad():
+        ho = H_(hb)
+        la = A(collate(feats, tok.pad_token_id))
+    want = la["relation"][:, 1:] - la["relation"][:, :1]
+    got = ho["relation"][:, 1:]
+    check("hybrid: Re-DocRED columns are the ATLOP head's margins",
+          float((want - got).abs().max()) < 1e-4, f"max |diff| {float((want - got).abs().max()):.1e}")
+    check("hybrid: entity head is the legacy run's", torch.allclose(ho["ent"], la["ent"], atol=1e-5))
+    mixed_cols = torch.cat([rd_cols[:5], torch.tensor([200, 300, 400])])
+    mb_ = full(collate(feats, tok.pad_token_id))
+    mb_["rel_label_cols"] = mixed_cols
+    keep_ids = [0] + [1 + c for c in mixed_cols[:5].tolist()]
+    mb_["rel_label_ids"] = mb_["rel_label_ids"][:len(mixed_cols)]
+    mb_["rel_label_mask"] = mb_["rel_label_mask"][:len(mixed_cols)]
+    with torch.no_grad():
+        mo_ = H_(mb_)
+    check("hybrid: a mixed schema routes old relations to ATLOP and new ones to the label head",
+          torch.allclose(mo_["relation"][:, 1:6], want[:, mixed_cols[:5]], atol=1e-4)
+          and torch.allclose(mo_["relation"][:, 6:], (mo_["relation_label"][:, 6:]
+                                                      - mo_["relation_label"][:, :1]), atol=1e-5))
+
+    # 9. training the hybrid leaves the legacy path untouched
+    H_.train(); no_dropout(H_)
+    for n, prm in H_.named_parameters():
+        prm.requires_grad = n.startswith(("rel_lora.", "relation.", "label_enc.", "span.",
+                                          "mix.ent_span."))
+    H_.rel_lora.sticky = True
+    before = {k: v.clone() for k, v in H_.state_dict().items() if k.startswith(("legacy_", "ent."))}
+    d_before = _frozen_digest(H_)
+    xs_tok = tok
+    fr = knowledge_features("fewrel", "train", xs_tok, spec.max_subwords, vocab.size("cls"), bank, limit=4)
+    fn = knowledge_features("fewnerd", "train", xs_tok, spec.max_subwords, vocab.size("cls"), bank, limit=6)
+    dd = knowledge_features("docred_distant", "train", xs_tok, spec.max_subwords, vocab.size("cls"), bank, limit=2)
+    tc = Chain(TypeCollator(tok, bank, train=True, seed=5),
+               LabelCollator(tok, bank, train=True, seed=5, unlabelled_keep=1.0))
+    mix_items = feats[:1] + [tf] + fr[:2] + fn[:3] + dd[:1]
+    tb2 = tc(collate(mix_items, tok.pad_token_id))
+    opt = torch.optim.SGD([p for p in H_.parameters() if p.requires_grad], lr=0.1)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        o2 = H_(tb2, relation_only=True)
+        L2 = losses(o2, tb2)
+    o2["span"].retain_grad()
+    sum(l for l, _ in L2.values()).backward()
+    check("mixed batch of every source trains (bf16)",
+          all(torch.isfinite(l) for l, _ in L2.values()) and L2["ent_span"][1] > 0 and L2["relation"][1] > 0,
+          ", ".join(f"{k} {l.item():.3f}/{n}" for k, (l, n) in L2.items()))
+    sm = tb2["span_label_mask"]
+    check("span head: masked type columns get no gradient",
+          float(o2["span"].grad[sm == 0].abs().max()) == 0.0 if (sm == 0).any() else True)
+    opt.step()
+    after = {k: v for k, v in H_.state_dict().items() if k.startswith(("legacy_", "ent."))}
+    check("a training step leaves the legacy path and entity head untouched",
+          all(torch.equal(before[k], after[k]) for k in before) and _frozen_digest(H_) == d_before)
+
+    # 10. FewRel: only the labelled pair supervises
+    fb = LabelCollator(tok, bank, train=True, seed=5)(collate(fr[:1], tok.pad_token_id))
+    rows = fb["pair_label_mask"].sum(1)
+    check("FewRel: the labelled pair is supervised, its reverse is masked",
+          len(rows) == 2 and rows[0] > 1 and rows[1] == 0, f"mask row sums {rows.tolist()}")
     print("all knowledge-layer smoke checks passed")
     return 0
 

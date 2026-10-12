@@ -230,13 +230,53 @@ def _load_init(model, init: str, vocab: Vocab, relation: str = "drop") -> dict:
     missing, unexpected = model.load_state_dict(state, strict=False)
     fresh = [m for m in missing if not m.startswith(("coref.", "relation.",
                                                       "mix.coref.", "mix.relation.", "ent.",
-                                                      "mix.ent.", "rel_lora.", "label_enc."))]
+                                                      "mix.ent.", "rel_lora.", "label_enc.",
+                                                      "legacy_", "span.", "mix.ent_span."))]
     if fresh or unexpected:
         raise SystemExit(f"--init does not fit this model: missing {fresh[:5]}, "
                          f"unexpected {unexpected[:5]}")
     print(f"initialised from {init}: {len(ck['model'])} tensors loaded, "
           f"{len(missing)} phase-2 tensors fresh", flush=True)
     return ck["model"]
+
+
+def _load_legacy(model, run: str) -> None:
+    """The hybrid's frozen ATLOP path from ``run``: its relation adapter and
+    head become ``legacy_lora`` / ``legacy_relation``, and its entity-mention
+    head replaces the model's, so Re-DocRED end to end is that run's
+    exactly."""
+    path = Path(run)
+    if not path.exists():
+        from huggingface_hub import hf_hub_download
+        path = Path(hf_hub_download("dragonscale-ai/kniv-v6-runs", f"{run}/best.pt"))
+    st = torch.load(path, map_location="cpu", weights_only=False)["model"]
+    mapped = {}
+    for k, v in st.items():
+        if k.startswith("rel_lora."):
+            mapped["legacy_lora." + k[len("rel_lora."):]] = v
+        elif k.startswith("relation."):
+            mapped["legacy_relation." + k[len("relation."):]] = v
+        elif k.startswith(("ent.", "mix.ent.")):
+            mapped[k] = v
+    want = {k for k in model.state_dict() if k.startswith(("legacy_lora.", "legacy_relation.",
+                                                           "ent.", "mix.ent."))}
+    if set(mapped) != want:
+        raise SystemExit(f"--legacy-relation {run} does not fit: missing "
+                         f"{sorted(want - set(mapped))[:5]}, extra {sorted(set(mapped) - want)[:5]}")
+    model.load_state_dict(mapped, strict=False)
+    print(f"legacy relation path and entity head from {run}: {len(mapped)} tensors", flush=True)
+
+
+class Chain:
+    """Batch transforms applied in order (type targets, then relation labels)."""
+
+    def __init__(self, *fns):
+        self.fns = [f for f in fns if f is not None]
+
+    def __call__(self, batch):
+        for f in self.fns:
+            batch = f(batch)
+        return batch
 
 
 @torch.no_grad()
@@ -342,6 +382,16 @@ def main() -> int:
     ap.add_argument("--redocred-train", type=int, default=0, metavar="N",
                     help="add Re-DocRED train, N times per epoch, as relation-only "
                          "supervision; its dev then joins best.pt selection (0 = off)")
+    ap.add_argument("--kg-data", default="", metavar="SRC=N,...",
+                    help="knowledge sources, each N times per epoch: teacher, fewrel, fewnerd, "
+                         "docred_distant (needs --rel-head label; python -m v6.train.kdata --prep)")
+    ap.add_argument("--kg-oversample", default="", metavar="DOMAIN=N,...",
+                    help="repeat teacher windows of a domain N times, e.g. business=2")
+    ap.add_argument("--legacy-relation", metavar="RUN",
+                    help="the hybrid: RUN's ATLOP adapter, head and entity head, frozen, answer "
+                         "the relations they were trained on; the label head the rest")
+    ap.add_argument("--span-head", action="store_true",
+                    help="train the schema-conditioned entity span head")
     ap.add_argument("--kg-teacher", type=int, default=0, metavar="N",
                     help="add the exported teacher windows (kg_teacher.json), N times per "
                          "epoch, as partial relation supervision (needs --rel-head label)")
@@ -429,30 +479,41 @@ def main() -> int:
         print("Re-DocRED: " + ", ".join(f"{k} {v:,}" for k, v in sorted(st.items()))
               + f"; train x{args.redocred_train}", flush=True)
 
+    kg_data = dict(x.split("=") for x in args.kg_data.split(",") if x)
     if args.kg_teacher:
+        kg_data.setdefault("teacher", str(args.kg_teacher))
+    if kg_data:
         if args.rel_head != "label" or not args.phase2:
-            raise SystemExit("--kg-teacher needs --phase2 --rel-head label")
-        from ..kg_teacher import load_export
+            raise SystemExit("--kg-data needs --phase2 --rel-head label")
         from ..label_bank import load as load_bank
-        from .kdata import teacher_features
-        st, kg_bank = Counter(), load_bank()
-        kg = [f for it, p in load_export()
-              if (f := teacher_features(it, p, tok, spec.max_subwords, kg_bank,
-                                        vocab.size("cls"), st, markers=args.rel_markers))]
-        train = train + kg * args.kg_teacher
-        print("teacher: " + ", ".join(f"{k} {v:,}" for k, v in sorted(st.items()))
-              + f"; train x{args.kg_teacher}", flush=True)
+        from .kdata import knowledge_features
+        over = {d: int(n) for d, n in (x.split("=") for x in args.kg_oversample.split(",") if x)}
+        kg_bank = load_bank()
+        for src, n in kg_data.items():
+            st = Counter()
+            feats = knowledge_features(src, "train", tok, spec.max_subwords, vocab.size("cls"),
+                                       kg_bank, markers=args.rel_markers, limit=args.train_limit,
+                                       stats=st)
+            if src == "teacher" and over:
+                feats = [f for f in feats for _ in range(over.get(f.get("_domain"), 1))]
+            train = train + feats * int(n)
+            print(f"{src}: {len(feats):,} items x{n}; "
+                  + ", ".join(f"{k} {v:,}" for k, v in sorted(st.items())), flush=True)
 
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
                     attn_implementation=spec.attn_implementation,
                     srl_mode=args.srl_mode, phase2=args.phase2,
                     p2_context=args.p2_context, rel_adapter=args.rel_adapter,
                     rel_markers=args.rel_markers, rel_head=args.rel_head,
-                    label_plain=args.label_pass == "plain").to(device)
+                    label_plain=args.label_pass == "plain",
+                    legacy_relation=bool(args.legacy_relation),
+                    span_head=args.span_head).to(device)
     init_relation = args.init_relation or "drop"
     if init_relation == "transplant" and args.rel_head != "label":
         raise SystemExit("--init-relation transplant needs --rel-head label")
     init_state = _load_init(model, args.init, vocab, init_relation) if args.init else None
+    if args.legacy_relation:
+        _load_legacy(model, args.legacy_relation)
     label_coll = label_coll_dev = label_coll_zs = None
     if args.rel_head == "label":
         from ..label_bank import load as load_bank
@@ -465,6 +526,10 @@ def main() -> int:
         label_coll_dev = LabelCollator(tok, bank, train=False, exclude_holdout=args.label_holdout)
         if args.label_holdout:
             label_coll_zs = LabelCollator(tok, bank, train=False, only_holdout=True)
+        if args.span_head:
+            from .kdata import TypeCollator
+            label_coll = Chain(TypeCollator(tok, bank, train=True, seed=args.seed), label_coll)
+            label_coll_dev = Chain(TypeCollator(tok, bank, train=False), label_coll_dev)
         if init_relation == "transplant":
             if init_state is None or "relation.bilinear.weight" not in init_state:
                 raise SystemExit("--init-relation transplant needs an --init with an ATLOP head")
@@ -498,9 +563,14 @@ def main() -> int:
         # pass only: encoder weights, phase 1 and coref stay bit-identical.
         if not args.rel_adapter:
             raise SystemExit("--train-scope relation needs --rel-adapter")
+        # With the hybrid, the entity-mention head belongs to the frozen
+        # legacy path (exact Re-DocRED end to end); the span head is the
+        # trainable entity path.
+        trainable = ("rel_lora.", "relation.", "mix.relation.", "label_enc.",
+                     "span.", "mix.ent_span.") + \
+            (() if args.legacy_relation else ("ent.", "mix.ent."))
         for n, prm in model.named_parameters():
-            prm.requires_grad = n.startswith(("rel_lora.", "relation.", "mix.relation.",
-                                              "ent.", "mix.ent.", "label_enc."))
+            prm.requires_grad = n.startswith(trainable)
         heads = RELATION_HEADS
         model.rel_lora.sticky = True
     frozen_digest = _frozen_digest(model) if args.assert_frozen else None
@@ -568,6 +638,8 @@ def main() -> int:
                                  "rel_adapter": args.rel_adapter, "rel_markers": args.rel_markers,
                                  "rel_head": args.rel_head,
                                  "label_plain": args.label_pass == "plain",
+                                 "legacy_relation": bool(args.legacy_relation),
+                                 "span_head": args.span_head,
                                  "redocred_train": args.redocred_train,
                                  "relation_data": args.relation_data,
                                  "init": args.init, "train_scope": args.train_scope}}

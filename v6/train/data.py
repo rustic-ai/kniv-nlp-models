@@ -690,6 +690,10 @@ def collate(items: list[dict], pad_id: int):
                                    if items[0].get("rel") else None))
     if any("rm" in x for x in items):
         out.update(_collate_markers(items, pad_id))
+    if any(x.get("ents") is not None for x in items):
+        # Typed entity spans for the span head; the type collator enumerates
+        # candidates and builds the targets (it knows train from eval).
+        out["span_items"] = [x.get("ents") for x in items]
     return out
 
 
@@ -705,7 +709,12 @@ def _collate_markers(items: list[dict], pad_id: int) -> dict:
     pos, ok = [], []
     for b, x in enumerate(items):
         rm = x.get("rm")
-        ok.append(rm is not None)
+        # An item with no relations (an entity-span sentence) gets a
+        # one-token placeholder, so it can share a batch with marker items;
+        # one with relations but no markers keeps the batch off the marker pass.
+        ok.append(rm is not None or x.get("rel") is None)
+        if rm is None and x.get("rel") is None:
+            mask[b, :1] = 1
         if rm is not None:
             n = len(rm["ids"])
             ids[b, :n] = torch.from_numpy(rm["ids"].astype(np.int64))
@@ -788,6 +797,8 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
                               for x in items]
         out["rel_partial"] = [bool(x["rel"].get("partial")) if x.get("rel") is not None else False
                               for x in items]
+        out["rel_keep"] = [x["rel"].get("unlabelled_keep") if x.get("rel") is not None else None
+                           for x in items]
     # Evidence: a distribution over the window's sentences per pair, uniform
     # over the annotated ones; rows without evidence are not supervised.
     target = torch.zeros(len(pev), S_max)
