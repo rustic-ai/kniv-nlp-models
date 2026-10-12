@@ -311,10 +311,14 @@ def main() -> int:
     ap.add_argument("--label-pass", choices=["plain", "adapter"], default="plain",
                     help="read label texts with the plain frozen encoder (only the label "
                          "projection learns) or through the relation adapter")
+    ap.add_argument("--label-text", choices=["mixed", "canonical"], default="mixed",
+                    help="training label texts: mixed (name / name+description / alias) "
+                         "or canonical (name+description only, as at evaluation)")
     ap.add_argument("--kd-weight", type=float, default=0.0,
                     help="with --init-relation transplant: distil the new head's margins "
-                         "toward the transplanted ATLOP head's, at this weight decaying "
-                         "linearly to 0 over the first half of training")
+                         "toward the transplanted ATLOP head's, at this weight (relative "
+                         "to the calibrated relation loss) decaying linearly to 0 over the "
+                         "first half of training")
     ap.add_argument("--label-holdout", action="store_true",
                     help="train without the label bank's held-out relations and report "
                          "zero-shot F1 on them (relation_gold_zs_f1); diagnostic runs")
@@ -438,7 +442,9 @@ def main() -> int:
         from .kdata import LabelCollator
         bank = load_bank()
         label_coll = LabelCollator(tok, bank, train=True, seed=args.seed,
-                                   exclude_holdout=args.label_holdout)
+                                   exclude_holdout=args.label_holdout,
+                                   text_modes=([("name_desc", 1.0)] if args.label_text == "canonical"
+                                               else None))
         label_coll_dev = LabelCollator(tok, bank, train=False, exclude_holdout=args.label_holdout)
         if args.label_holdout:
             label_coll_zs = LabelCollator(tok, bank, train=False, only_holdout=True)
@@ -594,7 +600,9 @@ def main() -> int:
                     if bad:
                         break                  # never backpropagate a non-finite loss
                     if args.kd_weight:
-                        weight["relation_kd"] = args.kd_weight * max(
+                        # Relative to the calibrated relation loss, so a
+                        # weight of 1 means "as strong as the relation term".
+                        weight["relation_kd"] = args.kd_weight * scale.get("relation", 1.0) * max(
                             0.0, 1.0 - rs.p.step / max(total / 2, 1))
                     loss = sum(scale.get(h, 1.0) * weight.get(h, 1.0) * l
                                for h, (l, _) in L.items()) / spec.grad_accum

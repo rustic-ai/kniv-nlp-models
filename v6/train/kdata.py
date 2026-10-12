@@ -42,8 +42,9 @@ class LabelCollator:
     def __init__(self, tok, bank: dict, train: bool, seed: int = 13,
                  min_labels: int = 16, max_labels: int = 96,
                  exclude_holdout: bool = False, only_holdout: bool = False,
-                 sources: tuple[str, ...] = ("redocred",)):
+                 sources: tuple[str, ...] = ("redocred",), text_modes=None):
         self.tok, self.train = tok, train
+        self.text_modes = tuple(text_modes or TEXT_MODES)
         self.rels = bank["relations"]
         self.rng = np.random.default_rng(seed)
         self.min_labels, self.max_labels = min_labels, max_labels
@@ -80,7 +81,7 @@ class LabelCollator:
         none = (new.sum(1, keepdim=True) == 0).to(new.dtype)
         batch["pair_labels"] = torch.cat([none, new], 1)
         batch["pair_label_mask"] = torch.ones_like(batch["pair_labels"])
-        modes, probs = zip(*TEXT_MODES)
+        modes, probs = zip(*self.text_modes)
         texts = [label_text(self.rels[c], self.rng.choice(modes, p=probs) if self.train
                             else "name_desc", self.rng) for c in cols]
         ids = [self._ids(t) for t in texts]
