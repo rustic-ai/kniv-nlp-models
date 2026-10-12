@@ -442,9 +442,13 @@ def kd_margin_loss(new: torch.Tensor, old: torch.Tensor, cols: torch.Tensor) -> 
     """Distillation from the transplanted head: the new head's margins (each
     listed relation's logit minus the threshold's) pulled toward the old
     head's for the same relations. ``cols`` are the batch's label-bank ids,
-    which for Re-DocRED are the old head's columns minus one."""
-    nm = new[:, 1:] - new[:, :1]
-    om = old[:, 1 + cols] - old[:, :1]
+    which for Re-DocRED are the old head's columns minus one; labels the old
+    head never had (the rest of the bank) are left out."""
+    had = cols < old.size(1) - 1
+    if not bool(had.any()):
+        return new.sum() * 0.0
+    nm = new[:, 1:][:, had] - new[:, :1]
+    om = old[:, 1 + cols[had]] - old[:, :1]
     return F.smooth_l1_loss(nm, om.detach())
 
 

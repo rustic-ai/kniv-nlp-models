@@ -233,7 +233,7 @@ def build_bundles() -> tuple[Path, Path, str]:
     stamp = json.loads((corpus / "MANIFEST.json").read_text()).get("git_sha", "x")[:7]
     # Phase 2 reads the relation entities beside the corpus.
     extra = [p for p in (corpus / "entities_docred.json", corpus / "redocred_rel.json",
-                         corpus / "label_bank.json")
+                         corpus / "label_bank.json", corpus / "kg_teacher.json")
              if p.exists()]
     # Keyed by every bundled side file's size and mtime: a name that ignores
     # one ships a stale copy of it (the Re-DocRED evidence was lost that way).

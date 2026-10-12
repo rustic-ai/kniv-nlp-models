@@ -342,6 +342,9 @@ def main() -> int:
     ap.add_argument("--redocred-train", type=int, default=0, metavar="N",
                     help="add Re-DocRED train, N times per epoch, as relation-only "
                          "supervision; its dev then joins best.pt selection (0 = off)")
+    ap.add_argument("--kg-teacher", type=int, default=0, metavar="N",
+                    help="add the exported teacher windows (kg_teacher.json), N times per "
+                         "epoch, as partial relation supervision (needs --rel-head label)")
     ap.add_argument("--head-weight", action="append", default=[], metavar="HEAD=W",
                     help="fixed weight on a head's scaled loss, e.g. relation=3 to give "
                          "it a larger share of the encoder update (repeatable)")
@@ -425,6 +428,20 @@ def main() -> int:
                   if not args.probe else [])
         print("Re-DocRED: " + ", ".join(f"{k} {v:,}" for k, v in sorted(st.items()))
               + f"; train x{args.redocred_train}", flush=True)
+
+    if args.kg_teacher:
+        if args.rel_head != "label" or not args.phase2:
+            raise SystemExit("--kg-teacher needs --phase2 --rel-head label")
+        from ..kg_teacher import load_export
+        from ..label_bank import load as load_bank
+        from .kdata import teacher_features
+        st, kg_bank = Counter(), load_bank()
+        kg = [f for it, p in load_export()
+              if (f := teacher_features(it, p, tok, spec.max_subwords, kg_bank,
+                                        vocab.size("cls"), st, markers=args.rel_markers))]
+        train = train + kg * args.kg_teacher
+        print("teacher: " + ", ".join(f"{k} {v:,}" for k, v in sorted(st.items()))
+              + f"; train x{args.kg_teacher}", flush=True)
 
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
                     attn_implementation=spec.attn_implementation,

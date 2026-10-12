@@ -281,9 +281,48 @@ def bakeoff(n_docs: int, annotator: str, sampler: SchemaSampler,
     return 0
 
 
+KG_TEACHER = DATA_DIR / "v6-corpus" / "kg_teacher.json"
+
+
+def export(items: list[KGItem], annotator: str, path: Path = KG_TEACHER) -> Counter:
+    """The cached, aligned teacher payloads with what the trainer needs of
+    their items, as one file a VM can read (the cache stays local). Items
+    never annotated, or that failed, are left out and counted."""
+    cache = CacheStore(CACHE, PROMPT_VERSION)
+    out, c = [], Counter()
+    for it in items:
+        rec = cache.get(annotator, "kg", it.id)
+        p = (rec or {}).get("payload")
+        if not isinstance(p, dict) or "stats" not in p:
+            c["missing"] += 1
+            continue
+        c["items"] += 1
+        out.append({"id": it.id, "domain": it.domain, "tokens": it.tokens,
+                    "sentence_spans": it.sentence_spans, "speakers": it.speakers,
+                    "participants": it.participants,
+                    "relations": [r["name"] for r in it.relations],
+                    "types": [t["name"] for t in it.types],
+                    "payload": {k: p[k] for k in ("participants", "entities", "facts")}})
+    path.write_text(json.dumps({"prompt_version": PROMPT_VERSION, "annotator": annotator,
+                                "items": out}))
+    return c
+
+
+def load_export(path: Path = KG_TEACHER) -> list[tuple[KGItem, dict]]:
+    """``(item, payload)`` pairs from ``export``, for ``kdata.teacher_features``."""
+    out = []
+    for r in json.loads(path.read_text())["items"]:
+        out.append((KGItem(id=r["id"], tokens=r["tokens"], sentence_spans=r["sentence_spans"],
+                           speakers=r["speakers"], participants=r["participants"],
+                           types=[{"name": t} for t in r["types"]],
+                           relations=[{"name": n} for n in r["relations"]],
+                           domain=r["domain"]), r["payload"]))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=["pilot", "bakeoff", "run"])
+    ap.add_argument("cmd", choices=["pilot", "bakeoff", "run", "export"])
     ap.add_argument("--windows", type=int, default=500)
     ap.add_argument("--docs", type=int, default=100)
     ap.add_argument("--second", type=float, default=0.3)
@@ -297,6 +336,10 @@ def main() -> int:
     print(f"schema pool: {len(sampler.relations)} relations, {len(sampler.types)} entity types", flush=True)
     if args.cmd == "bakeoff":
         return bakeoff(args.docs, args.annotator, sampler, args.gold_entities)
+    if args.cmd == "export":
+        items = corpus_items(args.windows or None, args.second, sampler)
+        print(dict(export(items, args.annotator)), f"-> {KG_TEACHER}", flush=True)
+        return 0
     items = corpus_items(args.windows if args.cmd == "pilot" else None, args.second, sampler)
     print(f"{len(items)} items over {len({i.id.split(':')[0] for i in items})} windows", flush=True)
     results = asyncio.run(annotate(items, args.annotator, args.cmd))

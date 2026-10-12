@@ -407,12 +407,21 @@ MARKER_MAX_SUBWORDS = 1024
 
 
 def marker_features(tokens: list[str], sentence_spans, entities, tok,
-                    max_subwords: int = MARKER_MAX_SUBWORDS) -> dict:
+                    max_subwords: int = MARKER_MAX_SUBWORDS,
+                    turns: list | None = None, participants: list | None = None) -> dict:
     """ATLOP's input for the relation pass: ``*`` before and after every
     entity mention. ``entities`` holds each entity's ``(start, end_exclusive)``
     mentions in word positions. Returns the subword ids, each mention's start
     marker position (``-1`` past the limit), in ``entities`` order, and each
-    subword's sentence (``-1`` for special tokens)."""
+    subword's sentence (``-1`` for special tokens).
+
+    ``turns`` (``(first word, participant)`` per turn, from
+    ``speaker_turns``) and ``participants`` (the roles, as entities): in a
+    conversation each turn opens with ``* role * :``, so the speaker is a
+    mention the relation head can read ('I like jazz' -> the user likes jazz).
+    The participants' mentions then come first in ``men_pos``, one per turn.
+    Only the marker pass sees the tags; the plain pass and phase 1 are
+    untouched."""
     starts, ends = set(), set()
     for ms in entities:
         for a, b in ms:
@@ -421,7 +430,13 @@ def marker_features(tokens: list[str], sentence_spans, entities, tok,
     for j, (s, e) in enumerate(sentence_spans):
         sent[s:e] = j
     words, wsent, marker_of = [], [], {}
+    turn_at = dict(turns or [])                  # first word of a turn -> participant
+    spk_word: list[list[int]] = [[] for _ in (participants or [])]
     for i, w in enumerate(tokens):
+        if i in turn_at:
+            spk_word[turn_at[i]].append(len(words))
+            words += [MARKER, participants[turn_at[i]], MARKER, ":"]
+            wsent += [sent[i]] * 4
         if i in starts:
             marker_of[i] = len(words)
             words.append(MARKER); wsent.append(sent[i])
@@ -436,7 +451,20 @@ def marker_features(tokens: list[str], sentence_spans, entities, tok,
         tsent[f:end] = sj
     pos = [np.asarray([first[marker_of[int(a)]] if marker_of[int(a)] < limit else -1
                        for a, _ in ms], dtype=np.int64) for ms in entities]
-    return {"ids": np.asarray(ids, dtype=np.int32), "men_pos": pos, "sent_of_tok": tsent}
+    spk = [np.asarray([first[w] if w < limit else -1 for w in ws], dtype=np.int64)
+           for ws in spk_word]
+    return {"ids": np.asarray(ids, dtype=np.int32), "men_pos": spk + pos, "sent_of_tok": tsent}
+
+
+def speaker_turns(sentence_spans, speakers, participants) -> list[tuple[int, int]]:
+    """``(first word, participant index)`` wherever the speaker changes."""
+    out, last = [], None
+    for j, (s, _) in enumerate(sentence_spans):
+        who = speakers[j] if speakers and j < len(speakers) else None
+        if who and who != last and who in participants:
+            out.append((s, participants.index(who)))
+        last = who
+    return out
 
 
 # ── phase 2: Re-DocRED as relation supervision ──────────────────────
@@ -722,7 +750,7 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
             eb.append(b); et.append(int(r["types"][k]))
             for a, z in spans:
                 me.append(ent_base + k); ms.append(int(a)); mx.append(int(z))
-        n_rel = n_rel or x["_n_rel"]
+        n_rel = max(n_rel or 0, x["_n_rel"])  # teacher items index the whole label bank
         lab = {}
         for h, tl, k in r["triples"]:
             lab.setdefault((int(h), int(tl)), set()).add(int(k))
@@ -752,6 +780,14 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
         else:
             labels[i, 0] = 1.0
     out["pair_labels"] = labels
+    if any(x.get("rel") is not None and "schema" in x["rel"] for x in items):
+        # Per item: the label-bank ids it was annotated against (None: its
+        # source's whole label set) and whether its labels are partial. The
+        # label collator turns these into the loss mask and pops them.
+        out["rel_schemas"] = [x["rel"].get("schema") if x.get("rel") is not None else None
+                              for x in items]
+        out["rel_partial"] = [bool(x["rel"].get("partial")) if x.get("rel") is not None else False
+                              for x in items]
     # Evidence: a distribution over the window's sentences per pair, uniform
     # over the annotated ones; rows without evidence are not supervised.
     target = torch.zeros(len(pev), S_max)

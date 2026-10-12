@@ -135,6 +135,68 @@ def main() -> int:
     with torch.no_grad():
         B_.pos.weight[0, 0] += 1e-3
     check("--assert-frozen notices a changed frozen tensor", _frozen_digest(B_) != d0)
+    # 7. teacher windows: speaker tags, schema masks, partial labels
+    from ..annotate.kg import KGItem
+    from ..windows import tokenize
+    from .kdata import teacher_features
+    sents = [tokenize(x) for x in ("I moved to Lisbon last year .", "Nice , Portugal suits you .",
+                                   "My sister Ana lives in Porto .")]
+    toks = sum(sents, [])
+    spans, o_ = [], 0
+    for x in sents:
+        spans.append([o_, o_ + len(x)]); o_ += len(x)
+    rel = {r["name"]: r for r in bank["relations"] if r["source"] == "redocred"}
+    names = ["residence", "country", "sibling", "located in the administrative territorial entity"]
+    item = KGItem(id="t", tokens=toks, sentence_spans=spans, speakers=["user", "assistant", "user"],
+                  participants=["user", "assistant"], types=[],
+                  relations=[{"name": n, "description": ""} for n in names])
+    payload = {"participants": ["user", "assistant"],
+               "entities": [{"type": "LOC", "spans": [[3, 4]]}, {"type": "LOC", "spans": [[9, 10]]},
+                            {"type": "PER", "spans": [[15, 16]]}, {"type": "LOC", "spans": [[18, 19]]}],
+               "facts": [{"head": 0, "tail": 2, "relation": "residence", "polarity": "positive",
+                          "modality": "asserted", "holder": 0, "time": -1, "evidence": [0]},
+                         {"head": 4, "tail": 5, "relation": "residence", "polarity": "positive",
+                          "modality": "asserted", "holder": 0, "time": -1, "evidence": [2]}]}
+    tf = teacher_features(item, payload, tok, spec.max_subwords, bank, vocab.size("cls"))
+    rm = tf["rm"]
+    star = tok.convert_tokens_to_ids("▁*")
+    part_ok = all(int(rm["ids"][p]) == star for ms in rm["men_pos"][:2] for p in ms) \
+        and [len(x) for x in rm["men_pos"][:2]] == [2, 1]
+    check("speaker tags are marker mentions of the participants", part_ok,
+          " ".join(tok.convert_ids_to_tokens(rm["ids"][:8].tolist())))
+    check("teacher facts become bank-id triples", tf["rel"]["triples"] ==
+          [(0, 2, rel["residence"]["id"]), (4, 5, rel["residence"]["id"])])
+    tcoll = LabelCollator(tok, bank, train=True, seed=3, unlabelled_keep=1.0, min_labels=200)
+    mixed = collate(feats[:2] + [tf], tok.pad_token_id)
+    old = mixed["pair_labels"].clone()
+    mo = tcoll(dict(mixed))
+    cols = mo["rel_label_cols"].tolist()
+    tsel = mo["pair_batch"] == 2
+    sch = {rel[n]["id"] for n in names}
+    want = torch.tensor([1.0] + [float(c in sch) for c in cols])
+    check("teacher pairs see only their schema's columns",
+          bool((mo["pair_label_mask"][tsel] == want).all()))
+    rd = {r["id"] for r in bank["relations"] if r["source"] == "redocred"}
+    want_rd = torch.tensor([1.0] + [float(c in rd) for c in cols])
+    check("Re-DocRED pairs see only Re-DocRED columns",
+          bool((mo["pair_label_mask"][~tsel] == want_rd).all()))
+    check("teacher positives survive collation", int(mo["pair_labels"][tsel, 1:].sum()) == 2)
+    # a schema sample without 'residence': its positive pairs are masked whole
+    tcoll2 = LabelCollator(tok, bank, train=True, seed=3, unlabelled_keep=1.0)
+    tcoll2.columns = lambda pool: torch.as_tensor(sorted(sch - {rel["residence"]["id"]})).numpy()
+    m2 = tcoll2(dict(collate([tf], tok.pad_token_id)))
+    pos_rows = old[mixed["pair_batch"] == 2][:, 1:].sum(1) > 0
+    check("a pair whose teacher positive fell outside the columns is masked whole",
+          bool((m2["pair_label_mask"][pos_rows] == 0).all())
+          and bool((m2["pair_label_mask"][~pos_rows] != 0).any()))
+    tcoll3 = LabelCollator(tok, bank, train=True, seed=3, unlabelled_keep=0.0)
+    m3 = tcoll3(dict(collate([tf], tok.pad_token_id)))
+    check("unlabelled_keep 0 masks every unlabelled teacher pair",
+          int((m3["pair_label_mask"].sum(1) > 0).sum()) == 2)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        L = losses(B_(mo, relation_only=True), mo)
+    check("mixed Re-DocRED + teacher batch trains", all(torch.isfinite(l) for l, _ in L.values()),
+          ", ".join(f"{k} {l.item():.3f}" for k, (l, _) in L.items()))
     print("all knowledge-layer smoke checks passed")
     return 0
 
