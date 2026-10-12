@@ -29,6 +29,7 @@ import asyncio
 import hashlib
 import json
 from collections import Counter, defaultdict
+from pathlib import Path
 
 import numpy as np
 
@@ -40,7 +41,8 @@ from .prompts import PROMPT_VERSION
 
 GENERAL = DATA_DIR / "v6-corpus" / "general_relations.json"
 SPEAKERS = DATA_DIR / "v6-corpus" / "speakers.json"
-CACHE = RUNS_DIR / "_cache"
+import os
+CACHE = Path(os.environ["KG_CACHE"]) if os.environ.get("KG_CACHE") else RUNS_DIR / "_cache"
 WIKI_DOMAINS = {"encyclopedic", "news", "business", "narrative"}
 
 

@@ -46,17 +46,24 @@ def _norm(t: str) -> str:
 
 def align_mention(tokens: list[str], span: list[int], text: str, taken: set) -> tuple[int, int] | None:
     """The first unused occurrence of ``text`` (tokenised the corpus's way)
-    inside the sentence ``span``, as window-absolute ``(start, end_excl)``."""
+    inside the sentence ``span``, as window-absolute ``(start, end_excl)``.
+
+    Both sides are compared without their punctuation-only tokens -- the
+    corpus writes '2:55' as '2 : 55' and 'U.S.' as 'U . S .', and a teacher
+    copying either form must still match -- and the match is mapped back to
+    the sentence's own token positions."""
     from ..windows import tokenize
-    want = [_norm(x) for x in tokenize(text) if _norm(x)]
+    want = [w for w in (_norm(x) for x in tokenize(text)) if w]
     if not want:
         return None
     s0, e0 = span
-    sent = [_norm(t) for t in tokens[s0:e0]]
+    kept = [(s0 + i, w) for i, w in enumerate(_norm(t) for t in tokens[s0:e0]) if w]
     n = len(want)
-    for i in range(len(sent) - n + 1):
-        if sent[i:i + n] == want and (s0 + i, s0 + i + n) not in taken:
-            return s0 + i, s0 + i + n
+    for i in range(len(kept) - n + 1):
+        if [w for _, w in kept[i:i + n]] == want:
+            sp = (kept[i][0], kept[i + n - 1][0] + 1)
+            if sp not in taken:
+                return sp
     return None
 
 
@@ -71,6 +78,7 @@ def validate_kg(payload, item: KGItem):
     rels = {r["name"] for r in item.relations}
     ents, idmap, taken = [], {}, set()
     n_men = n_ok = 0
+    misses = []
     for e in payload.get("entities") or []:
         if not isinstance(e, dict) or e.get("type") not in types:
             continue
@@ -86,6 +94,10 @@ def validate_kg(payload, item: KGItem):
             sp = align_mention(item.tokens, item.sentence_spans[j], str(m.get("text", "")), taken)
             if sp:
                 taken.add(sp); spans.append(list(sp)); n_ok += 1
+            elif len(misses) < 8:
+                s0, e0 = item.sentence_spans[j]
+                misses.append({"text": str(m.get("text", "")),
+                               "sentence": " ".join(item.tokens[s0:e0])[:300]})
         if spans:
             try:
                 idmap[int(e["id"])] = k + len(ents)
@@ -128,7 +140,7 @@ def validate_kg(payload, item: KGItem):
                                 if isinstance(x, int) and 1 <= x <= n_sent}),
         })
     out = {"entities": ents, "facts": facts, "participants": item.participants,
-           "stats": {"mentions": n_men, "aligned": n_ok}}
+           "stats": {"mentions": n_men, "aligned": n_ok, "misses": misses}}
     return out, None, None
 
 
