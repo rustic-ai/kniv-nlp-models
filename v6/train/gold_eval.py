@@ -477,12 +477,14 @@ def schema_embeddings(model, tok, device, cols: list[int] | None = None):
 
 
 @torch.no_grad()
-def run_phase2(model, feats: list[dict], tok, device, batch: int = 4) -> list[dict]:
+def run_phase2(model, feats: list[dict], tok, device, batch: int = 4,
+               cols: list[int] | None = None) -> list[dict]:
     """Per window: predicted coref clusters (inclusive word spans), relation
     logits per ordered entity pair, and NER log-probabilities."""
     order = sorted(range(len(feats)), key=lambda i: len(feats[i]["input_ids"]))
     out: list[dict | None] = [None] * len(feats)
-    label_emb = schema_embeddings(model, tok, device) if model.rel_kind == "label" else None
+    label_emb = (schema_embeddings(model, tok, device, cols) if model.rel_kind == "label"
+                 else None)
     for k in range(0, len(order), batch):
         idx = order[k:k + batch]
         b = {n: v.to(device) for n, v in collate([feats[i] for i in idx],
@@ -666,10 +668,60 @@ def eval_redocred(model, tok, spec, vocab, device, limit) -> dict:
                                      "rel_e2e_f1": "f1", "rel_e2e_docs": "acc"}}
 
 
+def eval_fewrel(model, tok, spec, vocab, device, limit, per_relation: int = 100) -> dict:
+    """FewRel validation (MIT), relation classification read from label texts.
+
+    Each sentence has one head and one tail entity; the model scores the
+    head->tail pair against the candidate relations' names and descriptions
+    and the highest-scoring one is its answer (the threshold class is not
+    consulted: FewRel always holds one of the candidates).
+
+    ``fewrel_zs8``: the 8 validation relations no training source has, 8-way
+    -- true zero-shot. ``fewrel_all16``: all 16, 16-way; 8 of them are
+    Re-DocRED relations the head was trained on. Bilinear-head checkpoints
+    have no label texts to read and are skipped.
+    """
+    from ..gold import fewrel
+    from ..label_bank import load as load_bank
+    rels = load_bank()["relations"]
+    val = [r for r in rels if r.get("fewrel") == "val"]
+    unseen = [r for r in val if not r.get("train", True)]
+    by_code = {r["code"]: r["id"] for r in val}
+    items = []
+    per = defaultdict(int)
+    for x in fewrel.load("val"):
+        if per[x["code"]] >= (limit or per_relation):
+            continue
+        per[x["code"]] += 1
+        items.append(x)
+    rows = []
+    for name, cand in (("fewrel_all16", val), ("fewrel_zs8", unseen)):
+        cols = [r["id"] for r in cand]
+        col_of = {c: j for j, c in enumerate(cols)}
+        its = [x for x in items if by_code[x["code"]] in col_of]
+        feats = [phase2_window(x["tokens"], [(0, len(x["tokens"]))], tok, spec, vocab,
+                               [x["head"], x["tail"]], markers=model.rel_markers) for x in its]
+        outs = run_phase2(model, feats, tok, device, batch=8, cols=cols)
+        for k, (x, o) in enumerate(zip(its, outs)):
+            lg = o["relation"]
+            ok = 0
+            if len(lg):                          # pair 0 is head -> tail
+                ok = int(int(lg[0][1:].argmax()) == col_of[by_code[x["code"]]])
+            while len(rows) <= k:
+                rows.append({})
+            rows[k][name] = [ok, 1]
+    for r in rows:
+        r.setdefault("fewrel_all16", [0, 0]); r.setdefault("fewrel_zs8", [0, 0])
+    return {"items": rows, "kinds": {"fewrel_all16": "acc", "fewrel_zs8": "acc"}}
+
+
 BENCHMARKS = {"ud": eval_ud, "srl": eval_srl, "srl_full": eval_srl_full,
               "ner": eval_ner, "cls": eval_cls,
-              "litbank": eval_litbank, "redocred": eval_redocred}
-PHASE2_BENCHMARKS = ("litbank", "redocred")
+              "litbank": eval_litbank, "redocred": eval_redocred,
+              "fewrel": eval_fewrel}
+PHASE2_BENCHMARKS = ("litbank", "redocred", "fewrel")
+# Benchmarks that read label texts: only for label-conditioned heads.
+LABEL_BENCHMARKS = ("fewrel",)
 
 
 # ── aggregation and the bootstrap ───────────────────────────────────
@@ -728,7 +780,9 @@ REPORTED = [("ud", "pos", "POS acc"), ("ud", "lemma", "lemma acc"),
             ("redocred", "rel_f1_cal", "same, threshold calibrated on Re-DocRED dev"),
             ("redocred", "rel_e2e_f1", "relation triple-F1, own entities (relaxed)"),
             ("redocred", "rel_reach", "relation gold triples inside the window"),
-            ("redocred", "ent_mention_f1", "entity mentions, exact span (the e2e entities)")]
+            ("redocred", "ent_mention_f1", "entity mentions, exact span (the e2e entities)"),
+            ("fewrel", "fewrel_zs8", "FewRel val, 8 never-trained relations (zero-shot acc)"),
+            ("fewrel", "fewrel_all16", "FewRel val, all 16 relations (acc)")]
 # v5 from DECISIONS.md; its SRL split from its cached bake-off predictions on
 # the same items (EVALUATION.md).
 V5 = {"pos": 0.987, "uas": 0.949, "las": 0.925, "ner_f1": 0.889, "srl_f1": 0.843,
@@ -802,6 +856,8 @@ def main() -> int:
         for bench in args.benchmarks.split(","):
             if bench in PHASE2_BENCHMARKS and not model.phase2:
                 continue                    # no coref or relation heads
+            if bench in LABEL_BENCHMARKS and getattr(model, "rel_kind", "bilinear") != "label":
+                continue                    # no label texts to read
             t1 = time.time()
             lim = args.limit if bench != "cls" else (args.limit or args.cls_limit or None)
             r = BENCHMARKS[bench](model, tok, spec, vocab, device, lim)
