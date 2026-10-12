@@ -135,6 +135,25 @@ def validate_payload(layer: str, payload: object, n: int,
                 seen.add(k.lower()); out.append(k)
         return out, None, None
 
+    if layer == "bankmerge":
+        if not isinstance(payload, list) or not payload:
+            return None, "relations is empty or not a list", "parse"
+        out, seen = [], set()
+        for i, r in enumerate(payload):
+            if not isinstance(r, dict) or not str(r.get("name", "")).strip():
+                return None, f"relation {i} has no name", "parse"
+            name = " ".join(str(r["name"]).lower().split())
+            if name in seen:
+                continue
+            seen.add(name)
+            out.append({"name": name, "description": str(r.get("description", "")).strip(),
+                        "aliases": [str(a).strip() for a in r.get("aliases", []) if str(a).strip()],
+                        "head_type": str(r.get("head_type", "")).strip(),
+                        "tail_type": str(r.get("tail_type", "")).strip(),
+                        "category": str(r.get("category", "")).strip(),
+                        "inverse": str(r.get("inverse", "")).strip().lower()})
+        return out, None, None
+
     if layer == "discover":
         if not isinstance(payload, list):
             return None, "relations is not a list", "parse"

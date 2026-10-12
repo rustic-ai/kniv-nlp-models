@@ -243,7 +243,37 @@ DISCOVER_SCHEMA = _envelope("relation_discovery", {
 })
 
 
+BANKMERGE_SCHEMA = _envelope("relation_inventory", {
+    "relations": _array_of(
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "canonical lowercase name, read head to tail"},
+                "description": {"type": "string", "description": "one-sentence general definition"},
+                "aliases": {"type": "array", "items": {"type": "string"},
+                            "description": "proposed names merged into this one"},
+                "head_type": {"type": "string"},
+                "tail_type": {"type": "string"},
+                "category": {"type": "string",
+                             "description": "one of: person, social, organization, location, "
+                                            "creative work, event, technical, business, "
+                                            "preference and opinion, temporal, quantity, "
+                                            "causal, part and type, other"},
+                "inverse": {"type": "string",
+                            "description": "name of this relation's inverse if it is also in the "
+                                           "inventory, else empty"},
+            },
+            "required": ["name", "description", "aliases", "head_type", "tail_type",
+                         "category", "inverse"],
+            "additionalProperties": False,
+        },
+        "The consolidated inventory.",
+    ),
+})
+
+
 SCHEMAS = {
+    "bankmerge": BANKMERGE_SCHEMA,
     "discover": DISCOVER_SCHEMA,
     "cls": CLS_SCHEMA,
     "sentiment": SENTIMENT_SCHEMA,
@@ -264,7 +294,7 @@ PAYLOAD_KEY = {
     "pos": "tags", "lemma": "lemmas", "morph": "feats",
     "dep": "arcs", "srl": "tags", "rel": "triples",
     "cls": "labels", "sentiment": "sentiment", "keywords": "keywords",
-    "discover": "relations",
+    "discover": "relations", "bankmerge": "relations",
 }
 
 

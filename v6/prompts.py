@@ -192,6 +192,31 @@ SYSTEM["discover"] = (
 )
 
 
+SYSTEM["bankmerge"] = (
+    "You are consolidating a relation inventory for a general-purpose "
+    "information-extraction model. You will receive relation names that a "
+    "reader proposed while reading passages from six domains (conversation, "
+    "news, technical, business, fiction, encyclopedia), each with how often "
+    "it was proposed, in which domains, and one proposed definition.\n\n"
+    "Produce a consolidated inventory of roughly 150 to 250 relations:\n"
+    "- Merge synonyms and near-synonyms into one relation; list the merged "
+    "names as aliases. Keep relations distinct when a user would want to "
+    "tell them apart (employed by vs founded).\n"
+    "- Keep relations general and reusable across documents; drop ones that "
+    "are one-off, too vague ('related to', 'associated with'), purely "
+    "grammatical, or that describe the text rather than the world.\n"
+    "- Prefer relations proposed often or in several domains, but keep a rare "
+    "one if it is clearly general and useful (kinship, ownership, dependency).\n"
+    "- Name each as a short lowercase phrase read from head to tail. Write a "
+    "one-sentence general definition that would let a reader decide whether "
+    "the relation holds. Give typical head and tail entity kinds, a category, "
+    "and its inverse's name when the inverse is also in the inventory.\n"
+    "- Cover every domain: people and their relationships, preferences and "
+    "opinions, organizations, places, creative works, events, software and "
+    "technical systems, business and finance, causes and effects."
+)
+
+
 def render_tokens(tokens: list[str]) -> str:
     return "\n".join(f"{i + 1}\t{t}" for i, t in enumerate(tokens))
 
@@ -222,6 +247,8 @@ def user_message(layer: str, tokens: list[str],
         return "\n".join(parts)
     if layer == "keywords":
         return f"Passage:\n{' '.join(tokens)}\n\nReturn its salient terms."
+    if layer == "bankmerge":
+        return f"Proposed relations (name | count | domains | definition):\n{target}"
     if layer == "discover":
         head = f"Domain: {context}\n\n" if context else ""
         return f"{head}Passage:\n{target or ' '.join(tokens)}\n\nList the relation types it expresses."

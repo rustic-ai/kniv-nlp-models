@@ -30,6 +30,8 @@ from .config import DATA_DIR, RUNS_DIR, load_annotators
 from .prompts import PROMPT_VERSION
 
 OUT = DATA_DIR / "v6-corpus" / "label_discovery.json"
+GENERAL = DATA_DIR / "v6-corpus" / "general_relations.json"
+REVIEW = DATA_DIR.parent / "v6" / "LABEL_BANK_REVIEW.md"
 SPEAKERS = DATA_DIR / "v6-corpus" / "speakers.json"
 CACHE = RUNS_DIR / "_cache"
 
@@ -111,11 +113,70 @@ def aggregate(results, domain_of: dict) -> dict:
             "windows": len(results), "ok": sum(r.ok for r in results)}
 
 
+def merge(annotator: str, min_count: int, max_names: int) -> int:
+    """Consolidate the discovered names into a candidate general inventory,
+    and write it out for review."""
+    agg = json.loads(OUT.read_text())
+    names = [x for x in agg["names"] if x["count"] >= min_count][:max_names]
+    table = "\n".join(f"{x['name']} | {x['count']} | "
+                      f"{', '.join(sorted(x['domains']))} | {x['descriptions'][0] if x['descriptions'] else ''}"
+                      for x in names)
+    key = hashlib.sha1(table.encode()).hexdigest()[:12]
+    item = Item(id=f"bankmerge-{key}", tokens=["-"], target=table)
+    spec = load_annotators([annotator])[annotator]
+    ann = LLMAnnotator(spec, CacheStore(CACHE, PROMPT_VERSION))
+    res = asyncio.run(ann.annotate_and_cache("bankmerge", item))
+    if not res.ok:
+        raise SystemExit(f"merge failed: {res.error}")
+    support = {x["name"]: x for x in agg["names"]}
+    rels = res.payload
+    for r in rels:
+        doms, cnt = Counter(), 0
+        for a in [r["name"]] + r["aliases"]:
+            x = support.get(a.lower())
+            if x:
+                cnt += x["count"]
+                doms.update(x["domains"])
+        r["support"] = cnt
+        r["domains"] = dict(doms)
+    GENERAL.write_text(json.dumps({"from": f"{len(names)} discovered names (count >= {min_count})",
+                                   "relations": rels}, indent=1))
+    by_cat: dict[str, list] = defaultdict(list)
+    for r in rels:
+        by_cat[r["category"] or "other"].append(r)
+    lines = ["# General relation bank: candidates for review", "",
+             f"Consolidated by the teacher ({annotator}) from {len(names)} relation names it "
+             f"proposed on {agg['ok']} training windows (250 per domain; names proposed at "
+             f"least {min_count} times). **Support** = how often the name or its aliases were "
+             "proposed; **domains** = where.", "",
+             "Review: strike relations that should not be taught, fix names or definitions, "
+             "add missing ones. The approved list joins the label bank (`v6/label_bank.py`).", ""]
+    for cat in sorted(by_cat):
+        lines += [f"## {cat} ({len(by_cat[cat])})", "",
+                  "| relation | definition | head → tail | support | domains | aliases |",
+                  "|---|---|---|---|---|---|"]
+        for r in sorted(by_cat[cat], key=lambda r: -r["support"]):
+            lines.append(f"| {r['name']} | {r['description']} | {r['head_type']} → {r['tail_type']} | "
+                         f"{r['support']} | {', '.join(sorted(r['domains']))} | "
+                         f"{', '.join(r['aliases'][:5])} |")
+        lines.append("")
+    REVIEW.write_text("\n".join(lines))
+    print(f"{len(rels)} consolidated relations in {len(by_cat)} categories; "
+          f"wrote {GENERAL} and {REVIEW}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--per-domain", type=int, default=250)
     ap.add_argument("--annotator", default="astra")
+    ap.add_argument("--merge", action="store_true",
+                    help="consolidate an existing discovery into a reviewable inventory")
+    ap.add_argument("--min-count", type=int, default=2)
+    ap.add_argument("--max-names", type=int, default=1500)
     args = ap.parse_args()
+    if args.merge:
+        return merge(args.annotator, args.min_count, args.max_names)
     speakers = json.loads(SPEAKERS.read_text()) if SPEAKERS.exists() else {}
     rows = sample(args.per_domain)
     items = [Item(id=r["window_id"], tokens=r["tokens"], context=r["domain"],
