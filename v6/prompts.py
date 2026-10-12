@@ -217,6 +217,54 @@ SYSTEM["bankmerge"] = (
 )
 
 
+SYSTEM["kg"] = (
+    "You extract knowledge from text for a general-purpose information-"
+    "extraction model. You are given a passage, split into numbered "
+    "sentences, and a schema: the entity types and relations to extract, "
+    "each with a definition. Extract only what the schema lists.\n\n"
+    "ENTITIES. Find every entity of a listed type. One entity per real-world "
+    "referent: merge all the mentions of the same thing. For each mention give "
+    "its sentence number and the text exactly as it is written there. Include "
+    "names and descriptive phrases ('the company', 'my sister'); do NOT list "
+    "pronouns as mentions. If participants are listed, they are already "
+    "entities 0..k-1: do not repeat them; number your entities from k.\n\n"
+    "FACTS. Extract every listed relation the text states or clearly implies "
+    "between two entities, head to tail as the relation's definition reads. "
+    "Be exhaustive within the schema, but never add what the text does not "
+    "support. A participant may be a head or tail ('I love jazz' -> the "
+    "speaker likes jazz). For each fact:\n"
+    "- polarity: negative if the text says the relation does NOT hold "
+    "('I don't eat meat'), else positive.\n"
+    "- modality: asserted (stated as true), hypothetical (if/would/might), "
+    "planned (intended or scheduled), desired (wished or wanted), questioned "
+    "(asked about), reported (someone else is said to claim it).\n"
+    "- holder: the entity whose claim or belief it is -- the speaker in a "
+    "conversation, the quoted source in reported speech -- or -1 for the "
+    "author or narrator.\n"
+    "- time: the id of the time entity the fact is anchored to, or -1.\n"
+    "- evidence: the sentence numbers that support it."
+)
+
+
+def kg_user_message(sentences: list[str], speakers: list[str | None] | None,
+                    participants: list[str], types: list[dict], relations: list[dict]) -> str:
+    """One window for the ``kg`` layer: numbered sentences (with speakers in a
+    conversation), the participants, and the schema with definitions."""
+    lines = ["Entity types:"]
+    lines += [f"- {t['name']}: {t['description']}" for t in types]
+    lines += ["", "Relations (head -> tail):"]
+    lines += [f"- {r['name']}: {r['description']}" for r in relations]
+    if participants:
+        lines += ["", "Participants (already entities):"]
+        lines += [f"{i}\t{p}" for i, p in enumerate(participants)]
+    lines += ["", "Passage:"]
+    for j, sent in enumerate(sentences):
+        who = f"[{speakers[j]}] " if speakers and speakers[j] else ""
+        lines.append(f"{j + 1}\t{who}{sent}")
+    lines += ["", f"Entity ids you add start at {len(participants)}."]
+    return "\n".join(lines)
+
+
 def render_tokens(tokens: list[str]) -> str:
     return "\n".join(f"{i + 1}\t{t}" for i, t in enumerate(tokens))
 

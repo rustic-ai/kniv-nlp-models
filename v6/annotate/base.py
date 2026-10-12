@@ -135,6 +135,13 @@ def validate_payload(layer: str, payload: object, n: int,
                 seen.add(k.lower()); out.append(k)
         return out, None, None
 
+    if layer == "kg":
+        from .kg import current_item, validate_kg
+        item = current_item()
+        if item is None:
+            return None, "kg validation needs its item (annotate through KGAnnotator)", "parse"
+        return validate_kg(payload, item)
+
     if layer == "bankmerge":
         if not isinstance(payload, list) or not payload:
             return None, "relations is empty or not a list", "parse"

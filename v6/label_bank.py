@@ -32,7 +32,7 @@ from pathlib import Path
 from .config import DATA_DIR
 
 BANK_PATH = DATA_DIR / "v6-corpus" / "label_bank.json"
-VERSION = 2
+VERSION = 3
 N_HOLDOUT = 20
 
 # DocRED's coarse entity types, described for the label pass.
@@ -92,6 +92,14 @@ def build() -> dict:
               "code": code, "mergeable": code in ("PER", "ORG", "LOC", "MISC"),
               "temporal": code == "TIME"}
              for i, (code, (name, desc)) in enumerate(DOCRED_TYPES.items())]
+    # Few-NERD's 66 fine types (named entities: mergeable by surface form).
+    from .gold import fewnerd
+    for code in fewnerd.fine_types():
+        name, desc = fewnerd.type_text(code)
+        types.append({"id": len(types), "name": name, "description": desc, "aliases": [],
+                      "source": "fewnerd", "code": code, "mergeable": True, "temporal": False})
+    if len({t["name"] for t in types}) != len(types):
+        raise RuntimeError("two entity types share a name")
     bank = {"version": VERSION, "relations": relations, "entity_types": types}
     bank["hash"] = hashlib.sha1(json.dumps(bank, sort_keys=True).encode()).hexdigest()[:12]
     return bank

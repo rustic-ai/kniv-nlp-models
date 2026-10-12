@@ -272,7 +272,65 @@ BANKMERGE_SCHEMA = _envelope("relation_inventory", {
 })
 
 
+MODALITIES = ["asserted", "hypothetical", "planned", "desired", "questioned", "reported"]
+POLARITIES = ["positive", "negative"]
+
+
+def kg_schema(type_names: list[str], relation_names: list[str]) -> dict:
+    """The knowledge layer's teacher schema for one window: its sampled entity
+    types and relations are enums, so the teacher cannot answer outside the
+    schema it was given."""
+    inner = {
+        "entities": _array_of(
+            {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer", "description": "this entity's id, numbered on from the participants"},
+                    "type": {"type": "string", "enum": type_names},
+                    "mentions": {"type": "array", "items": {
+                        "type": "object",
+                        "properties": {
+                            "sentence": {"type": "integer", "description": "1-based sentence number"},
+                            "text": {"type": "string", "description": "the mention exactly as written"},
+                        },
+                        "required": ["sentence", "text"], "additionalProperties": False}},
+                },
+                "required": ["id", "type", "mentions"], "additionalProperties": False,
+            },
+            "Every entity of the listed types, with every naming or describing mention (not pronouns).",
+        ),
+        "facts": _array_of(
+            {
+                "type": "object",
+                "properties": {
+                    "head": {"type": "integer"},
+                    "relation": {"type": "string", "enum": relation_names},
+                    "tail": {"type": "integer"},
+                    "polarity": {"type": "string", "enum": POLARITIES},
+                    "modality": {"type": "string", "enum": MODALITIES},
+                    "holder": {"type": "integer",
+                               "description": "entity id of who asserts or believes it; -1 for the author or narrator"},
+                    "time": {"type": "integer",
+                             "description": "id of the time entity it holds at, or -1"},
+                    "evidence": {"type": "array", "items": {"type": "integer"},
+                                 "description": "1-based numbers of the sentences that support it"},
+                },
+                "required": ["head", "relation", "tail", "polarity", "modality", "holder",
+                             "time", "evidence"],
+                "additionalProperties": False,
+            },
+            "Every listed relation the text states between two entities.",
+        ),
+    }
+    return _envelope("knowledge", {"knowledge": {
+        "type": "object", "properties": inner, "required": list(inner),
+        "additionalProperties": False}})
+
+
 SCHEMAS = {
+    # The real kg schema is built per window (annotate/kg.py); this default
+    # only lets the shared request builder start before it is replaced.
+    "kg": kg_schema(["entity"], ["related to"]),
     "bankmerge": BANKMERGE_SCHEMA,
     "discover": DISCOVER_SCHEMA,
     "cls": CLS_SCHEMA,
@@ -294,7 +352,7 @@ PAYLOAD_KEY = {
     "pos": "tags", "lemma": "lemmas", "morph": "feats",
     "dep": "arcs", "srl": "tags", "rel": "triples",
     "cls": "labels", "sentiment": "sentiment", "keywords": "keywords",
-    "discover": "relations", "bankmerge": "relations",
+    "discover": "relations", "bankmerge": "relations", "kg": "knowledge",
 }
 
 
