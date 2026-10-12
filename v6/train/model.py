@@ -330,11 +330,11 @@ class MarkerRelationHead(nn.Module):
             sel = batch["pair_batch"] == b
             ht = (e_att[batch["pair_h"][sel]] * e_att[batch["pair_t"][sel]]).mean(1)   # [Pb,T]
             ht = ht / (ht.sum(1, keepdim=True) + 1e-5)
-            rs[sel] = ht @ seq[b]
+            rs[sel] = (ht @ seq[b]).to(rs.dtype)            # autocast returns bf16
             if evid and batch["pair_ev_ok"][sel].any():
                 ts_ = batch["rm_sent_of_tok"][b]
                 onehot = F.one_hot(ts_.clamp(min=0), S).float() * (ts_ >= 0).unsqueeze(-1)
-                sent_att[sel] = ht @ onehot
+                sent_att[sel] = (ht @ onehot).to(sent_att.dtype)
         zs = torch.tanh(self.head_extractor(torch.cat([hs, rs], -1)))
         zo = torch.tanh(self.tail_extractor(torch.cat([ts, rs], -1)))
         P = zs.size(0)
