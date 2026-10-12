@@ -218,7 +218,33 @@ def rel_schema(names: list[str]) -> dict:
     })
 
 
+DISCOVER_SCHEMA = _envelope("relation_discovery", {
+    "relations": _array_of(
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string",
+                         "description": "short, reusable relation name, lowercase "
+                                        "(e.g. 'works for', 'located in', 'depends on')"},
+                "description": {"type": "string",
+                                "description": "one sentence defining the relation in general terms"},
+                "head_type": {"type": "string", "description": "kind of entity at the head"},
+                "tail_type": {"type": "string", "description": "kind of entity at the tail"},
+                "example": {"type": "string",
+                            "description": "the head and tail as they appear in this passage, "
+                                           "as 'head -> tail'"},
+            },
+            "required": ["name", "description", "head_type", "tail_type", "example"],
+            "additionalProperties": False,
+        },
+        "The general types of relation between entities that this passage "
+        "expresses. At most 15.",
+    ),
+})
+
+
 SCHEMAS = {
+    "discover": DISCOVER_SCHEMA,
     "cls": CLS_SCHEMA,
     "sentiment": SENTIMENT_SCHEMA,
     "keywords": KEYWORDS_SCHEMA,
@@ -238,6 +264,7 @@ PAYLOAD_KEY = {
     "pos": "tags", "lemma": "lemmas", "morph": "feats",
     "dep": "arcs", "srl": "tags", "rel": "triples",
     "cls": "labels", "sentiment": "sentiment", "keywords": "keywords",
+    "discover": "relations",
 }
 
 

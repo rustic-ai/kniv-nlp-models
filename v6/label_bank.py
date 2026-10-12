@@ -11,8 +11,10 @@ ability.
 
 Ids are stable and append-only. Relations ``0..95`` are Re-DocRED's in the
 vocabulary's order, so ``pair_labels`` built from the vocabulary index the
-bank directly. Later sources (FewRel, the general bank, the teacher's
-schemas) append.
+bank directly. Then FewRel's training relations Re-DocRED lacks, then
+FewRel's validation relations no training source has -- those carry
+``train: false`` and are only ever evaluated (true zero-shot). Later sources
+(the general bank, the teacher's schemas) append.
 
 ``holdout``: a fixed set of 20 Re-DocRED relations, chosen once by hash
 among those with at least 20 test and 10 dev triples. They are excluded from
@@ -30,7 +32,7 @@ from pathlib import Path
 from .config import DATA_DIR
 
 BANK_PATH = DATA_DIR / "v6-corpus" / "label_bank.json"
-VERSION = 1
+VERSION = 2
 N_HOLDOUT = 20
 
 # DocRED's coarse entity types, described for the label pass.
@@ -60,6 +62,8 @@ def build() -> dict:
             for lab in d["labels"]:
                 counts[(sp, lab["r"])] += 1
     held = set(_holdout(sorted(by_name.values()), counts))
+    from .gold import fewrel
+    fr_train, fr_val = fewrel.codes("train"), fewrel.codes("val")
     relations = []
     for i, name in enumerate(names):            # vocabulary order: id == vocab index
         code = by_name[name]
@@ -69,7 +73,21 @@ def build() -> dict:
             aliases = [wd["label"]] + aliases
         relations.append({"id": i, "name": name, "description": wd["description"],
                           "aliases": aliases, "source": "redocred", "code": code,
-                          "holdout": code in held})
+                          "holdout": code in held, "train": True,
+                          "fewrel": "train" if code in fr_train else
+                                    "val" if code in fr_val else None})
+    have = {r["code"] for r in relations}
+    extra = [(c, "train") for c in fr_train if c not in have] + \
+            [(c, "val") for c in fr_val if c not in have]
+    finfo = resolve_relation_info([c for c, _ in extra])
+    for code, split in extra:
+        wd = finfo[code]
+        relations.append({"id": len(relations), "name": wd["label"],
+                          "description": wd["description"], "aliases": wd["aliases"],
+                          "source": "fewrel", "code": code, "holdout": False,
+                          "train": split == "train", "fewrel": split})
+    if len({r["name"] for r in relations}) != len(relations):
+        raise RuntimeError("two relations share a name")
     types = [{"id": i, "name": name, "description": desc, "aliases": [], "source": "docred",
               "code": code, "mergeable": code in ("PER", "ORG", "LOC", "MISC"),
               "temporal": code == "TIME"}
@@ -92,6 +110,8 @@ def main() -> int:
     bank = build()
     args.out.write_text(json.dumps(bank, indent=1))
     held = [r["name"] for r in bank["relations"] if r["holdout"]]
+    zs = [r["name"] for r in bank["relations"] if not r["train"]]
+    print(f"never trained (FewRel val, zero-shot) ({len(zs)}): {', '.join(zs)}")
     print(f"{len(bank['relations'])} relations, {len(bank['entity_types'])} entity types, "
           f"hash {bank['hash']}")
     print(f"held out ({len(held)}): {', '.join(held)}")

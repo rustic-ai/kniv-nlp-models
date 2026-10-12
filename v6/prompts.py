@@ -173,6 +173,25 @@ SYSTEM = {
 }
 
 
+SYSTEM["discover"] = (
+    "You are building an inventory of relation types for a general-purpose "
+    "information-extraction model that reads conversations, news, technical "
+    "documentation, business documents, fiction and encyclopedia articles.\n\n"
+    "Read the passage and list the TYPES of relation it expresses between "
+    "entities -- people, organizations, places, products, software, works, "
+    "events, concepts, times and quantities. A relation type is general and "
+    "reusable across documents: name it as a short lowercase phrase read from "
+    "head to tail ('works for', 'located in', 'depends on', 'prefers', "
+    "'parent of'), never with the passage's own names in it. Give a one-"
+    "sentence general definition, the kinds of entity at each end, and the "
+    "instance from this passage as 'head -> tail'.\n\n"
+    "List only relations the passage actually states or clearly implies. "
+    "Prefer the most specific type that is still general ('employed by' over "
+    "'related to'). Skip relations that are just grammar ('subject of'). "
+    "Return at most 15, or an empty list if the passage expresses none."
+)
+
+
 def render_tokens(tokens: list[str]) -> str:
     return "\n".join(f"{i + 1}\t{t}" for i, t in enumerate(tokens))
 
@@ -203,6 +222,9 @@ def user_message(layer: str, tokens: list[str],
         return "\n".join(parts)
     if layer == "keywords":
         return f"Passage:\n{' '.join(tokens)}\n\nReturn its salient terms."
+    if layer == "discover":
+        head = f"Domain: {context}\n\n" if context else ""
+        return f"{head}Passage:\n{target or ' '.join(tokens)}\n\nList the relation types it expresses."
     if layer == "rel":
         if not entities:
             raise ValueError("rel prompts require entities")

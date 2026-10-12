@@ -41,13 +41,20 @@ def label_text(rel: dict, mode: str = "name_desc", rng=None) -> str:
 class LabelCollator:
     def __init__(self, tok, bank: dict, train: bool, seed: int = 13,
                  min_labels: int = 16, max_labels: int = 96,
-                 exclude_holdout: bool = False, only_holdout: bool = False):
+                 exclude_holdout: bool = False, only_holdout: bool = False,
+                 sources: tuple[str, ...] = ("redocred",)):
         self.tok, self.train = tok, train
         self.rels = bank["relations"]
         self.rng = np.random.default_rng(seed)
         self.min_labels, self.max_labels = min_labels, max_labels
+        # Only the labels the batch's source was annotated against: a
+        # Re-DocRED document says nothing about FewRel-only relations, so
+        # offering them would teach false negatives. Never-trained labels
+        # (FewRel val) are excluded from training batches.
         allowed = [r["id"] for r in self.rels
-                   if not (exclude_holdout and r["holdout"])
+                   if r["source"] in sources
+                   and (r.get("train", True) or not train)
+                   and not (exclude_holdout and r["holdout"])
                    and not (only_holdout and not r["holdout"])]
         self.allowed = np.asarray(allowed, dtype=np.int64)
         self._tok_cache: dict[str, list[int]] = {}

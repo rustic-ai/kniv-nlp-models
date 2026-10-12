@@ -135,6 +135,18 @@ def validate_payload(layer: str, payload: object, n: int,
                 seen.add(k.lower()); out.append(k)
         return out, None, None
 
+    if layer == "discover":
+        if not isinstance(payload, list):
+            return None, "relations is not a list", "parse"
+        out = []
+        for i, r in enumerate(payload):
+            if not isinstance(r, dict) or not str(r.get("name", "")).strip():
+                return None, f"relation {i} has no name", "parse"
+            out.append({k: str(r.get(k, "")).strip() for k in
+                        ("name", "description", "head_type", "tail_type", "example")})
+            out[-1]["name"] = out[-1]["name"].lower()
+        return out, None, None
+
     if layer == "rel":
         if not isinstance(payload, list):
             return None, "triples is not a list", "parse"

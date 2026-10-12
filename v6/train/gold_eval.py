@@ -469,7 +469,8 @@ def schema_embeddings(model, tok, device, cols: list[int] | None = None):
     from ..label_bank import load as load_bank
     from .kdata import label_text
     rels = load_bank()["relations"]
-    cols = list(range(len(rels))) if cols is None else cols
+    if cols is None:                    # Re-DocRED's own 96, in vocabulary order
+        cols = [r["id"] for r in rels if r["source"] == "redocred"]
     enc = tok([label_text(rels[c]) for c in cols], padding=True, truncation=True,
               max_length=48, return_tensors="pt").to(device)
     return model.label_embeddings(enc["input_ids"], enc["attention_mask"])
