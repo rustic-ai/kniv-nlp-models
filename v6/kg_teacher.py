@@ -212,7 +212,8 @@ def corpus_items(n_windows: int | None, second: float, sampler: SchemaSampler,
     return items
 
 
-def bakeoff(n_docs: int, annotator: str, sampler: SchemaSampler) -> int:
+def bakeoff(n_docs: int, annotator: str, sampler: SchemaSampler,
+            gold_entities: bool = False) -> int:
     """Teacher quality where gold exists: Re-DocRED dev with sampled schemas of
     Re-DocRED relations and DocRED types. Entities match gold by an exact
     mention span; triple F1 is over the relations each document's schema
@@ -231,8 +232,14 @@ def bakeoff(n_docs: int, annotator: str, sampler: SchemaSampler) -> int:
         rel = set(rng.choice(present, size=min(len(present), k // 2), replace=False).tolist()) if present else set()
         rest = [i for i in wiki_idx if i not in rel]
         rel |= set(rng.choice(rest, size=k - len(rel), replace=False).tolist())
-        items.append(make_item(g.id, g.tokens, g.layers["sentence_spans"], "encyclopedic", None,
-                               sampler, rel_ids=sorted(rel), types=coarse))
+        it = make_item(g.id, g.tokens, g.layers["sentence_spans"], "encyclopedic", None,
+                       sampler, rel_ids=sorted(rel), types=coarse)
+        if gold_entities:
+            # The entities are given (as participants 0..k-1, by their names),
+            # so only relation quality is measured.
+            it.participants = ["; ".join(e["aliases"][:3]) for e in g.entities]
+            it.id += ":gold"
+        items.append(it)
     results = asyncio.run(annotate(items, annotator, "bakeoff"))
     by_id = {r.item_id: r for r in results}
     tp = np_ = ng = men_tp = men_p = men_g = 0
@@ -246,6 +253,11 @@ def bakeoff(n_docs: int, annotator: str, sampler: SchemaSampler) -> int:
             ng += len(gold)
             continue
         p = res.payload
+        if gold_entities:
+            pred = {(f["head"], f["tail"], f["relation"]) for f in p["facts"]
+                    if f["head"] < len(g.entities) and f["tail"] < len(g.entities)}
+            tp += len(pred & gold); np_ += len(pred); ng += len(gold)
+            continue
         pred_m = [{tuple(s) for s in e["spans"]} for e in p["entities"]]
         men_p += sum(len(x) for x in pred_m)
         men_tp += len(set().union(*pred_m) & set().union(*gm)) if pred_m and gm else 0
@@ -274,13 +286,15 @@ def main() -> int:
     ap.add_argument("--docs", type=int, default=100)
     ap.add_argument("--second", type=float, default=0.3)
     ap.add_argument("--annotator", default="astra")
+    ap.add_argument("--gold-entities", action="store_true",
+                    help="bakeoff: give the teacher Re-DocRED's entities; measure relations only")
     args = ap.parse_args()
     bank = load_bank()
     general = json.loads(GENERAL.read_text())["relations"] if GENERAL.exists() else []
     sampler = SchemaSampler(bank, general)
     print(f"schema pool: {len(sampler.relations)} relations, {len(sampler.types)} entity types", flush=True)
     if args.cmd == "bakeoff":
-        return bakeoff(args.docs, args.annotator, sampler)
+        return bakeoff(args.docs, args.annotator, sampler, args.gold_entities)
     items = corpus_items(args.windows if args.cmd == "pilot" else None, args.second, sampler)
     print(f"{len(items)} items over {len({i.id.split(':')[0] for i in items})} windows", flush=True)
     results = asyncio.run(annotate(items, args.annotator, args.cmd))
