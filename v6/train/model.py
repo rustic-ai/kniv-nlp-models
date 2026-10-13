@@ -812,6 +812,7 @@ class V6Model(nn.Module):
 
     def train(self, mode: bool = True):
         super().train(mode)
+        self.__dict__["_label_cache"] = {}       # weights may change once training resumes
         if self.freeze_encoder:
             self.encoder.eval()
         return self
@@ -926,6 +927,22 @@ class V6Model(nn.Module):
         return out.last_hidden_state, out.attentions[-1]
 
     def label_embeddings(self, ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Label texts to ``[K, label_dim]``. In evaluation (eval mode, no
+        gradient) a label set's embeddings are computed once and reused: a
+        schema is fixed while it is evaluated, and re-encoding every label
+        for every batch made an evaluation outlast the run's heartbeat."""
+        if self.training or torch.is_grad_enabled():
+            return self._label_embeddings(ids, mask)
+        import hashlib
+        key = hashlib.sha1(ids.detach().cpu().numpy().tobytes()
+                           + mask.detach().cpu().numpy().tobytes()
+                           + str(tuple(ids.shape)).encode()).hexdigest()
+        cache = self.__dict__.setdefault("_label_cache", {})
+        if key not in cache:
+            cache[key] = self._label_embeddings(ids, mask)
+        return cache[key]
+
+    def _label_embeddings(self, ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """The label pass: label texts through the encoder into ``[K,
         label_dim]``. At inference a schema's embeddings are computed once and
         passed as ``batch["rel_label_emb"]``.

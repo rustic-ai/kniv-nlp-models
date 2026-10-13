@@ -70,7 +70,7 @@ def _f1(tp: float, n_pred: float, n_gold: float) -> float:
 def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
              batch_size: int, rel_gold: list | None = None,
              label_coll=None, label_coll_zs=None, span_gold: list | None = None,
-             extra_rel: dict | None = None) -> dict:
+             extra_rel: dict | None = None, beat=None) -> dict:
     """Dev scores and their composite. ``rel_gold``: human-annotated relation
     documents (Re-DocRED dev), scored as ``relation_gold_f1`` and counted in
     the composite. ``label_coll``: the label-conditioned head's batch labels;
@@ -87,25 +87,27 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
         model.rel_lora.sticky = model.rel_lora.on = False
     if rel_gold:
         on_gold = evaluate(model, rel_gold, vocab, pad_id, device, amp, max(1, batch_size // 4),
-                           label_coll=label_coll)
+                           label_coll=label_coll, beat=beat)
         if label_coll_zs is not None:
             on_zs = evaluate(model, rel_gold, vocab, pad_id, device, amp, max(1, batch_size // 4),
-                             label_coll=label_coll_zs)
+                             label_coll=label_coll_zs, beat=beat)
     extra = {}
     for name, (f_, c_) in (extra_rel or {}).items():
         if f_:
             e_ = evaluate(model, f_, vocab, pad_id, device, amp, max(1, batch_size // 4),
-                          label_coll=c_)
+                          label_coll=c_, beat=beat)
             extra[name] = e_.get("relation_rank_acc", 0.0)
             extra[name.replace("_acc", "_thr_f1")] = e_.get("relation_f1", 0.0)
     if span_gold:
         on_span = evaluate(model, span_gold, vocab, pad_id, device, amp, batch_size,
-                           label_coll=label_coll)
+                           label_coll=label_coll, beat=beat)
     model.eval()
     L = vocab.labels
     c = defaultdict(float)
     order = sorted(range(len(feats)), key=lambda i: len(feats[i]["input_ids"]))
     for k in range(0, len(order), batch_size):
+        if beat is not None and (k // batch_size) % 20 == 0:
+            beat()                       # a long evaluation must not read as a dead run
         b = collate([feats[i] for i in order[k:k + batch_size]], pad_id)
         b = _to(label_coll(b) if label_coll is not None else b, device)
         with amp():
@@ -916,7 +918,8 @@ def main() -> int:
                     r = evaluate(model, dev, vocab, tok.pad_token_id, device, amp, micro * 2,
                                  rel_gold=rd_dev, label_coll=label_coll_dev,
                                  label_coll_zs=label_coll_zs, span_gold=span_dev,
-                                 extra_rel=extra_dev)
+                                 extra_rel=extra_dev,
+                                 beat=lambda: rs.status(state="evaluating"))
                     if hasattr(model.relation, "gates"):
                         r["xattn_gates"] = model.relation.gates()
                     if frozen_digest is not None and _frozen_digest(model) != frozen_digest:
@@ -927,7 +930,8 @@ def main() -> int:
                     rs.event("eval", step=step, **r)
                     better = rs.maybe_save_best(model, r["composite"], extra())
                     rs.status(state="training", last_eval=r, push=True)
-                    print(f"  eval step {step}: " + " ".join(f"{k} {v:.4f}" for k, v in r.items())
+                    print(f"  eval step {step}: " + " ".join(f"{k} {v:.4f}" if isinstance(v, (int, float)) else f"{k} {v}"
+                                      for k, v in r.items())
                           + ("  * best" if better else ""), flush=True)
 
                 why = control()
