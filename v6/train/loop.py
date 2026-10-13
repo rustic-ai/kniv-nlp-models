@@ -266,6 +266,10 @@ def _coref_counts(o: dict, b: dict, c: dict) -> None:
     c["link_g"] += (has_prev & ok).sum().item()
 
 
+def _rank_of(state: dict) -> int:
+    return next(v.size(0) for k, v in state.items() if k.startswith("rel_lora.A."))
+
+
 def _load_init(model, init: str, vocab: Vocab, relation: str = "drop") -> dict:
     """Weights from a checkpoint; heads it lacks start fresh. A vocabulary
     that disagrees on any shared inventory refuses to load.
@@ -291,11 +295,25 @@ def _load_init(model, init: str, vocab: Vocab, relation: str = "drop") -> dict:
             state = {k: v for k, v in state.items() if not k.startswith("relation.")}
         elif relation == "transplant":
             state = {k: v for k, v in state.items() if not k.startswith("relation.bilinear")}
+        elif relation == "extractors":
+            # A new head over the same pair pooling: only ATLOP's extractors carry over.
+            state = {k: v for k, v in state.items() if not k.startswith("relation.")
+                     or k.startswith(("relation.head_extractor", "relation.tail_extractor"))}
+    lora = getattr(model, "rel_lora", None)
+    if lora is not None:
+        key = next((k for k in state if k.startswith("rel_lora.A.")), None)
+        if key is not None and state[key].size(0) != lora.A[key[len("rel_lora.A."):]].size(0):
+            n = lora.load_grown(state, "rel_lora.")
+            state = {k: v for k, v in state.items() if not k.startswith("rel_lora.")}
+            print(f"relation adapter grown from rank {_rank_of(ck['model'])} "
+                  f"to {next(iter(lora.A.values())).size(0)} ({n} tensors, output unchanged)",
+                  flush=True)
     missing, unexpected = model.load_state_dict(state, strict=False)
     fresh = [m for m in missing if not m.startswith(("coref.", "relation.",
                                                       "mix.coref.", "mix.relation.", "ent.",
                                                       "mix.ent.", "rel_lora.", "label_enc.",
-                                                      "legacy_", "span.", "mix.ent_span."))]
+                                                      "legacy_", "span.", "mix.ent_span.",
+                                                      "label_lora."))]
     if fresh or unexpected:
         raise SystemExit(f"--init does not fit this model: missing {fresh[:5]}, "
                          f"unexpected {unexpected[:5]}")
@@ -406,10 +424,10 @@ def main() -> int:
                     help="add the coreference and relation heads (TRAINING.md §4)")
     ap.add_argument("--init", help="start from a checkpoint: a best.pt path, or a run "
                                    "name in the hub repo (e.g. deberta-v3-large-srlft-full)")
-    ap.add_argument("--rel-head", choices=["bilinear", "label"], default="bilinear",
+    ap.add_argument("--rel-head", choices=["bilinear", "label", "zs"], default="bilinear",
                     help="label: relations are label texts read by the encoder (schema-"
                          "conditioned); bilinear: ATLOP's fixed 96-way projection")
-    ap.add_argument("--init-relation", choices=["drop", "keep", "transplant"],
+    ap.add_argument("--init-relation", choices=["drop", "keep", "transplant", "extractors"],
                     help="with --init and --rel-markers: drop the checkpoint's relation "
                          "head (default; from a shared-pass checkpoint), keep it, or "
                          "transplant its ATLOP bilinear into the label head exactly")
@@ -463,6 +481,10 @@ def main() -> int:
                          "every eval on held-out teacher windows (relation_zs_acc: is a true relation "
                          "ranked first; selects best.pt) and report FewRel's never-trained "
                          "relations (fewrel_zs_acc)")
+    ap.add_argument("--label-adapter", type=int, default=0, metavar="R",
+                    help="read label texts through their own rank-R adapter (v6.2 zero-shot head)")
+    ap.add_argument("--legacy-rank", type=int, default=16,
+                    help="the --legacy-relation run's adapter rank")
     ap.add_argument("--span-head", action="store_true",
                     help="train the schema-conditioned entity span head")
     ap.add_argument("--kg-teacher", type=int, default=0, metavar="N",
@@ -556,8 +578,8 @@ def main() -> int:
     if args.kg_teacher:
         kg_data.setdefault("teacher", str(args.kg_teacher))
     if kg_data:
-        if args.rel_head != "label" or not args.phase2:
-            raise SystemExit("--kg-data needs --phase2 --rel-head label")
+        if args.rel_head not in ("label", "zs") or not args.phase2:
+            raise SystemExit("--kg-data needs --phase2 and a label relation head")
         from ..label_bank import load as load_bank
         from .kdata import knowledge_features
         over = {d: int(n) for d, n in (x.split("=") for x in args.kg_oversample.split(",") if x)}
@@ -586,7 +608,8 @@ def main() -> int:
                     rel_markers=args.rel_markers, rel_head=args.rel_head,
                     label_plain=args.label_pass == "plain",
                     legacy_relation=bool(args.legacy_relation),
-                    span_head=args.span_head).to(device)
+                    span_head=args.span_head, label_adapter=args.label_adapter,
+                    legacy_rank=args.legacy_rank).to(device)
     init_relation = args.init_relation or "drop"
     if init_relation == "transplant" and args.rel_head != "label":
         raise SystemExit("--init-relation transplant needs --rel-head label")
@@ -601,7 +624,7 @@ def main() -> int:
             raise SystemExit("--kg-holdout needs kg_holdout.json; run python -m v6.train.kdata --holdout")
         hold_ids = rec["relations"]
     label_coll = label_coll_dev = label_coll_zs = None
-    if args.rel_head == "label":
+    if args.rel_head in ("label", "zs"):
         from ..label_bank import load as load_bank
         from .kdata import LabelCollator
         bank = load_bank()
@@ -617,7 +640,7 @@ def main() -> int:
         from .kdata import knowledge_features
         span_dev = knowledge_features("fewnerd", "dev", tok, spec.max_subwords, vocab.size("cls"),
                                       load_bank(), markers=args.rel_markers, limit=2000)
-    if args.rel_head == "label":
+    if args.rel_head in ("label", "zs"):
         if args.span_head:
             from .kdata import TypeCollator
             label_coll = Chain(TypeCollator(tok, bank, train=True, seed=args.seed), label_coll)
@@ -676,7 +699,7 @@ def main() -> int:
         # legacy path (exact Re-DocRED end to end); the span head is the
         # trainable entity path.
         trainable = ("rel_lora.", "relation.", "mix.relation.", "label_enc.",
-                     "span.", "mix.ent_span.") + \
+                     "span.", "mix.ent_span.", "label_lora.") + \
             (() if args.legacy_relation else ("ent.", "mix.ent."))
         for n, prm in model.named_parameters():
             prm.requires_grad = n.startswith(trainable)
@@ -699,7 +722,9 @@ def main() -> int:
             (enc_plain if p.ndim < 2 or "norm" in n.lower() else enc_decay).append(p)
     # Heads trained from scratch beside heads being fine-tuned can take
     # their own rate (--new-head-lr): the fine-tuned ones keep --head-lr.
-    new_prefixes = ("span.", "mix.ent_span.")
+    new_prefixes = ("span.", "mix.ent_span.", "label_lora.", "label_enc.score") + \
+        (("relation.pair.", "relation.lab_in.", "relation.doc_proj.", "relation.xattn.",
+          "relation.th", "relation.bias.", "relation.log_scale") if args.rel_head == "zs" else ())
     new = {id(p) for n, p in model.named_parameters()
            if n.startswith(new_prefixes) and p.requires_grad}
     head_params = [p for p in model.head_parameters() if p.requires_grad]
@@ -757,6 +782,8 @@ def main() -> int:
                                  "label_plain": args.label_pass == "plain",
                                  "legacy_relation": bool(args.legacy_relation),
                                  "span_head": args.span_head,
+                                 "label_adapter": args.label_adapter,
+                                 "legacy_rank": args.legacy_rank,
                                  "kg_holdout": hold_ids,
                                  "head_lr": spec.head_lr, "new_head_lr": args.new_head_lr,
                                  "redocred_train": args.redocred_train,
@@ -890,6 +917,8 @@ def main() -> int:
                                  rel_gold=rd_dev, label_coll=label_coll_dev,
                                  label_coll_zs=label_coll_zs, span_gold=span_dev,
                                  extra_rel=extra_dev)
+                    if hasattr(model.relation, "gates"):
+                        r["xattn_gates"] = model.relation.gates()
                     if frozen_digest is not None and _frozen_digest(model) != frozen_digest:
                         why = f"a frozen tensor changed by step {step}"
                         rs.event("abort", reason=why)

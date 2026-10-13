@@ -343,6 +343,8 @@ class MarkerRelationHead(nn.Module):
                 sent_att[sel] = (ht @ onehot).to(sent_att.dtype)
         zs = torch.tanh(self.head_extractor(torch.cat([hs, rs], -1)))
         zo = torch.tanh(self.tail_extractor(torch.cat([ts, rs], -1)))
+        if getattr(self, "_parts", False):
+            return (zs, zo), sent_att
         P = zs.size(0)
         b1 = zs.view(P, self.emb // self.block, self.block)
         b2 = zo.view(P, self.emb // self.block, self.block)
@@ -427,14 +429,23 @@ class LabelEncoder(nn.Module):
     """A relation or entity type as a vector: the encoder's last layer over
     its label text, mean-pooled, normalised and projected."""
 
-    def __init__(self, H: int, label_dim: int = 1024):
+    def __init__(self, H: int, label_dim: int = 1024, pool: str = "mean"):
         super().__init__()
         self.norm = nn.LayerNorm(H)
         self.proj = nn.Linear(H, label_dim)
+        self.pool = pool
+        if pool == "attn":
+            # a learned query over the label's tokens: the words that carry
+            # the relation (in a description, often a few) can outweigh the rest
+            self.score = nn.Linear(H, 1)
 
     def forward(self, hidden, mask):
         m = mask.unsqueeze(-1).to(hidden.dtype)
-        pooled = (hidden * m).sum(1) / m.sum(1).clamp(min=1)
+        if self.pool == "attn":
+            a = self.score(hidden.float()).masked_fill(mask.unsqueeze(-1) == 0, NEG).softmax(1)
+            pooled = (a * hidden.float()).sum(1)
+        else:
+            pooled = (hidden * m).sum(1) / m.sum(1).clamp(min=1)
         return self.proj(self.norm(pooled.float()))
 
 
@@ -478,6 +489,80 @@ class SpanTypeHead(nn.Module):
         q = self.type_proj(type_emb.to(self.type_proj.weight.dtype)).float()   # [K, dim]
         bias = self.type_bias(type_emb.to(self.type_bias.weight.dtype)).float().squeeze(-1)
         return torch.cat([x @ self.th.float().unsqueeze(1), x @ q.T + bias], 1)
+
+
+class LabelXBlock(nn.Module):
+    """Labels reading the document: label queries attend over the marker
+    pass's tokens, then a feed-forward layer; both added through gates that
+    start at zero, so the block starts as the identity and its learned gates
+    show how much the model uses it."""
+
+    def __init__(self, d: int, heads: int = 8, p: float = 0.1):
+        super().__init__()
+        self.n1, self.n2 = nn.LayerNorm(d), nn.LayerNorm(d)
+        self.att = nn.MultiheadAttention(d, heads, dropout=p, batch_first=True)
+        self.ff = nn.Sequential(nn.Linear(d, 4 * d), nn.GELU(), nn.Dropout(p), nn.Linear(4 * d, d))
+        self.g_att = nn.Parameter(torch.zeros(1))
+        self.g_ff = nn.Parameter(torch.zeros(1))
+
+    def forward(self, q, doc, pad):
+        a, _ = self.att(self.n1(q), doc, doc, key_padding_mask=pad, need_weights=False)
+        q = q + torch.tanh(self.g_att) * a
+        return q + torch.tanh(self.g_ff) * self.ff(self.n2(q))
+
+
+class ZeroShotRelationHead(MarkerRelationHead):
+    """The label path for relations named at inference (v6.2,
+    ``ZERO_SHOT_HEAD.md``): ATLOP's mention pooling, localised context and
+    extractors give each pair a head and a tail vector; an MLP over [head;
+    tail; head * tail] makes the pair. Labels, embedded from their text,
+    attend over the document (``LabelXBlock``) before being scored against
+    the pair; a learned threshold vector is column 0. Logits ``[P, K+1]``.
+    ``xattn_off`` skips the cross-attention, for measuring what it adds."""
+
+    def __init__(self, H: int, label_dim: int = 1024, d: int = 768, emb: int = 768,
+                 layers: int = 2, heads: int = 8, p: float = 0.1):
+        nn.Module.__init__(self)
+        self.emb, self.block, self._parts = emb, 64, True
+        self.head_extractor = nn.Linear(2 * H, emb)
+        self.tail_extractor = nn.Linear(2 * H, emb)
+        self.pair = nn.Sequential(nn.Linear(3 * emb, d), nn.GELU(), nn.Dropout(p), nn.Linear(d, d))
+        self.lab_in = nn.Linear(label_dim, d)
+        self.doc_proj = nn.Linear(H, d)
+        self.xattn = nn.ModuleList([LabelXBlock(d, heads, p) for _ in range(layers)])
+        self.th = nn.Parameter(torch.randn(d) * 0.02)
+        self.bias = nn.Linear(d, 1)
+        nn.init.zeros_(self.bias.weight); nn.init.zeros_(self.bias.bias)
+        self.log_scale = nn.Parameter(torch.zeros(1))
+        self.d = d
+        self.xattn_off = False
+
+    def forward(self, seq, att, batch, label_emb):
+        K = label_emb.size(0)
+        if len(batch["ent_batch"]) == 0 or len(batch["pair_h"]) == 0:
+            return seq.new_zeros(0, K + 1, dtype=torch.float32), None
+        (zs, zo), sent_att = self.pair_features(seq, att, batch)
+        pr = self.pair(torch.cat([zs, zo, zs * zo], -1).to(self.pair[0].weight.dtype)).float()
+        q0 = self.lab_in(label_emb.to(self.lab_in.weight.dtype))                # [K, d]
+        B = seq.size(0)
+        q = q0.unsqueeze(0).expand(B, K, q0.size(-1))
+        if not self.xattn_off:
+            doc = self.doc_proj(seq.to(self.doc_proj.weight.dtype))             # [B, T, d]
+            pad = batch["rm_attention_mask"] == 0
+            for blk in self.xattn:
+                q = blk(q, doc, pad)
+        q = q.float()
+        scale = torch.exp(self.log_scale.float()) / self.d ** 0.5
+        bias = self.bias(q.to(self.bias.weight.dtype)).float().squeeze(-1)    # [B, K]
+        out = pr.new_zeros(len(pr), K)
+        for b in batch["pair_batch"].unique().tolist():
+            sel = batch["pair_batch"] == b
+            out[sel] = (pr[sel] @ q[b].T) * scale + bias[b]
+        th = (pr @ self.th.float()) * scale
+        return torch.cat([th.unsqueeze(1), out], 1), sent_att
+
+    def gates(self) -> list[float]:
+        return [round(float(torch.tanh(g)), 4) for blk in self.xattn for g in (blk.g_att, blk.g_ff)]
 
 
 def hybrid_logits(label: torch.Tensor, cols: torch.Tensor, legacy: torch.Tensor) -> torch.Tensor:
@@ -570,6 +655,26 @@ class RelationAdapter(nn.Module):
         if not self.A:
             raise ValueError("no transformer-layer linears found for the relation adapter")
 
+    @torch.no_grad()
+    def load_grown(self, state: dict, prefix: str, alpha: float = 32.0) -> int:
+        """Load a lower-rank adapter's ``A``/``B`` into this one without
+        changing its output: the old rows and columns are copied, the new
+        ``B`` columns stay zero, and ``B`` is rescaled for the scale
+        ``alpha / r`` this adapter applies. Returns the tensors loaded."""
+        n = 0
+        for key in self.A:
+            a, b = state.get(f"{prefix}A.{key}"), state.get(f"{prefix}B.{key}")
+            if a is None or b is None:
+                continue
+            r_old = a.size(0)
+            if r_old > self.A[key].size(0):
+                raise ValueError("cannot shrink an adapter")
+            self.A[key][:r_old] = a.to(self.A[key].dtype)
+            self.B[key].zero_()
+            self.B[key][:, :r_old] = b.to(self.B[key].dtype) * ((alpha / r_old) / self.scale)
+            n += 2
+        return n
+
     def _hook(self, key):
         def hook(module, inputs, output):
             if not self.on:
@@ -588,7 +693,8 @@ class V6Model(nn.Module):
                  rel_adapter: int = 0, rel_markers: bool = False,
                  rel_head: str = "bilinear", label_dim: int = 1024,
                  label_plain: bool = True, legacy_relation: bool = False,
-                 span_head: bool = False):
+                 span_head: bool = False, label_adapter: int = 0,
+                 legacy_rank: int | None = None):
         super().__init__()
         from transformers import AutoConfig, AutoModel
         # fp32 master weights for every encoder; bf16 autocast does the
@@ -654,13 +760,16 @@ class V6Model(nn.Module):
                 self.ent = classifier(H, H, len(ENT_TAGS), p)
             self.coref = CorefHead(H, context=p2_context)
             # ATLOP over a marker pass, or the shared-pass head.
-            if rel_head not in ("bilinear", "label"):
+            if rel_head not in ("bilinear", "label", "zs"):
                 raise ValueError(f"rel_head must be bilinear or label, not {rel_head!r}")
-            if rel_head == "label" and not rel_markers:
+            if rel_head in ("label", "zs") and not rel_markers:
                 raise ValueError("the label-conditioned relation head needs rel_markers")
             # ATLOP over a marker pass -- with a fixed relation inventory, or
             # with relations as label texts -- or the shared-pass head.
-            if rel_head == "label":
+            if rel_head == "zs":
+                self.relation = ZeroShotRelationHead(H, label_dim=label_dim, p=p)
+                self.label_enc = LabelEncoder(H, label_dim, pool="attn")
+            elif rel_head == "label":
                 self.relation = LabelRelationHead(H, label_dim=label_dim)
                 self.label_enc = LabelEncoder(H, label_dim)
             else:
@@ -680,15 +789,19 @@ class V6Model(nn.Module):
         # the label head answers every other relation (``hybrid_logits``).
         self.legacy_relation = self.legacy_lora = None
         if legacy_relation:
-            if rel_head != "label" or not rel_markers or not rel_adapter:
-                raise ValueError("legacy_relation needs the label head over an adapted marker pass")
-            self.legacy_lora = RelationAdapter(self.encoder, rel_adapter)
+            if rel_head not in ("label", "zs") or not rel_markers or not rel_adapter:
+                raise ValueError("legacy_relation needs a label head over an adapted marker pass")
+            self.legacy_lora = RelationAdapter(self.encoder, legacy_rank or rel_adapter)
             self.legacy_relation = MarkerRelationHead(H, S["relations"])
+        # Label texts read through their own adapter (v6.2), so learning to
+        # read labels moves neither the marker pass nor the plain pass.
+        self.label_lora = (RelationAdapter(self.encoder, label_adapter)
+                           if phase2 and label_adapter else None)
         # Schema-conditioned entity spans, read off the plain pass.
         self.span = None
         if span_head:
-            if rel_head != "label":
-                raise ValueError("span_head needs the label encoder (rel_head='label')")
+            if rel_head not in ("label", "zs"):
+                raise ValueError("span_head needs the label encoder (a label relation head)")
             self.mix["ent_span"] = ScalarMix(L)
             self.span = SpanTypeHead(H, label_dim, p=p)
         # Set by a run that trains only heads: the encoder then runs without
@@ -822,6 +935,8 @@ class V6Model(nn.Module):
         serves the marker pass alone, so learning label embeddings cannot
         move the pair features. Otherwise the texts go through the adapter
         too."""
+        if self.label_lora is not None:
+            return self._label_lora_pass(ids, mask)
         if self.label_plain:
             prev = self.rel_lora.on if self.rel_lora is not None else False
             if self.rel_lora is not None:
@@ -857,6 +972,31 @@ class V6Model(nn.Module):
             self.legacy_lora.on, self.rel_lora.on = False, prev
         return logits
 
+    def _label_lora_pass(self, ids, mask):
+        """Label texts through the label adapter alone (the relation and
+        legacy adapters off), with gradient, and without gradient
+        checkpointing: a recomputation in backward would see whichever
+        adapters are on by then. Label texts are short, so storing their
+        activations is cheap."""
+        adapters = [a for a in (self.rel_lora, self.legacy_lora) if a is not None]
+        prev = [(a.on, a.sticky) for a in adapters]
+        ckpt = [(m, m.gradient_checkpointing) for m in self.encoder.modules()
+                if hasattr(m, "gradient_checkpointing")]
+        for a in adapters:
+            a.on, a.sticky = False, False
+        for m, _ in ckpt:
+            m.gradient_checkpointing = False
+        self.label_lora.on = True
+        try:
+            out = self.encoder(input_ids=ids, attention_mask=mask)
+        finally:
+            self.label_lora.on = False
+            for a, (on, st) in zip(adapters, prev):
+                a.on, a.sticky = on, st
+            for m, v in ckpt:
+                m.gradient_checkpointing = v
+        return self.label_enc(out.last_hidden_state, mask)
+
     def _marker_heads(self, plain_layers, batch: dict, o: dict) -> dict:
         """Marker mode: the entity head reads the plain pass (entities must be
         known before the markers can be placed), relations the marker pass."""
@@ -872,7 +1012,7 @@ class V6Model(nn.Module):
             o["_anchor"] = o["span"].sum() * 0.0
         if "rm_input_ids" in batch and bool(batch["rm_ok"].all()):
             seq, att = self._marker_pass(batch)
-            if isinstance(self.relation, LabelRelationHead):
+            if isinstance(self.relation, (LabelRelationHead, ZeroShotRelationHead)):
                 emb = batch.get("rel_label_emb")
                 if emb is None:
                     emb = self.label_embeddings(batch["rel_label_ids"], batch["rel_label_mask"])

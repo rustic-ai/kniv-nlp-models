@@ -273,6 +273,78 @@ def main() -> int:
     rows = fb["pair_label_mask"].sum(1)
     check("FewRel: the labelled pair is supervised, its reverse is masked",
           len(rows) == 2 and rows[0] > 1 and rows[1] == 0, f"mask row sums {rows.tolist()}")
+    # 11. v6.2: the zero-shot head, the label adapter, a grown relation adapter
+    Z = V6Model(spec.hf_id, sizes, phase2=True, rel_adapter=8, rel_markers=True, rel_head="zs",
+                legacy_relation=True, span_head=True, label_adapter=4, legacy_rank=4).eval()
+    no_dropout(Z)
+    src = B_.state_dict()
+    n_grown = Z.rel_lora.load_grown(src, "rel_lora.")
+    with torch.no_grad():
+        B_.eval(); B_.rel_lora.sticky = False
+        sa, _ = B_._marker_pass(eb)
+        sz, _ = Z._marker_pass(eb)
+    check("a relation adapter grown from rank 4 to 8 gives the same marker pass",
+          n_grown > 0 and float((sa - sz).abs().max()) < 1e-4, f"max |diff| {float((sa - sz).abs().max()):.1e}")
+    zb = full(collate(feats, tok.pad_token_id))
+    with torch.no_grad():
+        Z.relation.xattn_off = False
+        on = Z(zb, relation_only=True)["relation"]
+        Z.relation.xattn_off = True
+        off = Z(zb, relation_only=True)["relation"]
+        Z.relation.xattn_off = False
+    check("cross-attention starts as the identity (gates at zero)", torch.allclose(on, off, atol=1e-5))
+    Z.train(); no_dropout(Z)
+    for n, prm in Z.named_parameters():
+        prm.requires_grad = n.startswith(("rel_lora.", "relation.", "label_enc.", "span.",
+                                          "mix.ent_span.", "label_lora."))
+    Z.rel_lora.sticky = True
+    zt = tc(collate(mix_items, tok.pad_token_id))
+    before_z = {k: v.clone() for k, v in Z.state_dict().items() if k.startswith(("legacy_", "ent."))}
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        Lz = losses(Z(zt, relation_only=True), zt)
+    sum(l for l, _ in Lz.values()).backward()
+    got = {pre: any(p.grad is not None and float(p.grad.abs().sum()) > 0
+                    for n, p in Z.named_parameters() if n.startswith(pre))
+           for pre in ("label_lora.", "relation.xattn.", "relation.pair.", "label_enc.score", "span.")}
+    check("v6.2 head trains in bf16 on a mixed batch", all(torch.isfinite(l) for l, _ in Lz.values()),
+          ", ".join(f"{k} {l.item():.3f}" for k, (l, _) in Lz.items()))
+    check("gradients reach the label adapter, cross-attention, pair MLP and attention pooling",
+          all(got.values()), str(got))
+
+    def label_grads(ckpt: bool):
+        Z.zero_grad(set_to_none=True)
+        if ckpt:
+            Z.encoder.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        else:
+            Z.encoder.gradient_checkpointing_disable()
+        Z.rel_lora.sticky = True
+        Z.rel_lora.on = True                     # as in relation-only training
+        e = Z.label_embeddings(zt["rel_label_ids"], zt["rel_label_mask"])
+        e.pow(2).mean().backward()
+        Z.rel_lora.on = False
+        return torch.cat([p.grad.flatten() for p in list(Z.label_lora.A.values())
+                          + list(Z.label_lora.B.values())])
+    with torch.no_grad():                       # a fresh B is zero: A would get no gradient
+        for prm in Z.label_lora.B.values():
+            prm.normal_(0, 0.02)
+    g0, g1 = label_grads(False), label_grads(True)
+    check("label adapter gradients identical with gradient checkpointing on (and the relation adapter left on)",
+          float((g1 - g0).norm() / g0.norm()) < 1e-5, f"{float((g1 - g0).norm() / g0.norm()):.1e}")
+    Z.encoder.gradient_checkpointing_disable()
+    check("the label pass leaves the relation adapter as it found it", Z.rel_lora.on is False)
+    after_z = {k: v for k, v in Z.state_dict().items() if k.startswith(("legacy_", "ent."))}
+    check("v6.2 training leaves the legacy path untouched",
+          all(torch.equal(before_z[k], after_z[k]) for k in before_z))
+    Z.eval()
+    hz = full(collate(feats, tok.pad_token_id)); hz["rel_label_cols"] = rd_cols
+    with torch.no_grad():
+        Z.legacy_lora.load_state_dict({k[len("legacy_lora."):]: v for k, v in H_.state_dict().items()
+                                       if k.startswith("legacy_lora.")})
+        Z.legacy_relation.load_state_dict({k[len("legacy_relation."):]: v for k, v in H_.state_dict().items()
+                                           if k.startswith("legacy_relation.")})
+        zo_ = Z(hz)
+    check("v6.2 hybrid: Re-DocRED columns are still the ATLOP head's margins",
+          float((zo_["relation"][:, 1:] - want).abs().max()) < 1e-4)
     print("all knowledge-layer smoke checks passed")
     return 0
 

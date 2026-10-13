@@ -87,7 +87,9 @@ def load_run(run: str, repo: str, device, local: Path | None = None) -> tuple:
                     rel_head=cfg.get("rel_head", "bilinear"),
                     label_plain=cfg.get("label_plain", False),
                     legacy_relation=cfg.get("legacy_relation", False),
-                    span_head=cfg.get("span_head", False))
+                    span_head=cfg.get("span_head", False),
+                    label_adapter=cfg.get("label_adapter", 0),
+                    legacy_rank=cfg.get("legacy_rank"))
     model.load_state_dict(ck["model"])          # strict: a mismatch raises
     model.to(device).eval()
     tok = AutoTokenizer.from_pretrained(spec.hf_id)
@@ -486,7 +488,7 @@ def run_phase2(model, feats: list[dict], tok, device, batch: int = 4,
     logits per ordered entity pair, and NER log-probabilities."""
     order = sorted(range(len(feats)), key=lambda i: len(feats[i]["input_ids"]))
     out: list[dict | None] = [None] * len(feats)
-    label_emb = (schema_embeddings(model, tok, device, cols) if model.rel_kind == "label"
+    label_emb = (schema_embeddings(model, tok, device, cols) if model.rel_kind in ("label", "zs")
                  else None)
     if label_emb is not None:
         from ..label_bank import load as load_bank
@@ -865,7 +867,7 @@ def main() -> int:
         for bench in args.benchmarks.split(","):
             if bench in PHASE2_BENCHMARKS and not model.phase2:
                 continue                    # no coref or relation heads
-            if bench in LABEL_BENCHMARKS and getattr(model, "rel_kind", "bilinear") != "label":
+            if bench in LABEL_BENCHMARKS and getattr(model, "rel_kind", "bilinear") not in ("label", "zs"):
                 continue                    # no label texts to read
             t1 = time.time()
             lim = args.limit if bench != "cls" else (args.limit or args.cls_limit or None)
