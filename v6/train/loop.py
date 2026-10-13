@@ -91,9 +91,13 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
         if label_coll_zs is not None:
             on_zs = evaluate(model, rel_gold, vocab, pad_id, device, amp, max(1, batch_size // 4),
                              label_coll=label_coll_zs)
-    extra = {name: evaluate(model, f_, vocab, pad_id, device, amp, max(1, batch_size // 4),
-                            label_coll=c_)["relation_f1"]
-             for name, (f_, c_) in (extra_rel or {}).items() if f_}
+    extra = {}
+    for name, (f_, c_) in (extra_rel or {}).items():
+        if f_:
+            e_ = evaluate(model, f_, vocab, pad_id, device, amp, max(1, batch_size // 4),
+                          label_coll=c_)
+            extra[name] = e_.get("relation_rank_acc", 0.0)
+            extra[name.replace("_acc", "_thr_f1")] = e_.get("relation_f1", 0.0)
     if span_gold:
         on_span = evaluate(model, span_gold, vocab, pad_id, device, amp, batch_size,
                            label_coll=label_coll)
@@ -160,6 +164,20 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
                 pred = lg[:, 1:] > lg[:, :1]
                 c["rlab_tp"] += (pred & gold).sum().item()
                 c["rlab_p"] += pred.sum().item(); c["rlab_g"] += gold.sum().item()
+        if "relation" in o and len(o["relation"]):
+            # Ranking: for each pair holding a listed relation, is a true one
+            # the best-scoring column? Threshold-free, as FewRel is scored --
+            # unseen labels rarely clear the threshold before calibration, so
+            # thresholded F1 sits at zero and cannot select a checkpoint.
+            lg, gold = o["relation"], b["pair_labels"][:, 1:] > 0.5
+            pos = gold.any(1)
+            if bool(pos.any()) and lg.size(1) > 2:
+                cand = lg[pos, 1:].float()
+                if "pair_label_mask" in b:       # only the pair's own schema competes
+                    cand = cand.masked_fill(b["pair_label_mask"][pos, 1:] == 0, float("-inf"))
+                top = cand.argmax(1)
+                c["rank_ok"] += gold[pos].gather(1, top.unsqueeze(1)).sum().item()
+                c["rank_n"] += int(pos.sum())
         if "span" in o and len(o["span"]):
             from .kdata import decode_spans
             pred = {(b_, s_, e_, t_) for b_, items in enumerate(decode_spans(o["span"].float(), b))
@@ -193,6 +211,8 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
         r["relation_label_f1"] = _f1(c["rlab_tp"], c["rlab_p"], c["rlab_g"])
     if c["span_g"]:
         r["span_f1"] = _f1(c["span_tp"], c["span_p"], c["span_g"])
+    if c["rank_n"]:
+        r["relation_rank_acc"] = c["rank_ok"] / c["rank_n"]
     if on_zs is not None:
         r["relation_gold_zs_f1"] = on_zs["relation_f1"]
     if on_gold is not None:
@@ -209,10 +229,10 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
         keys.append("span_gold_f1")
     for name, v in extra.items():
         r[name] = round(v, 5)
-    if "relation_zs_f1" in extra:
+    if "relation_zs_acc" in extra:
         # Zero-shot relations select best.pt; the label path on Re-DocRED's
         # own relations (answered by the frozen path) is reported only.
-        keys = [k for k in keys if k != "relation_gold_label_f1"] + ["relation_zs_f1"]
+        keys = [k for k in keys if k != "relation_gold_label_f1"] + ["relation_zs_acc"]
     r = {k: round(v, 5) for k, v in r.items()}
     # One number to select best.pt on: every head counts equally.
     r["composite"] = round(sum(r[k] for k in keys) / len(keys), 5)
@@ -440,8 +460,9 @@ def main() -> int:
                          "--head-lr is kept low for the heads being fine-tuned")
     ap.add_argument("--kg-holdout", action="store_true",
                     help="never train the zero-shot relation holdout (kg_holdout.json); score it "
-                         "every eval on held-out teacher windows (relation_zs_f1, selects best.pt) "
-                         "and report FewRel's never-trained relations (fewrel_zs_f1)")
+                         "every eval on held-out teacher windows (relation_zs_acc: is a true relation "
+                         "ranked first; selects best.pt) and report FewRel's never-trained "
+                         "relations (fewrel_zs_acc)")
     ap.add_argument("--span-head", action="store_true",
                     help="train the schema-conditioned entity span head")
     ap.add_argument("--kg-teacher", type=int, default=0, metavar="N",
@@ -612,9 +633,9 @@ def main() -> int:
             fdev = [fdev[i] for i in range(0, len(fdev), max(1, len(fdev) // 800))]
             tc = TypeCollator(tok, bank, train=False) if args.span_head else None
             extra_dev = {
-                "relation_zs_f1": (tdev, Chain(tc, LabelCollator(tok, bank, train=False,
+                "relation_zs_acc": (tdev, Chain(tc, LabelCollator(tok, bank, train=False,
                                                                  only_ids=hold_ids))),
-                "fewrel_zs_f1": (fdev, Chain(tc, LabelCollator(tok, bank, train=False,
+                "fewrel_zs_acc": (fdev, Chain(tc, LabelCollator(tok, bank, train=False,
                                                                only_ids=fz)))}
             print(f"zero-shot dev: {len(tdev)} held-out teacher windows on {len(hold_ids)} relations; "
                   f"{len(fdev)} FewRel sentences on {len(fz)} never-trained relations", flush=True)
