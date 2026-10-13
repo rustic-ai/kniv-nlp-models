@@ -68,13 +68,18 @@ def _f1(tp: float, n_pred: float, n_gold: float) -> float:
 @torch.no_grad()
 def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
              batch_size: int, rel_gold: list | None = None,
-             label_coll=None, label_coll_zs=None) -> dict:
+             label_coll=None, label_coll_zs=None, span_gold: list | None = None) -> dict:
     """Dev scores and their composite. ``rel_gold``: human-annotated relation
     documents (Re-DocRED dev), scored as ``relation_gold_f1`` and counted in
     the composite. ``label_coll``: the label-conditioned head's batch labels;
     ``label_coll_zs``: the held-out relations only, scored on ``rel_gold`` as
-    ``relation_gold_zs_f1`` (reported, never in the composite)."""
-    on_gold = on_zs = None
+    ``relation_gold_zs_f1`` (reported, never in the composite).
+
+    With the hybrid, Re-DocRED through the frozen path is a constant, so the
+    label path is scored on its own too (``relation_gold_label_f1``), and
+    ``span_gold`` (Few-NERD dev) scores the span head (``span_gold_f1``):
+    both join the composite, which then moves only with what trains."""
+    on_gold = on_zs = on_span = None
     sticky = model.rel_lora is not None and model.rel_lora.sticky
     if sticky:                       # the plain pass must be plain while evaluating
         model.rel_lora.sticky = model.rel_lora.on = False
@@ -84,6 +89,9 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
         if label_coll_zs is not None:
             on_zs = evaluate(model, rel_gold, vocab, pad_id, device, amp, max(1, batch_size // 4),
                              label_coll=label_coll_zs)
+    if span_gold:
+        on_span = evaluate(model, span_gold, vocab, pad_id, device, amp, batch_size,
+                           label_coll=label_coll)
     model.eval()
     L = vocab.labels
     c = defaultdict(float)
@@ -142,6 +150,21 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
             pred = lg[:, 1:] > lg[:, :1]
             c["rel_tp"] += (pred & gold).sum().item()
             c["rel_p"] += pred.sum().item(); c["rel_g"] += gold.sum().item()
+            if "relation_label" in o:
+                lg = o["relation_label"]
+                pred = lg[:, 1:] > lg[:, :1]
+                c["rlab_tp"] += (pred & gold).sum().item()
+                c["rlab_p"] += pred.sum().item(); c["rlab_g"] += gold.sum().item()
+        if "span" in o and len(o["span"]):
+            from .kdata import decode_spans
+            pred = {(b_, s_, e_, t_) for b_, items in enumerate(decode_spans(o["span"].float(), b))
+                    for s_, e_, t_ in items}
+            g = b["span_labels"][:, 1:] > 0.5
+            rows, cols_ = g.nonzero(as_tuple=True)
+            tc = b["type_label_cols"]
+            gold = {(int(b["span_batch"][i]), int(b["span_start"][i]), int(b["span_end"][i]),
+                     int(tc[j])) for i, j in zip(rows.tolist(), cols_.tolist())}
+            c["span_tp"] += len(pred & gold); c["span_p"] += len(pred); c["span_g"] += len(gold)
     model.train()
     if sticky:
         model.rel_lora.sticky = True
@@ -161,6 +184,10 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
         keys += ["coref_link_f1", "relation_f1"]
     if c["ent_g"]:
         r["ent_f1"] = _f1(c["ent_tp"], c["ent_p"], c["ent_g"])
+    if c["rlab_g"]:
+        r["relation_label_f1"] = _f1(c["rlab_tp"], c["rlab_p"], c["rlab_g"])
+    if c["span_g"]:
+        r["span_f1"] = _f1(c["span_tp"], c["span_p"], c["span_g"])
     if on_zs is not None:
         r["relation_gold_zs_f1"] = on_zs["relation_f1"]
     if on_gold is not None:
@@ -169,6 +196,12 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
         if "ent_f1" in on_gold:
             r["ent_gold_f1"] = on_gold["ent_f1"]
             keys.append("ent_gold_f1")
+        if "relation_label_f1" in on_gold:
+            r["relation_gold_label_f1"] = on_gold["relation_label_f1"]
+            keys.append("relation_gold_label_f1")
+    if on_span is not None and "span_f1" in on_span:
+        r["span_gold_f1"] = on_span["span_f1"]
+        keys.append("span_gold_f1")
     r = {k: round(v, 5) for k, v in r.items()}
     # One number to select best.pt on: every head counts equally.
     r["composite"] = round(sum(r[k] for k in keys) / len(keys), 5)
@@ -526,6 +559,12 @@ def main() -> int:
         label_coll_dev = LabelCollator(tok, bank, train=False, exclude_holdout=args.label_holdout)
         if args.label_holdout:
             label_coll_zs = LabelCollator(tok, bank, train=False, only_holdout=True)
+    span_dev = []
+    if args.span_head and not args.probe:
+        from .kdata import knowledge_features
+        span_dev = knowledge_features("fewnerd", "dev", tok, spec.max_subwords, vocab.size("cls"),
+                                      load_bank(), markers=args.rel_markers, limit=2000)
+    if args.rel_head == "label":
         if args.span_head:
             from .kdata import TypeCollator
             label_coll = Chain(TypeCollator(tok, bank, train=True, seed=args.seed), label_coll)
@@ -769,7 +808,7 @@ def main() -> int:
                     rs.status(state="evaluating")
                     r = evaluate(model, dev, vocab, tok.pad_token_id, device, amp, micro * 2,
                                  rel_gold=rd_dev, label_coll=label_coll_dev,
-                                 label_coll_zs=label_coll_zs)
+                                 label_coll_zs=label_coll_zs, span_gold=span_dev)
                     if frozen_digest is not None and _frozen_digest(model) != frozen_digest:
                         why = f"a frozen tensor changed by step {step}"
                         rs.event("abort", reason=why)
