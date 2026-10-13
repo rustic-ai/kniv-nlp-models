@@ -423,6 +423,9 @@ def main() -> int:
     ap.add_argument("--legacy-relation", metavar="RUN",
                     help="the hybrid: RUN's ATLOP adapter, head and entity head, frozen, answer "
                          "the relations they were trained on; the label head the rest")
+    ap.add_argument("--new-head-lr", type=float,
+                    help="learning rate for heads trained from scratch (the span head) when "
+                         "--head-lr is kept low for the heads being fine-tuned")
     ap.add_argument("--span-head", action="store_true",
                     help="train the schema-conditioned entity span head")
     ap.add_argument("--kg-teacher", type=int, default=0, metavar="N",
@@ -627,10 +630,18 @@ def main() -> int:
     for n, p in model.encoder.named_parameters():
         if p.requires_grad:
             (enc_plain if p.ndim < 2 or "norm" in n.lower() else enc_decay).append(p)
+    # Heads trained from scratch beside heads being fine-tuned can take
+    # their own rate (--new-head-lr): the fine-tuned ones keep --head-lr.
+    new_prefixes = ("span.", "mix.ent_span.")
+    new = {id(p) for n, p in model.named_parameters()
+           if n.startswith(new_prefixes) and p.requires_grad}
+    head_params = [p for p in model.head_parameters() if p.requires_grad]
     groups = [{"params": enc_decay, "lr": spec.encoder_lr, "weight_decay": args.weight_decay},
               {"params": enc_plain, "lr": spec.encoder_lr, "weight_decay": 0.0},
-              {"params": [p for p in model.head_parameters() if p.requires_grad],
-               "lr": spec.head_lr, "weight_decay": 0.0}]
+              {"params": [p for p in head_params if id(p) not in new or not args.new_head_lr],
+               "lr": spec.head_lr, "weight_decay": 0.0},
+              {"params": [p for p in head_params if id(p) in new and args.new_head_lr],
+               "lr": args.new_head_lr or spec.head_lr, "weight_decay": 0.0}]
     opt = torch.optim.AdamW([g for g in groups if g["params"]], betas=(0.9, 0.98),
                             eps=1e-6, fused=device.type == "cuda")
 
@@ -679,6 +690,7 @@ def main() -> int:
                                  "label_plain": args.label_pass == "plain",
                                  "legacy_relation": bool(args.legacy_relation),
                                  "span_head": args.span_head,
+                                 "head_lr": spec.head_lr, "new_head_lr": args.new_head_lr,
                                  "redocred_train": args.redocred_train,
                                  "relation_data": args.relation_data,
                                  "init": args.init, "train_scope": args.train_scope}}
