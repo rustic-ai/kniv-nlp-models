@@ -668,13 +668,27 @@ def cmd_probe(a) -> int:
     out = f"{VM_RUNS}/{name}-probe"
     argv = ["--encoder", spec.name, "--out", out, "--probe", str(a.steps), *a.extra]
     code = START.format(repo=VM_REPO, out=out, argv=argv, RUN_MARKER=RUN_MARKER)
-    vm_exec(sess, code, timeout=3600)
-    with tempfile.TemporaryDirectory() as d:
-        colab("download", "-s", sess, f"{out}/train.log", f"{d}/train.log", quiet=True)
-        lines = Path(f"{d}/train.log").read_text().splitlines()
-    # train.log is appended across runs; report only the latest.
-    starts = [i for i, l in enumerate(lines) if l.startswith(RUN_MARKER)]
-    lines = lines[starts[-1]:] if starts else lines
+    vm_exec(sess, code, timeout=3600, check=False)
+    # ``colab exec`` can return on its client timeout while the cell runs on
+    # (featurising a large source alone takes ~20 minutes on a Colab CPU):
+    # read train.log until the probe reports, fails, or an hour has passed.
+    deadline, lines = time.time() + 3600, []
+    while True:
+        with tempfile.TemporaryDirectory() as d:
+            got = colab("download", "-s", sess, f"{out}/train.log", f"{d}/train.log",
+                        quiet=True, check=False)
+            p = Path(f"{d}/train.log")
+            lines = p.read_text().splitlines() if got is not None and p.exists() else lines
+        # train.log is appended across runs; report only the latest.
+        starts = [i for i, l in enumerate(lines) if l.startswith(RUN_MARKER)]
+        lines = lines[starts[-1]:] if starts else lines
+        if any(l.startswith("PROBE") or "Traceback" in l or "Error" in l for l in lines) \
+                or time.time() > deadline:
+            break
+        time.sleep(60)
+    if not any(l.startswith("PROBE") for l in lines):
+        print("no PROBE line; last lines of train.log:")
+        print("\n".join(lines[-15:]))
     for l in lines:
         if "probe step" in l or l.startswith("PROBE") or "Error" in l:
             print(l)
