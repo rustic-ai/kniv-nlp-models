@@ -881,7 +881,9 @@ class V6Model(nn.Module):
                     o["relation_kd_old"] = self.relation.kd_logits
                     self.relation.kd_logits = None
                 if self.legacy_relation is not None and not self.training \
-                        and "rel_label_cols" in batch and len(o["relation"]):
+                        and "rel_label_cols" in batch and len(o["relation"]) \
+                        and bool((batch["rel_label_cols"]
+                                  < self.legacy_relation.bilinear.out_features - 1).any()):
                     o["relation_label"] = o["relation"]
                     o["relation_legacy"] = self._legacy_logits(batch)
                     o["relation"] = hybrid_logits(o["relation"], batch["rel_label_cols"],

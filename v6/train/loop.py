@@ -39,6 +39,7 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from ..config import RUNS_DIR
@@ -68,7 +69,8 @@ def _f1(tp: float, n_pred: float, n_gold: float) -> float:
 @torch.no_grad()
 def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
              batch_size: int, rel_gold: list | None = None,
-             label_coll=None, label_coll_zs=None, span_gold: list | None = None) -> dict:
+             label_coll=None, label_coll_zs=None, span_gold: list | None = None,
+             extra_rel: dict | None = None) -> dict:
     """Dev scores and their composite. ``rel_gold``: human-annotated relation
     documents (Re-DocRED dev), scored as ``relation_gold_f1`` and counted in
     the composite. ``label_coll``: the label-conditioned head's batch labels;
@@ -89,6 +91,9 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
         if label_coll_zs is not None:
             on_zs = evaluate(model, rel_gold, vocab, pad_id, device, amp, max(1, batch_size // 4),
                              label_coll=label_coll_zs)
+    extra = {name: evaluate(model, f_, vocab, pad_id, device, amp, max(1, batch_size // 4),
+                            label_coll=c_)["relation_f1"]
+             for name, (f_, c_) in (extra_rel or {}).items() if f_}
     if span_gold:
         on_span = evaluate(model, span_gold, vocab, pad_id, device, amp, batch_size,
                            label_coll=label_coll)
@@ -202,6 +207,12 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
     if on_span is not None and "span_f1" in on_span:
         r["span_gold_f1"] = on_span["span_f1"]
         keys.append("span_gold_f1")
+    for name, v in extra.items():
+        r[name] = round(v, 5)
+    if "relation_zs_f1" in extra:
+        # Zero-shot relations select best.pt; the label path on Re-DocRED's
+        # own relations (answered by the frozen path) is reported only.
+        keys = [k for k in keys if k != "relation_gold_label_f1"] + ["relation_zs_f1"]
     r = {k: round(v, 5) for k, v in r.items()}
     # One number to select best.pt on: every head counts equally.
     r["composite"] = round(sum(r[k] for k in keys) / len(keys), 5)
@@ -354,7 +365,8 @@ def _to(batch: dict, device) -> dict:
     # non_blocking only on CUDA: on MPS a non-blocking copy from unpinned
     # memory races with the source being freed and delivers garbage indices.
     nb = device.type == "cuda"
-    return {k: v.to(device, non_blocking=nb) for k, v in batch.items()}
+    # Python-side leftovers (span targets with no span head) stay behind.
+    return {k: v.to(device, non_blocking=nb) for k, v in batch.items() if hasattr(v, "to")}
 
 
 # ── training ────────────────────────────────────────────────────────
@@ -426,6 +438,10 @@ def main() -> int:
     ap.add_argument("--new-head-lr", type=float,
                     help="learning rate for heads trained from scratch (the span head) when "
                          "--head-lr is kept low for the heads being fine-tuned")
+    ap.add_argument("--kg-holdout", action="store_true",
+                    help="never train the zero-shot relation holdout (kg_holdout.json); score it "
+                         "every eval on held-out teacher windows (relation_zs_f1, selects best.pt) "
+                         "and report FewRel's never-trained relations (fewrel_zs_f1)")
     ap.add_argument("--span-head", action="store_true",
                     help="train the schema-conditioned entity span head")
     ap.add_argument("--kg-teacher", type=int, default=0, metavar="N",
@@ -532,7 +548,13 @@ def main() -> int:
                                        stats=st)
             if src == "teacher" and over:
                 feats = [f for f in feats for _ in range(over.get(f.get("_domain"), 1))]
-            train = train + feats * int(n)
+            w = float(n)
+            if w < 1:                      # a fixed random fraction of the source
+                rng = np.random.default_rng([args.seed, len(src)])
+                feats = [feats[i] for i in sorted(rng.choice(len(feats), int(len(feats) * w),
+                                                             replace=False))]
+                w = 1
+            train = train + feats * int(w)
             print(f"{src}: {len(feats):,} items x{n}; "
                   + ", ".join(f"{k} {v:,}" for k, v in sorted(st.items())), flush=True)
 
@@ -550,13 +572,20 @@ def main() -> int:
     init_state = _load_init(model, args.init, vocab, init_relation) if args.init else None
     if args.legacy_relation:
         _load_legacy(model, args.legacy_relation)
+    extra_dev, hold_ids = {}, []
+    if args.kg_holdout:
+        from .kdata import load_holdout
+        rec = load_holdout()
+        if rec is None:
+            raise SystemExit("--kg-holdout needs kg_holdout.json; run python -m v6.train.kdata --holdout")
+        hold_ids = rec["relations"]
     label_coll = label_coll_dev = label_coll_zs = None
     if args.rel_head == "label":
         from ..label_bank import load as load_bank
         from .kdata import LabelCollator
         bank = load_bank()
         label_coll = LabelCollator(tok, bank, train=True, seed=args.seed,
-                                   exclude_holdout=args.label_holdout,
+                                   exclude_holdout=args.label_holdout, exclude_ids=hold_ids,
                                    text_modes=([("name_desc", 1.0)] if args.label_text == "canonical"
                                                else None))
         label_coll_dev = LabelCollator(tok, bank, train=False, exclude_holdout=args.label_holdout)
@@ -572,6 +601,23 @@ def main() -> int:
             from .kdata import TypeCollator
             label_coll = Chain(TypeCollator(tok, bank, train=True, seed=args.seed), label_coll)
             label_coll_dev = Chain(TypeCollator(tok, bank, train=False), label_coll_dev)
+        if hold_ids and not args.probe:
+            from .kdata import knowledge_features
+            tdev = knowledge_features("teacher", "dev", tok, spec.max_subwords, vocab.size("cls"),
+                                      bank, markers=args.rel_markers, limit=1500)
+            fz = [r["id"] for r in bank["relations"] if not r.get("train", True)]
+            fdev = [f for f in knowledge_features("fewrel", "val", tok, spec.max_subwords,
+                                                  vocab.size("cls"), bank, markers=args.rel_markers)
+                    if f["rel"]["triples"][0][2] in fz]
+            fdev = [fdev[i] for i in range(0, len(fdev), max(1, len(fdev) // 800))]
+            tc = TypeCollator(tok, bank, train=False) if args.span_head else None
+            extra_dev = {
+                "relation_zs_f1": (tdev, Chain(tc, LabelCollator(tok, bank, train=False,
+                                                                 only_ids=hold_ids))),
+                "fewrel_zs_f1": (fdev, Chain(tc, LabelCollator(tok, bank, train=False,
+                                                               only_ids=fz)))}
+            print(f"zero-shot dev: {len(tdev)} held-out teacher windows on {len(hold_ids)} relations; "
+                  f"{len(fdev)} FewRel sentences on {len(fz)} never-trained relations", flush=True)
         if init_relation == "transplant":
             if init_state is None or "relation.bilinear.weight" not in init_state:
                 raise SystemExit("--init-relation transplant needs an --init with an ATLOP head")
@@ -690,6 +736,7 @@ def main() -> int:
                                  "label_plain": args.label_pass == "plain",
                                  "legacy_relation": bool(args.legacy_relation),
                                  "span_head": args.span_head,
+                                 "kg_holdout": hold_ids,
                                  "head_lr": spec.head_lr, "new_head_lr": args.new_head_lr,
                                  "redocred_train": args.redocred_train,
                                  "relation_data": args.relation_data,
@@ -820,7 +867,8 @@ def main() -> int:
                     rs.status(state="evaluating")
                     r = evaluate(model, dev, vocab, tok.pad_token_id, device, amp, micro * 2,
                                  rel_gold=rd_dev, label_coll=label_coll_dev,
-                                 label_coll_zs=label_coll_zs, span_gold=span_dev)
+                                 label_coll_zs=label_coll_zs, span_gold=span_dev,
+                                 extra_rel=extra_dev)
                     if frozen_digest is not None and _frozen_digest(model) != frozen_digest:
                         why = f"a frozen tensor changed by step {step}"
                         rs.event("abort", reason=why)

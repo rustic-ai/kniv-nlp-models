@@ -62,7 +62,7 @@ class LabelCollator:
                  min_labels: int = 16, max_labels: int = 96,
                  exclude_holdout: bool = False, only_holdout: bool = False,
                  sources: tuple[str, ...] = ("redocred",), text_modes=None,
-                 unlabelled_keep: float | None = None):
+                 unlabelled_keep: float | None = None, exclude_ids=(), only_ids=None):
         self.tok, self.train = tok, train
         self.unlabelled_keep = unlabelled_keep
         self.text_modes = tuple(text_modes or TEXT_MODES)
@@ -84,6 +84,12 @@ class LabelCollator:
                        if (r.get("train", True) or not train)
                        and not (exclude_holdout and r["holdout"])
                        and not (only_holdout and not r["holdout"])}
+        # Relations held out of training altogether (``exclude_ids``), or the
+        # only ones scored (``only_ids``, a zero-shot dev set).
+        self.usable -= set(exclude_ids)
+        if only_ids is not None:
+            self.usable &= set(only_ids)
+            self.allowed = np.asarray([i for i in self.allowed if i in self.usable], dtype=np.int64)
         self._tok_cache: dict[str, list[int]] = {}
 
     def _ids(self, text: str) -> list[int]:
@@ -391,7 +397,11 @@ def prepare_knowledge(bank: dict, distant_docs: int = 40000) -> dict:
             fr.append({"tokens": x["tokens"], "head": x["head"], "tail": x["tail"],
                        "rel": code[x["code"]]})
     schema = sorted({r["rel"] for r in fr})
-    (_corpus() / KNOWLEDGE_FILES["fewrel"]).write_text(json.dumps({"train": fr, "schema": schema}))
+    val = [{"tokens": x["tokens"], "head": x["head"], "tail": x["tail"], "rel": code[x["code"]]}
+           for x in fewrel.load("val") if x["code"] in code]
+    (_corpus() / KNOWLEDGE_FILES["fewrel"]).write_text(
+        json.dumps({"train": fr, "val": val, "schema": schema,
+                    "val_schema": sorted({r["rel"] for r in val})}))
     out["fewrel"] = {"train": len(fr), "relations": len(schema)}
     fn = {}
     for split in ("train", "dev"):
@@ -420,6 +430,44 @@ def prepare_knowledge(bank: dict, distant_docs: int = 40000) -> dict:
     out["docred_distant"] = {"train": len(dd), "triples": sum(len(x["triples"]) for x in dd),
                              "codes_not_in_bank": dict(missing.most_common(5))}
     return out
+
+
+HOLDOUT_FILE = "kg_holdout.json"
+DEV_MOD = 40          # teacher windows whose id hashes to 0 mod 40 are dev, never trained
+
+
+def choose_holdout(bank: dict, n_general: int = 32, n_business: int = 8,
+                   min_facts: int = 60) -> dict:
+    """A fixed zero-shot holdout: general and business relations the teacher
+    used at least ``min_facts`` times, picked by hash. Training never sees
+    them; held-out teacher windows score them every evaluation."""
+    byname = {r["name"]: r for r in bank["relations"]}
+    count = Counter()
+    for it in json.loads((_corpus() / "kg_teacher.json").read_text())["items"]:
+        for f in it["payload"]["facts"]:
+            r = byname.get(f["relation"])
+            if r is not None and r["source"] in ("general", "business"):
+                count[r["id"]] += 1
+    out = []
+    for src, n in (("general", n_general), ("business", n_business)):
+        elig = [i for i, c in count.items() if c >= min_facts and bank["relations"][i]["source"] == src]
+        elig.sort(key=lambda i: hashlib.sha1(f"zs:{bank['relations'][i]['name']}".encode()).hexdigest())
+        out += elig[:n]
+    rec = {"relations": sorted(out), "names": [bank["relations"][i]["name"] for i in sorted(out)],
+           "facts": {bank["relations"][i]["name"]: count[i] for i in sorted(out)},
+           "dev_mod": DEV_MOD, "bank_hash": bank.get("hash")}
+    (_corpus() / HOLDOUT_FILE).write_text(json.dumps(rec, indent=1))
+    return rec
+
+
+def load_holdout() -> dict | None:
+    p = _corpus() / HOLDOUT_FILE
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+def _is_dev(item_id: str) -> bool:
+    w = item_id.split(":")[0]
+    return int(hashlib.sha1(f"kgdev:{w}".encode()).hexdigest(), 16) % DEV_MOD == 0
 
 
 def span_targets(spans, W: int, word_ok, schema, partial: bool,
@@ -516,7 +564,8 @@ def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: i
     if not path.exists():
         raise SystemExit(f"{path} missing; run python -m v6.train.kdata --prep")
     st = path.stat()
-    key = hashlib.sha256(json.dumps([FEATURE_VERSION, source, split, tok.name_or_path,
+    hold_sig = (load_holdout() or {}).get("relations") if source == "teacher" else None
+    key = hashlib.sha256(json.dumps([FEATURE_VERSION, hold_sig, source, split, tok.name_or_path,
                                      max_subwords, markers, limit,
                                      bank.get("hash"), st.st_size, st.st_mtime_ns]).encode()
                          ).hexdigest()[:16]
@@ -530,14 +579,21 @@ def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: i
     local = Counter()
     if source == "teacher":
         from ..kg_teacher import load_export
-        feats = [f for it, p in load_export(path)[:limit]
+        pairs = [(it, p) for it, p in load_export(path) if _is_dev(it.id) == (split == "dev")]
+        if split == "dev":
+            # Only windows whose schema lists a held-out relation say anything
+            # about zero-shot reading.
+            hold = set((load_holdout() or {}).get("names", []))
+            pairs = [(it, p) for it, p in pairs if hold & {r["name"] for r in it.relations}]
+        feats = [f for it, p in pairs[:limit]
                  if (f := teacher_features(it, p, tok, max_subwords, bank, n_cls, local, markers))]
     else:
         data = json.loads(path.read_text())
         rows = data[split][:limit]
         if source == "fewrel":
+            sch = data["val_schema"] if split == "val" else data["schema"]
             feats = [f for x in rows if (f := fewrel_features(
-                x, data["schema"], tok, max_subwords, n_rel, n_cls, local, markers))]
+                x, sch, tok, max_subwords, n_rel, n_cls, local, markers))]
         elif source == "fewnerd":
             feats = [fewnerd_features(x, data["schema"], tok, max_subwords, n_cls, local)
                      for x in rows]
@@ -566,15 +622,21 @@ def main() -> int:
     ap.add_argument("--featurise", default="teacher,fewrel,fewnerd,docred_distant")
     ap.add_argument("--encoder", default="deberta-v3-large")
     ap.add_argument("--distant-docs", type=int, default=40000)
+    ap.add_argument("--holdout", action="store_true", help="choose the zero-shot relation holdout")
     args = ap.parse_args()
     bank = load_bank()
     if args.prep:
         print(json.dumps(prepare_knowledge(bank, args.distant_docs), indent=1), flush=True)
+    if args.holdout or args.prep:
+        rec = choose_holdout(bank)
+        print(f"zero-shot holdout: {len(rec['relations'])} relations: {', '.join(rec['names'])}",
+              flush=True)
     spec = get(args.encoder)
     tok = AutoTokenizer.from_pretrained(spec.hf_id)
     n_cls = Vocab.load().size("cls")
     for src in [s for s in args.featurise.split(",") if s]:
-        for split in (("train", "dev") if src == "fewnerd" else ("train",)):
+        for split in {"fewnerd": ("train", "dev"), "fewrel": ("train", "val"),
+                      "teacher": ("train", "dev")}.get(src, ("train",)):
             t0, st = time.time(), Counter()
             feats = knowledge_features(src, split, tok, spec.max_subwords, n_cls, bank, stats=st)
             print(f"{src}/{split}: {len(feats):,} items in {time.time() - t0:.0f}s; "
