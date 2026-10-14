@@ -484,8 +484,9 @@ def start(sess: str, out: str, argv: list[str], wait_minutes: float = 25) -> boo
     # minute no-client clock can run out.
     _kill_holder(sess)           # one left from a previous run watches the wrong run
     ensure_holder(sess, out)
+    deadline = t0 + wait_minutes * 60
     with tempfile.TemporaryDirectory() as d:
-        while time.time() - t0 < wait_minutes * 60:
+        while time.time() < deadline:
             if sess not in colab("sessions", check=False, quiet=True, timeout=120).stdout:
                 print(f"the VM {sess} disappeared before the run reported in")
                 return False
@@ -493,6 +494,12 @@ def start(sess: str, out: str, argv: list[str], wait_minutes: float = 25) -> boo
                       check=False, quiet=True)
             if r.returncode == 0:
                 st = json.loads(Path(f"{d}/s.json").read_text())
+                fresh = time.time() - st.get("heartbeat", 0) < 15 * 60
+                if st.get("started_at", 0) >= t0 - 60 and st.get("state") == "preparing" \
+                        and fresh:
+                    # Still featurising, and saying so: wait on, up to two hours.
+                    deadline = min(max(deadline, time.time() + wait_minutes * 60),
+                                   t0 + 120 * 60)
                 if st.get("started_at", 0) >= t0 - 60 and st.get("state") in (
                         "training", "evaluating"):
                     print(f"running: step {st['step']}/{st['total_steps']}, "

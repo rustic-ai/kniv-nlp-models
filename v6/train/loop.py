@@ -540,10 +540,23 @@ def main() -> int:
                 else torch.autocast(device.type, enabled=False))
 
     torch.manual_seed(args.seed)
+    t_start = time.time()
+
+    def preparing(note: str) -> None:
+        # Featurising can outlast a launcher's first-heartbeat wait on a
+        # slow VM CPU: say the run is alive, and what it is doing, until
+        # RunState takes over status.json.
+        from .runstate import atomic_write_json
+        Path(out).mkdir(parents=True, exist_ok=True)
+        atomic_write_json(Path(out) / "status.json",
+                          {"state": "preparing", "note": note, "started_at": t_start,
+                           "heartbeat": time.time(), "step": 0, "total_steps": 0})
+    preparing("loading the tokenizer")
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(spec.hf_id)
     vocab = Vocab.load()
     cond = args.srl_mode == "conditioned"
+    preparing("featurising the corpus")
     train = featurise(spec, "train", vocab, tok, limit=args.train_limit, srl_sentences=cond,
                       phase2=args.phase2)
     dev = (featurise(spec, "dev", vocab, tok, limit=args.dev_limit, srl_sentences=cond,
@@ -587,6 +600,7 @@ def main() -> int:
         over = {d: int(n) for d, n in (x.split("=") for x in args.kg_oversample.split(",") if x)}
         kg_bank = load_bank()
         for src, n in kg_data.items():
+            preparing(f"featurising {src}")
             st = Counter()
             feats = knowledge_features(src, "train", tok, spec.max_subwords, vocab.size("cls"),
                                        kg_bank, markers=args.rel_markers, limit=args.train_limit,
@@ -616,6 +630,7 @@ def main() -> int:
     if init_relation == "transplant" and args.rel_head != "label":
         raise SystemExit("--init-relation transplant needs --rel-head label")
     init_state = _load_init(model, args.init, vocab, init_relation) if args.init else None
+    preparing("building the model")
     if args.legacy_relation:
         _load_legacy(model, args.legacy_relation)
     extra_dev, hold_ids = {}, []
@@ -649,6 +664,7 @@ def main() -> int:
             label_coll_dev = Chain(TypeCollator(tok, bank, train=False), label_coll_dev)
         if hold_ids and not args.probe:
             from .kdata import knowledge_features
+            preparing("featurising the zero-shot dev sets")
             tdev = knowledge_features("teacher", "dev", tok, spec.max_subwords, vocab.size("cls"),
                                       bank, markers=args.rel_markers, limit=1500)
             fz = [r["id"] for r in bank["relations"] if not r.get("train", True)]
