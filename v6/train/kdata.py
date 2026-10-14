@@ -371,12 +371,12 @@ def _corpus():
 
 
 KNOWLEDGE_FILES = {"fewrel": "fewrel_rel.json", "fewnerd": "fewnerd_spans.json",
-                   "docred_distant": "docred_distant_rel.json"}
+                   "docred_distant": "docred_distant_rel.json", "pretrain": "kg_pretrain.json"}
 # Unlabelled pairs of a partial source kept as negatives, per source: FewRel
 # labels one pair per sentence and says nothing of the others.
 # Bump whenever a featuriser's output changes: the feature cache is keyed on it.
-FEATURE_VERSION = 2
-UNLABELLED_KEEP = {"teacher": 0.5, "docred_distant": 0.5, "fewrel": 0.0}
+FEATURE_VERSION = 3
+UNLABELLED_KEEP = {"teacher": 0.5, "docred_distant": 0.5, "fewrel": 0.0, "pretrain": 0.5}
 
 
 def _ids(bank: dict) -> tuple[dict, dict, dict]:
@@ -549,6 +549,40 @@ def distant_features(d: dict, schema, type_schema, tok, max_subwords: int, n_rel
     return f
 
 
+def pretrain_features(d: dict, bank_ids: dict, tok, max_subwords: int, n_rel: int,
+                      n_cls: int, stats: Counter, markers: bool = True) -> dict | None:
+    """A relation-pretraining document (``v6.relation_pretrain``): Wikipedia
+    text with its given entities (and any the teacher added), the teacher's
+    facts by bank id, and the Wikidata-style schema it was asked about.
+    Partial, like the teacher corpus."""
+    from .data import blank_window, marker_features
+    spans = [tuple(s) for s in d["sentence_spans"]]
+    f = blank_window(d["tokens"], spans, tok, max_subwords, n_cls)
+    W = f["_W"]
+    keep, ents = {}, []
+    for i, e in enumerate(d["entities"]):
+        ms = sorted({(int(a), int(b)) for a, b in e["mentions"] if b <= W and f["word_ok"][a]})
+        if ms:
+            keep[i] = len(ents)
+            ents.append(np.asarray(ms, dtype=np.int32))
+    if len(ents) < 2:
+        stats["pretrain_docs_dropped"] += 1
+        return None
+    trip = []
+    for h, t, name in d["facts"]:
+        r = bank_ids.get(name)
+        if r is not None and h in keep and t in keep and keep[h] != keep[t]:
+            trip.append((keep[h], keep[t], r))
+    schema = sorted(bank_ids[n] for n in d["relations"] if n in bank_ids)
+    f.update(coref=None, _n_rel=n_rel,
+             rel=_rel(ents, sorted(set(trip)), schema, n_rel, True, UNLABELLED_KEEP["pretrain"]))
+    if markers:
+        f["rm"] = marker_features(d["tokens"], spans, ents, tok)
+    stats["pretrain_docs"] += 1
+    stats["pretrain_triples"] += len(set(trip))
+    return f
+
+
 def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: int,
                        bank: dict, markers: bool = True, limit: int | None = None,
                        stats: Counter | None = None) -> list[dict]:
@@ -589,8 +623,12 @@ def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: i
                  if (f := teacher_features(it, p, tok, max_subwords, bank, n_cls, local, markers))]
     else:
         data = json.loads(path.read_text())
-        rows = data[split][:limit]
-        if source == "fewrel":
+        rows = data[split][:limit] if split in data else []
+        if source == "pretrain":
+            ids = {r["name"]: r["id"] for r in bank["relations"]}
+            feats = [f for x in data["docs"][:limit] if (f := pretrain_features(
+                x, ids, tok, max_subwords, n_rel, n_cls, local, markers))]
+        elif source == "fewrel":
             sch = data["val_schema"] if split == "val" else data["schema"]
             feats = [f for x in rows if (f := fewrel_features(
                 x, sch, tok, max_subwords, n_rel, n_cls, local, markers))]

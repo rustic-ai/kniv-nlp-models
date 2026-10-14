@@ -235,7 +235,8 @@ def build_bundles() -> tuple[Path, Path, str]:
     extra = [p for p in (corpus / "entities_docred.json", corpus / "redocred_rel.json",
                          corpus / "label_bank.json", corpus / "kg_teacher.json",
                          corpus / "fewrel_rel.json", corpus / "fewnerd_spans.json",
-                         corpus / "docred_distant_rel.json", corpus / "kg_holdout.json")
+                         corpus / "docred_distant_rel.json", corpus / "kg_holdout.json",
+                         corpus / "kg_pretrain.json")
              if p.exists()]
     # Keyed by every bundled side file's size and mtime: a name that ignores
     # one ships a stale copy of it (the Re-DocRED evidence was lost that way).

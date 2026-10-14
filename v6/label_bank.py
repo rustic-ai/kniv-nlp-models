@@ -35,7 +35,7 @@ from pathlib import Path
 from .config import DATA_DIR
 
 BANK_PATH = DATA_DIR / "v6-corpus" / "label_bank.json"
-VERSION = 4
+VERSION = 5
 N_HOLDOUT = 20
 
 # DocRED's coarse entity types, described for the label pass.
@@ -107,6 +107,24 @@ def build() -> dict:
                               "category": r.get("category") or "other",
                               "domains": r.get("domains") or {},
                               "inverse": r.get("inverse")})
+    # Wikidata's commonly used properties (relation pretraining, v6.2): every
+    # entity, date and quantity property with >= 1,000 uses and a
+    # description, minus Wikimedia-internal ones and any overlapping a
+    # zero-shot holdout (data/wikidata/properties_selected.json).
+    wd = DATA_DIR / "wikidata" / "properties_selected.json"
+    meta = ("wikimedia", "wikidata", "category", "copyright", "described by source",
+            "cites work", "on focus list", "stated in", "main subject", "topic's main")
+    if wd.exists():
+        for r in json.loads(wd.read_text()):
+            if r["name"].lower() in seen or r["code"] in {x.get("code") for x in relations} \
+                    or any(m in r["name"].lower() for m in meta):
+                continue
+            seen_code = r["code"]
+            relations.append({"id": len(relations), "name": r["name"], "description": r["description"],
+                              "aliases": r["aliases"][:12], "source": "wikidata", "code": seen_code,
+                              "holdout": False, "train": True, "category": "wikidata",
+                              "datatype": r["type"], "usage": r["usage"]})
+            seen.add(r["name"].lower())
     types = [{"id": i, "name": name, "description": desc, "aliases": [], "source": "docred",
               "code": code, "mergeable": code in ("PER", "ORG", "LOC", "MISC"),
               "temporal": code == "TIME"}
