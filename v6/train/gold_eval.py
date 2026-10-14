@@ -851,6 +851,9 @@ def main() -> int:
                     help="SGD test turns, sampled with a fixed seed (0 = all)")
     ap.add_argument("--device")
     ap.add_argument("--local", type=Path, help="read <dir>/<run>/best.pt instead of the hub")
+    ap.add_argument("--no-xattn", action="store_true",
+                    help="v6.2 zero-shot head: switch the label cross-attention off, to measure "
+                         "what it adds")
     args = ap.parse_args()
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else
                                           "mps" if torch.backends.mps.is_available() else "cpu"))
@@ -860,6 +863,9 @@ def main() -> int:
     for run in args.runs.split(","):
         t0 = time.time()
         model, tok, spec, vocab, best = load_run(run, args.repo, device, args.local)
+        if args.no_xattn and hasattr(model.relation, "xattn_off"):
+            model.relation.xattn_off = True
+            print(f"{run}: label cross-attention switched off", flush=True)
         print(f"{run}: best.pt from step {best['step']} (dev {best['value']}), "
               f"SRL head {model.srl_mode}, on {device}",
               flush=True)
