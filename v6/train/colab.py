@@ -943,7 +943,18 @@ def cmd_queue(a) -> int:
                                          hf_repo=a.hf_repo, extra=list(a.extra))
         print(f"\n=== {n}: launching on {sess}", flush=True)
         relaunches = 0
-        started = cmd_launch(launch_args) == 0
+
+        def try_launch() -> bool:
+            # A VM whose setup times out (pip, auth, upload) is released and
+            # counted as not started, so the relaunch path below retries it
+            # instead of the whole queue dying with the VM still billing.
+            try:
+                return cmd_launch(launch_args) == 0
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+                print(f"{n}: launch failed ({type(exc).__name__}); releasing {sess}", flush=True)
+                release(sess, check=False)
+                return False
+        started = try_launch()
         state = None
         while True:
             if not started:
@@ -977,7 +988,7 @@ def cmd_queue(a) -> int:
                   flush=True)
             _kill_holder(sess)
             release(sess, check=False, quiet=True)
-            started = cmd_launch(launch_args) == 0
+            started = try_launch()
         outcome[n] = state
         _kill_holder(sess)
         release(sess, check=False, quiet=True)
