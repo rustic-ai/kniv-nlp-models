@@ -588,7 +588,7 @@ def pretrain_features(d: dict, bank_ids: dict, tok, max_subwords: int, n_rel: in
 
 def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: int,
                        bank: dict, markers: bool = True, limit: int | None = None,
-                       stats: Counter | None = None) -> list[dict]:
+                       stats: Counter | None = None, progress=None) -> list[dict]:
     """Feature dicts for one knowledge source, cached on disk per (source,
     split, tokenizer, limit, markers, bank hash, source file)."""
     import pickle
@@ -614,6 +614,13 @@ def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: i
         return feats
     n_rel = len(bank["relations"])
     local = Counter()
+
+    def tick(seq):
+        # A long source on a slow VM CPU must not read as a dead run.
+        for i, x in enumerate(seq):
+            if progress is not None and i % 2000 == 0:
+                progress(f"featurising {source}: {i:,}")
+            yield x
     if source == "teacher":
         from ..kg_teacher import load_export
         pairs = [(it, p) for it, p in load_export(path) if _is_dev(it.id) == (split == "dev")]
@@ -622,24 +629,24 @@ def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: i
             # about zero-shot reading.
             hold = set((load_holdout() or {}).get("names", []))
             pairs = [(it, p) for it, p in pairs if hold & {r["name"] for r in it.relations}]
-        feats = [f for it, p in pairs[:limit]
+        feats = [f for it, p in tick(pairs[:limit])
                  if (f := teacher_features(it, p, tok, max_subwords, bank, n_cls, local, markers))]
     else:
         data = json.loads(path.read_text())
         rows = data[split][:limit] if split in data else []
         if source == "pretrain":
             ids = {r["name"]: r["id"] for r in bank["relations"]}
-            feats = [f for x in data["docs"][:limit] if (f := pretrain_features(
+            feats = [f for x in tick(data["docs"][:limit]) if (f := pretrain_features(
                 x, ids, tok, max_subwords, n_rel, n_cls, local, markers))]
         elif source == "fewrel":
             sch = data["val_schema"] if split == "val" else data["schema"]
-            feats = [f for x in rows if (f := fewrel_features(
+            feats = [f for x in tick(rows) if (f := fewrel_features(
                 x, sch, tok, max_subwords, n_rel, n_cls, local, markers))]
         elif source == "fewnerd":
             feats = [fewnerd_features(x, data["schema"], tok, max_subwords, n_cls, local)
-                     for x in rows]
+                     for x in tick(rows)]
         else:
-            feats = [f for x in rows if (f := distant_features(
+            feats = [f for x in tick(rows) if (f := distant_features(
                 x, data["schema"], data["type_schema"], tok, max_subwords, n_rel, n_cls,
                 local, markers))]
     FEATURES.mkdir(parents=True, exist_ok=True)

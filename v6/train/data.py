@@ -577,7 +577,7 @@ def _key(spec, split: str, vocab: Vocab, limit: int | None,
 
 def featurise(spec, split: str, vocab: Vocab, tok=None,
               limit: int | None = None, srl_sentences: bool = False,
-              phase2: bool = False) -> list[dict]:
+              phase2: bool = False, progress=None) -> list[dict]:
     """Encoded rows for one split, cached per (tokenizer, limit, vocab, corpus).
 
     The key covers the corpus files' sizes and mtimes, so a re-assembled
@@ -598,8 +598,11 @@ def featurise(spec, split: str, vocab: Vocab, tok=None,
     p2 = load_phase2() if phase2 else None
     if phase2:
         rows = load_rows(split, limit=limit, columns=COLUMNS + ["coref", "relations"])
-    out = [encode_row(r, tok, spec.max_subwords, vocab, stats, srl_sentences, p2)
-           for r in rows]
+    out = []
+    for i, r in enumerate(rows):
+        out.append(encode_row(r, tok, spec.max_subwords, vocab, stats, srl_sentences, p2))
+        if progress is not None and i % 2000 == 0:
+            progress(f"featurising the {split} corpus: {i:,}/{len(rows):,}")
     print(f"featurised {split}: {len(out)} windows in {time.time() - t0:.0f}s; "
           + ", ".join(f"{k} {v:,}" for k, v in sorted(stats.items())),
           flush=True)

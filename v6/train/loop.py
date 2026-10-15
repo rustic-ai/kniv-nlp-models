@@ -589,7 +589,7 @@ def main() -> int:
     cond = args.srl_mode == "conditioned"
     preparing("featurising the corpus")
     train = featurise(spec, "train", vocab, tok, limit=args.train_limit, srl_sentences=cond,
-                      phase2=args.phase2)
+                      phase2=args.phase2, progress=preparing)
     dev = (featurise(spec, "dev", vocab, tok, limit=args.dev_limit, srl_sentences=cond,
                      phase2=args.phase2) if not args.probe else [])
     heads = HEADS + (PHASE2_HEADS if args.phase2 else ())
@@ -635,7 +635,7 @@ def main() -> int:
             st = Counter()
             feats = knowledge_features(src, "train", tok, spec.max_subwords, vocab.size("cls"),
                                        kg_bank, markers=args.rel_markers, limit=args.train_limit,
-                                       stats=st)
+                                       stats=st, progress=preparing)
             if src == "teacher" and over:
                 feats = [f for f in feats for _ in range(over.get(f.get("_domain"), 1))]
             w = float(n)
