@@ -554,6 +554,16 @@ def main() -> int:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else
                                           "mps" if torch.backends.mps.is_available()
                                           else "cpu"))
+    if device.type == "cuda":
+        # Without gradient checkpointing (knowledge-full) activation sizes vary
+        # widely between batches; the caching allocator then fragments until
+        # a small request fails with most of the card reserved but unused
+        # (v7 bake-off: OOM at 38.4 GB reserved, ~6 GB in use). Expandable
+        # segments let freed blocks be reused at any size.
+        try:
+            torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+        except Exception as exc:                        # older torch: env var only
+            print(f"allocator settings not applied: {exc}", flush=True)
     bf16 = device.type == "cuda" and torch.cuda.is_bf16_supported()
 
     def amp():
