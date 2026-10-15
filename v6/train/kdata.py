@@ -337,13 +337,16 @@ class TypeCollator:
         return batch
 
 
-def decode_spans(logits: torch.Tensor, batch: dict) -> list[list[tuple[int, int, int]]]:
+def decode_spans(logits: torch.Tensor, batch: dict,
+                 offset: float = 0.0) -> list[list[tuple[int, int, int]]]:
     """Greedy flat decoding: per item, spans whose best type beats the
     threshold, highest margin first, skipping any that overlap one taken.
     ``(start, end_exclusive, bank type id)``."""
     if len(logits) == 0:
         return []
-    margin = logits[:, 1:] - logits[:, :1]
+    # ``offset``: a span is kept when its best margin exceeds it (calibrated
+    # for type names the head never trained on, like the label path's).
+    margin = logits[:, 1:] - logits[:, :1] - offset
     best, j = margin.max(1)
     cols = batch["type_label_cols"]
     out: dict[int, list] = {}

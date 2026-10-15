@@ -89,7 +89,7 @@ def f1(gold: list[set], pred: list[set]) -> dict:
 
 @torch.no_grad()
 def kniv_predict(model, tok, spec, vocab, device, items: list[dict], labels: list[str],
-                 batch: int = 16) -> list[set]:
+                 batch: int = 16, offset: float = 0.0) -> list[set]:
     from .data import blank_window, collate
     from .kdata import TypeCollator, decode_spans, span_targets
     # kniv's span head trained on "entity type: <name>. <description>"; a
@@ -114,7 +114,8 @@ def kniv_predict(model, tok, spec, vocab, device, items: list[dict], labels: lis
         b = coll(collate([feats[i] for i in idx], tok.pad_token_id))
         b = {n: v.to(device) for n, v in b.items() if hasattr(v, "to")}
         o = model(b, relation_only=True)
-        for j, spans in enumerate(decode_spans(o["span"].float().cpu(), {n: v.cpu() for n, v in b.items()})):
+        for j, spans in enumerate(decode_spans(o["span"].float().cpu(), {n: v.cpu() for n, v in b.items()},
+                                          offset=offset)):
             out[idx[j]] = {(s, e, labels[t]) for s, e, t in spans}
     return out
 
@@ -129,6 +130,9 @@ def main() -> int:
     ap.add_argument("--threshold", type=float, default=0.5)
     ap.add_argument("--fewnerd", type=int, default=3000)
     ap.add_argument("--device")
+    ap.add_argument("--calibrate-on", metavar="SET",
+                    help="choose kniv's span offset on SET (e.g. crossner_politics) and report the "
+                         "other sets at it; written into the run's calibration record")
     ap.add_argument("--describe", action="store_true",
                     help="give kniv 'a <name>' as each type's description (its trained format)")
     args = ap.parse_args()
@@ -159,13 +163,32 @@ def main() -> int:
                                           "mps" if torch.backends.mps.is_available() else "cpu"))
     for run in [r for r in args.runs.split(",") if r]:
         model, tok, spec_, vocab, _ = load_run(run, args.repo, device, args.local)
-        results[run] = {n: f1(gold[n], kniv_predict(model, tok, spec_, vocab, device, s, labels[n]))
+        off = 0.0
+        if args.calibrate_on:
+            c = args.calibrate_on
+            sweep = {o_: f1(gold[c], kniv_predict(model, tok, spec_, vocab, device, sets[c], labels[c],
+                                                  offset=o_))["f1"]
+                     for o_ in np.round(np.arange(-5.0, 1.01, 0.5), 2)}
+            off = float(max(sweep, key=sweep.get))
+            print(f"{run}: span offset {off:+.2f} chosen on {c} "
+                  f"({', '.join(f'{k:+.1f}:{v:.3f}' for k, v in sweep.items())})", flush=True)
+            rec = RUNS_DIR / "calibration" / f"{run}.slim.json"
+            if rec.exists():
+                r = json.loads(rec.read_text()); r["span_offset"] = off
+                r["span_offset_note"] = f"chosen on {c} (describe={DESCRIBE})"
+                rec.write_text(json.dumps(r, indent=1))
+        results[run] = {n: f1(gold[n], kniv_predict(model, tok, spec_, vocab, device, s, labels[n],
+                                                    offset=off))
                         for n, s in sets.items()}
+        if args.calibrate_on:
+            results[run]["_span_offset"] = off
         del model
     for who, r in results.items():
-        cn = np.mean([r[f"crossner_{d}"]["f1"] for d in DOMAINS])
+        held = [d for d in DOMAINS if f"crossner_{d}" != args.calibrate_on]
+        cn = np.mean([r[f"crossner_{d}"]["f1"] for d in held])
         print(f"{who}: Few-NERD {r['fewnerd']['f1']:.4f} | CrossNER " +
-              " ".join(f"{d} {r[f'crossner_{d}']['f1']:.4f}" for d in DOMAINS) + f" | mean {cn:.4f}",
+              " ".join(f"{d} {r[f'crossner_{d}']['f1']:.4f}" for d in DOMAINS)
+              + f" | mean of {len(held)} {cn:.4f}",
               flush=True)
     (out / "results.json").write_text(json.dumps(results, indent=1))
     print(f"written to {out}")
