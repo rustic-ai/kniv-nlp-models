@@ -30,6 +30,7 @@ from ..config import DATA_DIR, RUNS_DIR
 from .gold_eval import HF_REPO, load_run
 
 CROSSNER = DATA_DIR / "crossner"
+DESCRIBE = False
 DOMAINS = ("politics", "science", "music", "literature", "ai")
 READABLE = {"programlang": "programming language", "misc": "miscellaneous",
             "organisation": "organisation", "politicalparty": "political party",
@@ -91,7 +92,11 @@ def kniv_predict(model, tok, spec, vocab, device, items: list[dict], labels: lis
                  batch: int = 16) -> list[set]:
     from .data import blank_window, collate
     from .kdata import TypeCollator, decode_spans, span_targets
-    bank = {"entity_types": [{"id": i, "name": n, "description": ""} for i, n in enumerate(labels)]}
+    # kniv's span head trained on "entity type: <name>. <description>"; a
+    # description built from the name alone keeps that shape without giving
+    # it anything GLiNER is not given (--describe).
+    desc = (lambda n: f"a {n}") if DESCRIBE else (lambda n: "")
+    bank = {"entity_types": [{"id": i, "name": n, "description": desc(n)} for i, n in enumerate(labels)]}
     coll = TypeCollator(tok, bank, train=False)
     lid = {n: i for i, n in enumerate(labels)}
     feats = []
@@ -124,7 +129,11 @@ def main() -> int:
     ap.add_argument("--threshold", type=float, default=0.5)
     ap.add_argument("--fewnerd", type=int, default=3000)
     ap.add_argument("--device")
+    ap.add_argument("--describe", action="store_true",
+                    help="give kniv 'a <name>' as each type's description (its trained format)")
     args = ap.parse_args()
+    global DESCRIBE
+    DESCRIBE = args.describe
     sets = {"fewnerd": load_fewnerd(args.fewnerd)}
     for d in DOMAINS:
         sets[f"crossner_{d}"] = load_crossner(d)
