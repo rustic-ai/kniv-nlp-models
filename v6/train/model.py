@@ -807,6 +807,10 @@ class V6Model(nn.Module):
         # Set by a run that trains only heads: the encoder then runs without
         # gradient and without dropout, the features it will give at inference.
         self.freeze_encoder = False
+        # Calibration for relations the label path never trained on
+        # (calibrate_zs): label-path relations are predicted when their margin
+        # exceeds this offset. Applied at inference only; 0 = uncalibrated.
+        self.zs_offset = 0.0
         self.cls = classifier(H, H, S["cls"], p)
         self.sentiment = classifier(H, H, S["sentiment"], p)
 
@@ -1034,6 +1038,9 @@ class V6Model(nn.Module):
                 if emb is None:
                     emb = self.label_embeddings(batch["rel_label_ids"], batch["rel_label_mask"])
                 o["relation"], o["relation_sent_att"] = self.relation(seq, att, batch, emb)
+                if not self.training and self.zs_offset and len(o["relation"]):
+                    o["relation"] = o["relation"].clone()
+                    o["relation"][:, 0] += self.zs_offset      # shifts every label-path margin
                 if getattr(self.relation, "kd_logits", None) is not None and self.training:
                     o["relation_kd_old"] = self.relation.kd_logits
                     self.relation.kd_logits = None

@@ -851,6 +851,9 @@ def main() -> int:
                     help="SGD test turns, sampled with a fixed seed (0 = all)")
     ap.add_argument("--device")
     ap.add_argument("--local", type=Path, help="read <dir>/<run>/best.pt instead of the hub")
+    ap.add_argument("--zs-offset", type=float,
+                    help="label-path threshold offset (calibrate_zs); default: the run's "
+                         "calibration.json on the hub, if any, else 0")
     ap.add_argument("--no-xattn", action="store_true",
                     help="v6.2 zero-shot head: switch the label cross-attention off, to measure "
                          "what it adds")
@@ -863,6 +866,18 @@ def main() -> int:
     for run in args.runs.split(","):
         t0 = time.time()
         model, tok, spec, vocab, best = load_run(run, args.repo, device, args.local)
+        if hasattr(model, "zs_offset"):
+            off = args.zs_offset
+            if off is None and not args.local:
+                from huggingface_hub import hf_hub_download
+                try:
+                    off = json.loads(Path(hf_hub_download(args.repo, f"{run}/calibration.json",
+                                                          local_dir=str(CKPT_DIR))).read_text())["offset"]
+                except Exception:
+                    off = 0.0
+            model.zs_offset = float(off or 0.0)
+            if model.zs_offset:
+                print(f"{run}: label-path offset {model.zs_offset:+.2f}", flush=True)
         if args.no_xattn and hasattr(model.relation, "xattn_off"):
             model.relation.xattn_off = True
             print(f"{run}: label cross-attention switched off", flush=True)
