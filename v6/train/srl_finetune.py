@@ -221,6 +221,19 @@ def score_full(model, reps, rows, frames, tags, device) -> dict:
     return {"pred_id_f1": f1(pid), "role_f1": f1(role), "e2e_f1": f1(e2e)}
 
 
+def upload(out, run: str, enabled: bool) -> None:
+    """Mirror a fine-tuned checkpoint to the runs repo beside the training
+    runs' (``<run>/best.pt``, ``best.metric``), so a local fine-tune is not
+    the only copy."""
+    if not enabled:
+        return
+    from huggingface_hub import HfApi
+    HfApi().upload_folder(repo_id=HF_REPO, folder_path=str(out), path_in_repo=run,
+                          allow_patterns=["best.pt", "best.metric"],
+                          commit_message=f"Add {run} (SRL head fine-tune)")
+    print(f"uploaded to {HF_REPO}/{run}", flush=True)
+
+
 def main_full(args, model, tok, spec, vocab, best, device, rng) -> int:
     tags = vocab.labels["srl"]
     test = {tuple(r["words"]) for r in load_full("test", set())} | {
@@ -314,6 +327,7 @@ def _write(args, best_state, best, history, before, after, data, trained) -> int
         "metric": f"dev composite of the base run; {', '.join(trained)} fine-tuned on {data}",
         **{f"srl_dev_{k}": v for k, v in after.items()}}))
     print(f"{len(best_state)} SRL tensors replaced; wrote {out / 'best.pt'}", flush=True)
+    upload(out, args.out_run, not args.no_upload)
     print(f"score it: uv run python -m v6.train.gold_eval --local {CKPT_DIR} "
           f"--runs {args.run},{args.out_run} --benchmarks srl,srl_full")
     return 0
@@ -332,6 +346,8 @@ def main() -> int:
     ap.add_argument("--data", choices=["full", "root"], default="full",
                     help="full: every PropBank predicate (gold.propbank_full), predicate head "
                          "trained too; root: v5's one-root-predicate files, role head only")
+    ap.add_argument("--no-upload", action="store_true",
+                    help="keep the fine-tuned checkpoint local (default: also upload it to the runs repo)")
     ap.add_argument("--all-sources", action="store_true",
                     help="train on all of srl_train.json (PropBank + MASC + QA-SRL + silver)")
     args = ap.parse_args()
@@ -429,6 +445,7 @@ def main() -> int:
         "srl_dev_f1": best_f1}))
     print(f"dev SRL F1 {base:.4f} -> {best_f1:.4f}; {changed} SRL tensors replaced; "
           f"wrote {out / 'best.pt'}", flush=True)
+    upload(out, args.out_run, not args.no_upload)
     print(f"score it: uv run python -m v6.train.gold_eval --local {CKPT_DIR} "
           f"--runs {args.run},{args.out_run}")
     return 0
