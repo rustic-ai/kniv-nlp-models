@@ -38,6 +38,7 @@ class EncoderSpec:
     grad_accum: int = 4          # batch_size * grad_accum windows per step
     grad_checkpointing: bool = True
     attn_implementation: str | None = None   # None: transformers' default
+    trust_remote_code: bool = False          # the model ships its own code (read before use)
 
     def asdict(self) -> dict:
         return asdict(self)
@@ -55,10 +56,20 @@ ENCODERS: dict[str, EncoderSpec] = {s.name: s for s in [
     EncoderSpec("ettin-1b", "jhu-clsp/ettin-encoder-1b",
                 max_subwords=1024, encoder_lr=1.7e-4,
                 batch_size=4, grad_accum=8),
+    # v7 bake-off: UltraBERT (dmis-lab, Apache-2.0, 32K context), its own
+    # modelling code (reviewed: torch and transformers only). Eager attention
+    # so the marker pass can read attention maps.
+    EncoderSpec("ultrabert-380m", "dmis-lab/UltraBERT-380M",
+                max_subwords=1024, encoder_lr=1e-4, attn_implementation="eager",
+                trust_remote_code=True),
     # Local siblings: same tokenizer and architecture, laptop-sized.
     EncoderSpec("deberta-v3-xsmall", "microsoft/deberta-v3-xsmall",
                 max_subwords=512, encoder_lr=5e-5, batch_size=4, grad_accum=1,
                 grad_checkpointing=False),
+    EncoderSpec("ultrabert-150m", "dmis-lab/UltraBERT-150M",
+                max_subwords=1024, encoder_lr=1e-4, batch_size=2, grad_accum=1,
+                grad_checkpointing=False, attn_implementation="eager",
+                trust_remote_code=True),
     EncoderSpec("ettin-17m", "jhu-clsp/ettin-encoder-17m",
                 max_subwords=1024, encoder_lr=1e-4, batch_size=4,
                 grad_accum=1, grad_checkpointing=False),

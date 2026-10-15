@@ -89,7 +89,9 @@ def load_run(run: str, repo: str, device, local: Path | None = None) -> tuple:
                     legacy_relation=cfg.get("legacy_relation", False),
                     span_head=cfg.get("span_head", False),
                     label_adapter=cfg.get("label_adapter", 0),
-                    legacy_rank=cfg.get("legacy_rank"))
+                    legacy_rank=cfg.get("legacy_rank"),
+                    attn_implementation=spec.attn_implementation,
+                    trust_remote_code=spec.trust_remote_code)
     model.load_state_dict(ck["model"])          # strict: a mismatch raises
     model.to(device).eval()
     tok = AutoTokenizer.from_pretrained(spec.hf_id)

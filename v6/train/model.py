@@ -694,7 +694,7 @@ class V6Model(nn.Module):
                  rel_head: str = "bilinear", label_dim: int = 1024,
                  label_plain: bool = True, legacy_relation: bool = False,
                  span_head: bool = False, label_adapter: int = 0,
-                 legacy_rank: int | None = None):
+                 legacy_rank: int | None = None, trust_remote_code: bool = False):
         super().__init__()
         from transformers import AutoConfig, AutoModel
         # fp32 master weights for every encoder; bf16 autocast does the
@@ -704,10 +704,13 @@ class V6Model(nn.Module):
         # AdamW updates at its learning rate are mostly lost to rounding -- a
         # silent handicap in exactly the comparison these runs exist for.
         kw = {"attn_implementation": attn_implementation} if attn_implementation else {}
+        if trust_remote_code:
+            kw["trust_remote_code"] = True
         if pretrained:
             self.encoder = AutoModel.from_pretrained(hf_id, dtype=torch.float32, **kw)
         else:
-            self.encoder = AutoModel.from_config(AutoConfig.from_pretrained(hf_id),
+            self.encoder = AutoModel.from_config(AutoConfig.from_pretrained(
+                hf_id, trust_remote_code=trust_remote_code),
                                                  dtype=torch.float32, **kw)
         H = self.encoder.config.hidden_size
         L = self.encoder.config.num_hidden_layers + 1
@@ -807,6 +810,9 @@ class V6Model(nn.Module):
         # Set by a run that trains only heads: the encoder then runs without
         # gradient and without dropout, the features it will give at inference.
         self.freeze_encoder = False
+        # v7 knowledge pretraining: the plain pass (span head) trains the
+        # encoder too, instead of running without gradient.
+        self.plain_grad = False
         # Calibration for relations the label path never trained on
         # (calibrate_zs): label-path relations are predicted when their margin
         # exceeds this offset. Applied at inference only; 0 = uncalibrated.
@@ -1078,7 +1084,7 @@ class V6Model(nn.Module):
             if self.rel_markers:
                 if self.rel_lora is not None:
                     self.rel_lora.on = False      # the plain pass is plain
-                with torch.no_grad():
+                with torch.set_grad_enabled(torch.is_grad_enabled() and self.plain_grad):
                     out = self.encoder(input_ids=batch["input_ids"],
                                        attention_mask=batch["attention_mask"],
                                        output_hidden_states=True)

@@ -272,7 +272,8 @@ def _rank_of(state: dict) -> int:
     return next(v.size(0) for k, v in state.items() if k.startswith("rel_lora.A."))
 
 
-def _load_init(model, init: str, vocab: Vocab, relation: str = "drop") -> dict:
+def _load_init(model, init: str, vocab: Vocab, relation: str = "drop",
+               partial: bool = False) -> dict:
     """Weights from a checkpoint; heads it lacks start fresh. A vocabulary
     that disagrees on any shared inventory refuses to load.
 
@@ -310,6 +311,12 @@ def _load_init(model, init: str, vocab: Vocab, relation: str = "drop") -> dict:
             print(f"relation adapter grown from rank {_rank_of(ck['model'])} "
                   f"to {next(iter(lora.A.values())).size(0)} ({n} tensors, output unchanged)",
                   flush=True)
+    if partial:
+        own = set(model.state_dict())
+        dropped = [k for k in state if k not in own]
+        state = {k: v for k, v in state.items() if k in own}
+        if dropped:
+            print(f"--init-partial: {len(dropped)} tensors of heads this model lacks dropped", flush=True)
     missing, unexpected = model.load_state_dict(state, strict=False)
     fresh = [m for m in missing if not m.startswith(("coref.", "relation.",
                                                       "mix.coref.", "mix.relation.", "ent.",
@@ -456,7 +463,8 @@ def main() -> int:
     ap.add_argument("--rel-adapter", type=int, default=0, metavar="R",
                     help="rank of a LoRA adapter for a second, relation-only encoder pass "
                          "feeding the relation and entity heads (0 = none)")
-    ap.add_argument("--train-scope", choices=["all", "phase2", "relation", "relation-full"],
+    ap.add_argument("--train-scope", choices=["all", "phase2", "relation", "relation-full",
+                                              "knowledge-full"],
                     default="all",
                     help="phase2: train only the phase-2 heads and their layer mixes; "
                          "everything else stays exactly as --init left it")
@@ -501,6 +509,14 @@ def main() -> int:
     ap.add_argument("--srl-mode", choices=["joint", "conditioned"], default="joint",
                     help="joint: every predicate in one pass (v6); conditioned: one "
                          "pass per predicate over its sentence (v5), for MODEL_CHANGES §1")
+    ap.add_argument("--encoder-lr-scale", type=float, default=1.0,
+                    help="multiply the encoder's registered learning rate (bake-offs)")
+    ap.add_argument("--attn-implementation", choices=["eager", "sdpa"],
+                    help="override the encoder's attention implementation (eager: the marker "
+                         "pass can read attention maps on Ettin/ModernBERT)")
+    ap.add_argument("--init-partial", action="store_true",
+                    help="--init may carry heads this model lacks (a knowledge-pretrained "
+                         "encoder starting phase 1): they are dropped")
     ap.add_argument("--grad-checkpointing", choices=["on", "off"],
                     help="override the encoder's default")
     ap.add_argument("--warmup", type=float, default=0.06)
@@ -526,8 +542,13 @@ def main() -> int:
                               ("batch_size", args.batch_size),
                               ("grad_accum", args.grad_accum),
                               ("grad_checkpointing", None if args.grad_checkpointing is None
-                               else args.grad_checkpointing == "on")) if v is not None}
+                               else args.grad_checkpointing == "on"),
+                              ("attn_implementation", args.attn_implementation)) if v is not None}
     spec = dataclasses.replace(spec, **over)
+    if args.encoder_lr_scale != 1.0:
+        # One factor for every encoder keeps a bake-off fair to each one's own
+        # swept rate (DeBERTa 8e-5, Ettin 2.8e-4 for phase 1).
+        spec = dataclasses.replace(spec, encoder_lr=spec.encoder_lr * args.encoder_lr_scale)
     run_name = args.run_name or spec.name
     out = args.out or RUNS_DIR / "train" / run_name
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else
@@ -577,7 +598,7 @@ def main() -> int:
         rd = redocred_features("train", tok, spec.max_subwords, vocab, st,
                                markers=args.rel_markers)
         if args.relation_data == "redocred":
-            if not args.train_scope.startswith("relation"):
+            if not (args.train_scope.startswith("relation") or args.train_scope == "knowledge-full"):
                 raise SystemExit("--relation-data redocred needs --train-scope relation: "
                                  "the corpus windows supervise every other head")
             train = rd * args.redocred_train
@@ -625,11 +646,13 @@ def main() -> int:
                     label_plain=args.label_pass == "plain",
                     legacy_relation=bool(args.legacy_relation),
                     span_head=args.span_head, label_adapter=args.label_adapter,
-                    legacy_rank=args.legacy_rank).to(device)
+                    legacy_rank=args.legacy_rank,
+                    trust_remote_code=spec.trust_remote_code).to(device)
     init_relation = args.init_relation or "drop"
     if init_relation == "transplant" and args.rel_head != "label":
         raise SystemExit("--init-relation transplant needs --rel-head label")
-    init_state = _load_init(model, args.init, vocab, init_relation) if args.init else None
+    init_state = (_load_init(model, args.init, vocab, init_relation, partial=args.init_partial)
+                  if args.init else None)
     preparing("building the model")
     if args.legacy_relation:
         _load_legacy(model, args.legacy_relation)
@@ -707,6 +730,23 @@ def main() -> int:
         for n, prm in model.named_parameters():
             prm.requires_grad = n.startswith(("encoder.", "relation.", "mix.relation.",
                                               "ent.", "mix.ent."))
+        heads = RELATION_HEADS
+    elif args.train_scope == "knowledge-full":
+        # v7 knowledge pretraining: the encoder itself trains, through the
+        # plain pass (spans), the marker pass (relations, with its adapter)
+        # and the label pass (with its adapter). Adapters switch by a global
+        # flag, so a gradient-checkpointing recompute could run under the
+        # wrong adapter: checkpointing must be off.
+        if not (args.rel_adapter and args.label_adapter and args.rel_head == "zs"):
+            raise SystemExit("--train-scope knowledge-full needs --rel-head zs, --rel-adapter "
+                             "and --label-adapter")
+        if spec.grad_checkpointing:
+            raise SystemExit("--train-scope knowledge-full needs --grad-checkpointing off")
+        for n, prm in model.named_parameters():
+            prm.requires_grad = n.startswith(("encoder.", "rel_lora.", "relation.",
+                                              "mix.relation.", "label_enc.", "label_lora.",
+                                              "span.", "mix.ent_span."))
+        model.plain_grad = True
         heads = RELATION_HEADS
     elif args.train_scope == "relation":
         # The relation adapter, relation and entity heads alone, on the adapted
@@ -846,7 +886,8 @@ def main() -> int:
                     b = collate([train[i] for i in batches[m]], tok.pad_token_id)
                     b = _to(label_coll(b) if label_coll is not None else b, device)
                     with amp():
-                        o = model(b, relation_only=args.train_scope.startswith("relation"))
+                        o = model(b, relation_only=args.train_scope.startswith("relation")
+                                  or args.train_scope == "knowledge-full")
                     L = losses(o, b)
                     vals = {h: l.item() for h, (l, n) in L.items() if n}
                     bad = [h for h, v in vals.items() if not math.isfinite(v)]
@@ -936,7 +977,7 @@ def main() -> int:
                                  label_coll_zs=label_coll_zs, span_gold=span_dev,
                                  extra_rel=extra_dev,
                                  beat=lambda: rs.status(state="evaluating"))
-                    if hasattr(model.relation, "gates"):
+                    if hasattr(getattr(model, "relation", None), "gates"):
                         r["xattn_gates"] = model.relation.gates()
                     if frozen_digest is not None and _frozen_digest(model) != frozen_digest:
                         why = f"a frozen tensor changed by step {step}"
