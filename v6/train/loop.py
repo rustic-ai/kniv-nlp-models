@@ -341,6 +341,9 @@ def _load_init(model, init: str, vocab: Vocab, relation: str = "drop",
         if dropped:
             print(f"--init-partial: {len(dropped)} tensors of heads this model lacks dropped", flush=True)
     missing, unexpected = model.load_state_dict(state, strict=False)
+    # What --init actually supplied: the optimiser gives only the rest the
+    # new-head learning rate.
+    model._init_loaded = set(state) - set(unexpected)
     fresh = [m for m in missing if not m.startswith(("coref.", "relation.",
                                                       "mix.coref.", "mix.relation.", "ent.",
                                                       "mix.ent.", "rel_lora.", "label_enc.",
@@ -838,8 +841,16 @@ def main() -> int:
     new_prefixes = ("span.", "mix.ent_span.", "label_lora.", "label_enc.score") + \
         (("relation.pair.", "relation.lab_in.", "relation.doc_proj.", "relation.xattn.",
           "relation.th", "relation.bias.", "relation.log_scale") if args.rel_head == "zs" else ())
-    new = {id(p) for n, p in model.named_parameters()
-           if n.startswith(new_prefixes) and p.requires_grad}
+    loaded = getattr(model, "_init_loaded", None)
+    if loaded is not None:
+        # From a checkpoint: "new" means not loaded from it -- a pretrained
+        # span or relation head is not new in stage B, a head it lacks is.
+        new = {id(p) for n, p in model.named_parameters() if n not in loaded and p.requires_grad}
+    else:
+        new = {id(p) for n, p in model.named_parameters()
+               if n.startswith(new_prefixes) and p.requires_grad}
+    print(f"new-head learning rate on {sum(p.numel() for p in model.parameters() if id(p) in new):,} "
+          f"parameters", flush=True)
     head_params = [p for p in model.head_parameters() if p.requires_grad]
     groups = [{"params": enc_decay, "lr": spec.encoder_lr, "weight_decay": args.weight_decay},
               {"params": enc_plain, "lr": spec.encoder_lr, "weight_decay": 0.0},
