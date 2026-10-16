@@ -936,10 +936,20 @@ def main() -> int:
                 for m in range(m0, m0 + spec.grad_accum):
                     b = collate([train[i] for i in batches[m]], tok.pad_token_id)
                     b = _to(label_coll(b) if label_coll is not None else b, device)
-                    with amp():
-                        o = model(b, relation_only=args.train_scope.startswith("relation")
-                                  or args.train_scope == "knowledge-full")
-                    L = losses(o, b)
+                    try:
+                        with amp():
+                            o = model(b, relation_only=args.train_scope.startswith("relation")
+                                      or args.train_scope == "knowledge-full")
+                        L = losses(o, b)
+                    except torch.OutOfMemoryError:
+                        # One oversized batch must not end a run that fits
+                        # otherwise: drop this step (like a non-finite one),
+                        # free the memory and carry on.
+                        o = L = b = None
+                        opt.zero_grad(set_to_none=True)
+                        torch.cuda.empty_cache()
+                        bad = ["out_of_memory"]
+                        break
                     vals = {h: l.item() for h, (l, n) in L.items() if n}
                     bad = [h for h, v in vals.items() if not math.isfinite(v)]
                     if bad:
