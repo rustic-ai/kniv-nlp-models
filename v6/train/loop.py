@@ -835,13 +835,16 @@ def main() -> int:
 
         def pairs(b):
             return sum(len(train[i]["rel"]["spans"]) ** 2 for i in b if train[i].get("rel"))
+        def words(b):                   # candidate spans and type columns grow with words
+            return sum(len(train[i]["first_subword"]) for i in b)
         picks = [max(real, key=lambda b: len(b) * max(_length(train[i]) for i in b) ** 2),
-                 max(real, key=pairs), max(real, key=len)]
+                 max(real, key=pairs), max(real, key=len), max(real, key=words)]
         print(f"probe batches: {[len(b) for b in picks]} items, longest "
               f"{[max(_length(train[i]) for i in b) for b in picks]} subwords, "
-              f"{[pairs(b) for b in picks]} pairs; {len(real):,} batches per epoch "
+              f"{[pairs(b) for b in picks]} pairs, {[words(b) for b in picks]} words; "
+              f"{len(real):,} batches per epoch "
               f"for {len(train):,} items", flush=True)
-        order = (picks * spec.grad_accum)[:max(spec.grad_accum, 3)]
+        order = (picks * spec.grad_accum)[:max(spec.grad_accum, len(picks))]
         return _probe(model, opt, train, order, args.probe, spec, tok, device, amp, label_coll)
     if args.probe:
         # Worst case: the longest windows, every step.
