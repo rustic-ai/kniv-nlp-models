@@ -47,6 +47,9 @@ from .vocab import Vocab, apply_script, edit_script
 
 CORPUS = DATA_DIR / "v6-corpus" / "corpus"
 FEATURES = DATA_DIR / "v6-corpus" / "features"
+# Every feature cache read or written by this process (loop --prepare-only
+# lists them in a manifest so they can be shipped to a VM).
+USED_CACHES: list = []
 IGNORE = -100
 TOKEN_LAYERS = ("pos", "morph", "lemma", "ner")
 # Phase 2's entity-mention head tags DocRED's six types with DocRED's mention
@@ -560,6 +563,28 @@ def redocred_features(split: str, tok, max_subwords: int, vocab: Vocab,
     return feats
 
 
+def file_digest(path) -> str:
+    """Content hash of a source file, remembered beside it by size and
+    mtime -- the feature cache key, so a cache built on one machine is valid
+    on another that has the same file."""
+    st = path.stat()
+    side = path.with_name(path.name + ".sha1")
+    if side.exists():
+        rec = json.loads(side.read_text())
+        if rec.get("size") == st.st_size and rec.get("mtime_ns") == st.st_mtime_ns:
+            return rec["sha1"]
+    h = hashlib.sha1()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 24), b""):
+            h.update(block)
+    try:
+        side.write_text(json.dumps({"size": st.st_size, "mtime_ns": st.st_mtime_ns,
+                                    "sha1": h.hexdigest()}))
+    except OSError:
+        pass
+    return h.hexdigest()
+
+
 def _key(spec, split: str, vocab: Vocab, limit: int | None,
          srl_sentences: bool = False, phase2: bool = False) -> str:
     manifest = DATA_DIR / "v6-corpus" / "MANIFEST.json"
@@ -570,8 +595,7 @@ def _key(spec, split: str, vocab: Vocab, limit: int | None,
                         ).encode())
     h.update(manifest.read_bytes() if manifest.exists() else b"")
     for f in sorted((CORPUS / f"split={split}").glob("domain=*/*.parquet")):
-        st = f.stat()
-        h.update(f"{f.name}{st.st_size}{st.st_mtime_ns}".encode())
+        h.update(f"{f.name}{file_digest(f)}".encode())
     return h.hexdigest()[:16]
 
 
@@ -580,12 +604,14 @@ def featurise(spec, split: str, vocab: Vocab, tok=None,
               phase2: bool = False, progress=None) -> list[dict]:
     """Encoded rows for one split, cached per (tokenizer, limit, vocab, corpus).
 
-    The key covers the corpus files' sizes and mtimes, so a re-assembled
-    corpus is re-featurised rather than silently served from a stale cache.
+    The key covers the corpus files' contents, so a re-assembled corpus is
+    re-featurised rather than silently served from a stale cache, and a cache
+    built on another machine from the same files is used as is.
     """
     import pickle
     path = FEATURES / (f"{spec.name}-{split}-"
                        f"{_key(spec, split, vocab, limit, srl_sentences, phase2)}.pkl")
+    USED_CACHES.append(path)
     if path.exists():
         with path.open("rb") as fh:
             return pickle.load(fh)

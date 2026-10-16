@@ -8,12 +8,13 @@ standard deviation over seeds.
 
 What differs from the published protocol, and why: there, m relations of
 FewRel's 80 are drawn per seed and the model trains on the other 80 - m. Our
-models are trained once, on FewRel's training relations, Re-DocRED and
-Wikidata-labelled documents, which cover nearly all of FewRel; only the 8
-validation relations no training source has (``train: false`` in the label
-bank) are unseen. So the m unseen relations are drawn from those 8: m = 5 over
-5 seeds, and m = 8 (one split). Comparable in metric and task, not in which
-relations are unseen -- relation sets differ in difficulty.
+models are trained once, so the unseen relations are fixed: the label bank's
+``train: false`` relations, removed from every training source. Version 5
+banks have 8 (FewRel validation relations no source has): m = 5 over 5 seeds
+and m = 8. Version 6 (v7) has the standard 15 (those 8 plus 7 of FewRel's
+training relations outside Re-DocRED): m = 5 / 10 over 5 seeds and m = 15,
+the published settings. Instances come from both FewRel splits. Comparable
+in metric and task, not in which relations are unseen.
 """
 from __future__ import annotations
 
@@ -82,7 +83,7 @@ def main() -> int:
     code = {r["code"]: r["id"] for r in unseen}
     per: dict[int, int] = {}
     items = []
-    for x in fewrel.load("val"):
+    for x in fewrel.load("train") + fewrel.load("val"):
         rid = code.get(x["code"])
         if rid is None or per.get(rid, 0) >= args.per_relation:
             continue
@@ -90,9 +91,10 @@ def main() -> int:
         items.append({"tokens": x["tokens"], "head": x["head"], "tail": x["tail"], "rel": rid})
     ids = sorted(code.values())
     rng = np.random.default_rng(13)
-    splits = {"m=5": [sorted(rng.choice(ids, size=5, replace=False).tolist())
-                      for _ in range(args.seeds)],
-              "m=8": [ids]}
+    sizes = [m for m in (5, 10) if m < len(ids)]
+    splits = {f"m={m}": [sorted(rng.choice(ids, size=m, replace=False).tolist())
+                         for _ in range(args.seeds)] for m in sizes}
+    splits[f"m={len(ids)}"] = [ids]
     print(f"{len(items)} instances over {len(ids)} unseen relations: "
           f"{', '.join(r['name'] for r in unseen)}", flush=True)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else

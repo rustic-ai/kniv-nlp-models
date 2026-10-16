@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import math
 import time
 from collections import Counter, defaultdict
@@ -514,6 +515,9 @@ def main() -> int:
     ap.add_argument("--attn-implementation", choices=["eager", "sdpa"],
                     help="override the encoder's attention implementation (eager: the marker "
                          "pass can read attention maps on Ettin/ModernBERT)")
+    ap.add_argument("--prepare-only", action="store_true",
+                    help="build every feature cache this run needs, list them in "
+                         "features/manifest-<run>.json, and exit before training")
     ap.add_argument("--init-partial", action="store_true",
                     help="--init may carry heads this model lacks (a knowledge-pretrained "
                          "encoder starting phase 1): they are dropped")
@@ -722,6 +726,14 @@ def main() -> int:
                 bil.weight = torch.nn.Parameter(init_state["relation.bilinear.weight"].to(device))
                 bil.bias = torch.nn.Parameter(init_state["relation.bilinear.bias"].to(device))
                 model.relation.keep_teacher(bil)
+    if args.prepare_only:
+        from .data import FEATURES, USED_CACHES
+        caches = sorted({str(p.relative_to(FEATURES)) for p in USED_CACHES if p.exists()})
+        man = FEATURES / f"manifest-{args.run_name or spec.name}.json"
+        man.write_text(json.dumps({"encoder": spec.name, "args": vars(args), "caches": caches},
+                                  indent=1, default=str))
+        print(f"prepared {len(caches)} feature caches; wrote {man}", flush=True)
+        return 0
     if args.train_scope == "phase2":
         if not args.phase2:
             raise SystemExit("--train-scope phase2 needs --phase2")

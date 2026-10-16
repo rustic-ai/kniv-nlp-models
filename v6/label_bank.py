@@ -23,6 +23,15 @@ material, not a fixed ontology: a caller passes its own labels by text.
 among those with at least 20 test and 10 dev triples. They are excluded from
 training only in the zero-shot diagnostic run (``--label-holdout``); every
 other run trains on all 96.
+
+Version 6 (v7): the **standard zero-shot holdout** is FewRel's 8 validation
+relations no source trains plus 7 of FewRel's training relations outside
+Re-DocRED's 96, chosen once by hash -- 15 relations with ``train: false``,
+removed from every training source (m = 5 / 10 / 15 as published). Then the
+Wikidata properties T-REx aligns (``gold.trex``) that the bank lacks, and
+Wikidata classes as entity types (``source: "wikidata"``, code the class's
+QID) from ``data/wikidata/trex_types.json``. Everything is appended:
+existing ids do not move.
 """
 from __future__ import annotations
 
@@ -35,8 +44,10 @@ from pathlib import Path
 from .config import DATA_DIR
 
 BANK_PATH = DATA_DIR / "v6-corpus" / "label_bank.json"
-VERSION = 5
+VERSION = 6
 N_HOLDOUT = 20
+N_FEWREL_EXTRA = 7          # FewRel training relations added to the zero-shot holdout (v7)
+TREX_MIN_FACTS = 50         # a T-REx property joins the bank with >= 50 aligned facts
 
 # DocRED's coarse entity types, described for the label pass.
 DOCRED_TYPES = {
@@ -137,7 +148,61 @@ def build() -> dict:
                       "source": "fewnerd", "code": code, "mergeable": True, "temporal": False})
     if len({t["name"] for t in types}) != len(types):
         raise RuntimeError("two entity types share a name")
-    bank = {"version": VERSION, "relations": relations, "entity_types": types}
+    return extend({"version": VERSION, "relations": relations, "entity_types": types})
+
+
+def _fewrel_extra(relations: list[dict]) -> list[str]:
+    cand = sorted((r["code"] for r in relations
+                   if r["source"] == "fewrel" and r.get("fewrel") == "train" and r["train"]),
+                  key=lambda c: hashlib.sha1(f"zs-standard:{c}".encode()).hexdigest())
+    return cand[:N_FEWREL_EXTRA]
+
+
+def extend(bank: dict) -> dict:
+    """Version 6 on top of a version 5 bank (idempotent): the standard
+    zero-shot holdout, T-REx's properties, Wikidata classes as types."""
+    rels, types = bank["relations"], bank["entity_types"]
+    extra = set(_fewrel_extra(rels)) if bank.get("version", 0) < 6 else set()
+    for r in rels:
+        if r["code"] in extra:
+            r["train"], r["zs_standard"] = False, True
+        elif not r["train"]:
+            r["zs_standard"] = True
+    held = {r["code"] for r in rels if not r["train"]}
+    have = {r["code"] for r in rels if r.get("code")}
+    names = {r["name"].lower() for r in rels}
+    trex_counts = DATA_DIR / "trex" / "property_counts.json"
+    props = DATA_DIR / "wikidata" / "properties.json"
+    if trex_counts.exists() and props.exists():
+        info = {p["code"]: p for p in json.loads(props.read_text())}
+        counts = json.loads(trex_counts.read_text())
+        for code, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            p = info.get(code)
+            if n < TREX_MIN_FACTS or code in have or code in held or not p or \
+                    not p.get("description") or p["name"].lower() in names:
+                continue
+            rels.append({"id": len(rels), "name": p["name"], "description": p["description"],
+                         "aliases": (p.get("aliases") or [])[:12], "source": "wikidata",
+                         "code": code, "holdout": False, "train": True, "category": "wikidata",
+                         "datatype": p.get("type"), "usage": None, "trex_facts": n})
+            have.add(code)
+            names.add(p["name"].lower())
+    trex_types = DATA_DIR / "wikidata" / "trex_types.json"
+    if trex_types.exists():
+        tcodes = {t.get("code") for t in types}
+        tnames = {t["name"].lower() for t in types}
+        for v in json.loads(trex_types.read_text())["vocab"]:
+            if v["qid"] in tcodes or v["label"].lower() in tnames:
+                continue
+            types.append({"id": len(types), "name": v["label"],
+                          "description": v["description"] or "", "aliases": [],
+                          "source": "wikidata", "code": v["qid"], "mergeable": True,
+                          "temporal": False, "trex_entities": v["entities"]})
+            tnames.add(v["label"].lower())
+    if len({r["name"] for r in rels}) != len(rels) or len({t["name"] for t in types}) != len(types):
+        raise RuntimeError("two labels share a name")
+    bank["version"] = VERSION
+    bank.pop("hash", None)
     bank["hash"] = hashlib.sha1(json.dumps(bank, sort_keys=True).encode()).hexdigest()[:12]
     return bank
 
@@ -151,12 +216,14 @@ def load(path: Path = BANK_PATH) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", type=Path, default=BANK_PATH)
+    ap.add_argument("--extend", action="store_true",
+                    help="apply version 6 to the existing bank file instead of rebuilding it")
     args = ap.parse_args()
-    bank = build()
+    bank = extend(load()) if args.extend else build()
     args.out.write_text(json.dumps(bank, indent=1))
     held = [r["name"] for r in bank["relations"] if r["holdout"]]
     zs = [r["name"] for r in bank["relations"] if not r["train"]]
-    print(f"never trained (FewRel val, zero-shot) ({len(zs)}): {', '.join(zs)}")
+    print(f"never trained (zero-shot holdout) ({len(zs)}): {', '.join(zs)}")
     print(f"{len(bank['relations'])} relations, {len(bank['entity_types'])} entity types, "
           f"hash {bank['hash']}")
     print(f"held out ({len(held)}): {', '.join(held)}")

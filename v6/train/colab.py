@@ -274,8 +274,14 @@ if os.path.exists("/content/.hf_token"):        # only when the run mirrors to t
     os.environ["HF_TOKEN"] = open("/content/.hf_token").read().strip()
     from huggingface_hub import whoami
     user = whoami()["name"]
+hub = "{hub_data}"
+if hub:                                          # prepared data and feature caches (hubdata)
+    r = subprocess.run([sys.executable, "-m", "v6.train.hubdata", "pull", "--manifest", hub],
+                       cwd="{repo}", capture_output=True, text=True)
+    if r.returncode:
+        raise SystemExit("hub data pull failed:\n" + r.stderr[-2000:])
 print(json.dumps({{"gpu": name, "gpu_gb": round(torch.cuda.get_device_properties(0).total_memory / 2**30, 1),
-                  "torch": torch.__version__, "hf_user": user}}))
+                  "torch": torch.__version__, "hf_user": user, "hub_data": hub}}))
 '''
 
 RUN_MARKER = "=== kniv run start"
@@ -376,9 +382,12 @@ def _upload_token(sess: str) -> None:
         os.unlink(path)
 
 
-def prepare(sess: str, token: bool) -> str:
+def prepare(sess: str, token: bool, hub_data: str | None = None) -> str:
     """Bundle, allocate, upload, set up. ``token``: copy the local HF token
-    to the VM -- only for a run that mirrors to the hub; models are public."""
+    to the VM -- only for a run that mirrors to the hub or reads private
+    data; models are public. ``hub_data``: a ``hubdata`` manifest whose
+    prepared data and feature caches the VM downloads instead of building."""
+    token = token or bool(hub_data)
     code, data, sha = build_bundles()
     existing = colab("sessions", check=False, quiet=True).stdout
     if sess not in existing:
@@ -390,7 +399,8 @@ def prepare(sess: str, token: bool) -> str:
         _upload_token(sess)
     print("setting up the VM (pip, GPU check, HF auth)...")
     vm_exec(sess, SETUP.format(repo=VM_REPO, code=f"/content/{code.name}",
-                               data=f"/content/{data.name}", pip=PIP), timeout=900)
+                               data=f"/content/{data.name}", pip=PIP, hub_data=hub_data or ""),
+            timeout=1800)
     return sess
 
 
@@ -527,7 +537,8 @@ def _record(name: str, a, **more) -> dict:
     f = LAUNCHES / f"{name}.json"
     rec = json.loads(f.read_text()) if f.exists() else {"relaunches": 0}
     rec.update({"encoder": a.encoder, "run_name": name, "session": a.session,
-                "hf_repo": a.hf_repo, "extra": a.extra, **more})
+                "hf_repo": a.hf_repo, "extra": a.extra,
+                "hub_data": getattr(a, "hub_data", None), **more})
     f.write_text(json.dumps(rec, indent=1))
     return rec
 
@@ -535,7 +546,8 @@ def _record(name: str, a, **more) -> dict:
 def cmd_launch(a) -> int:
     spec, name = encoders.get(a.encoder), run_name(a)
     _record(name, a, launched_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
-    sess = prepare(a.session or session(name), token=bool(a.hf_repo))
+    sess = prepare(a.session or session(name), token=bool(a.hf_repo),
+                   hub_data=getattr(a, "hub_data", None))
     out = f"{VM_RUNS}/{name}"
     argv = ["--encoder", spec.name, "--run-name", name, "--out", out, *a.extra]
     if a.hf_repo:
@@ -672,7 +684,8 @@ def cmd_probe(a) -> int:
     checkpointing and bf16 are measured, not assumed."""
     spec, name = encoders.get(a.encoder), run_name(a)
     # The token only when the probe reads the hub: --init from a run there.
-    sess = prepare(a.session or session(name), token="--init" in a.extra)
+    sess = prepare(a.session or session(name), token="--init" in a.extra,
+                   hub_data=a.hub_data)
     out = f"{VM_RUNS}/{name}-probe"
     argv = ["--encoder", spec.name, "--out", out, "--probe", str(a.steps), *a.extra]
     code = START.format(repo=VM_REPO, out=out, argv=argv, RUN_MARKER=RUN_MARKER)
@@ -903,7 +916,8 @@ def cmd_watch(a) -> int:
                     ns = argparse.Namespace(encoder=rec["encoder"], run_name=n,
                                             session=rec.get("session"),
                                             hf_repo=rec.get("hf_repo"),
-                                            extra=rec.get("extra") or [])
+                                            extra=rec.get("extra") or [],
+                                            hub_data=rec.get("hub_data"))
                     try:
                         cmd_launch(ns)
                         _record(n, ns, relaunches=rec.get("relaunches", 0) + 1)
@@ -947,7 +961,9 @@ def cmd_queue(a) -> int:
         n = f"{enc}{suffix}"              # the run name: keys the VM, out dir, hub prefix
         sess = session(n)
         launch_args = argparse.Namespace(encoder=enc, run_name=n, session=None,
-                                         hf_repo=a.hf_repo, extra=list(a.extra))
+                                         hf_repo=a.hf_repo, extra=list(a.extra),
+                                         hub_data=(a.hub_data or "").replace("{encoder}", enc)
+                                         or None)
         print(f"\n=== {n}: launching on {sess}", flush=True)
         relaunches = 0
 
@@ -1041,6 +1057,8 @@ def main() -> int:
             p.add_argument("--steps", type=int, default=10)
             p.add_argument("--keep", action="store_true", help="leave the VM running")
         if name in ("launch", "probe"):
+            p.add_argument("--hub-data", help="hubdata manifest (features/manifest-<run>.json "
+                           "name): the VM downloads prepared data instead of building it")
             p.add_argument("extra", nargs=argparse.REMAINDER,
                            help="passed through to v6.train.loop, after --")
         if name == "stop":
@@ -1070,6 +1088,8 @@ def main() -> int:
     q.add_argument("--hf-repo", default=HF_REPO)
     q.add_argument("--poll", type=float, default=2.0, help="minutes between status checks")
     q.add_argument("--max-relaunches", type=int, default=3)
+    q.add_argument("--hub-data", help="hubdata manifest; '{encoder}' in it is replaced by "
+                   "each queued encoder's name")
     q.add_argument("--suffix", default="", help="run name = <encoder>-<suffix>; "
                    "without it a variant would resume the baseline's checkpoint")
     q.add_argument("extra", nargs=argparse.REMAINDER, help="passed to v6.train.loop, after --")

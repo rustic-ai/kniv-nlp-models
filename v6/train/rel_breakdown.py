@@ -10,8 +10,9 @@ Two threshold-free tests, scored per gold relation:
   relation the best-scoring of the 40? Split by window domain and by whether
   the pair involves a speaker (conversation facts) -- the in-loop
   ``relation_zs_acc``, broken down;
-- **FewRel's 8 unseen relations**: every instance classified among the 8, per
-  relation accuracy and its most frequent wrong answer.
+- **FewRel's unseen relations** (``train: false``; 8, or the standard 15 from
+  bank version 6): every instance classified among them, per relation
+  accuracy and its most frequent wrong answer.
 """
 from __future__ import annotations
 
@@ -64,7 +65,7 @@ def fewrel_rows(model, tok, spec, vocab, device, bank, per):
     code = {r["code"]: r["id"] for r in unseen}
     count: Counter = Counter()
     items = []
-    for x in fewrel.load("val"):
+    for x in fewrel.load("train") + fewrel.load("val"):
         rid = code.get(x["code"])
         if rid is None or count[rid] >= per:
             continue

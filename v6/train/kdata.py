@@ -374,12 +374,26 @@ def _corpus():
 
 
 KNOWLEDGE_FILES = {"fewrel": "fewrel_rel.json", "fewnerd": "fewnerd_spans.json",
-                   "docred_distant": "docred_distant_rel.json", "pretrain": "kg_pretrain.json"}
+                   "docred_distant": "docred_distant_rel.json", "pretrain": "kg_pretrain.json",
+                   "trex": "kg_trex.json"}
 # Unlabelled pairs of a partial source kept as negatives, per source: FewRel
 # labels one pair per sentence and says nothing of the others.
 # Bump whenever a featuriser's output changes: the feature cache is keyed on it.
-FEATURE_VERSION = 3
-UNLABELLED_KEEP = {"teacher": 0.5, "docred_distant": 0.5, "fewrel": 0.0, "pretrain": 0.5}
+FEATURE_VERSION = 4
+UNLABELLED_KEEP = {"teacher": 0.5, "docred_distant": 0.5, "fewrel": 0.0, "pretrain": 0.5,
+                   "trex": 0.5}
+
+
+def _digest(path):
+    from .data import file_digest
+    return file_digest(path)
+
+
+def never_trained(bank: dict) -> set[int]:
+    """The zero-shot holdout (``train: false``): never in a training item,
+    as a fact, a negative or a schema column."""
+    return {r["id"] for r in bank["relations"] if not r.get("train", True)}
+
 
 
 def _ids(bank: dict) -> tuple[dict, dict, dict]:
@@ -394,14 +408,18 @@ def prepare_knowledge(bank: dict, distant_docs: int = 40000) -> dict:
     from ..gold import docred_distant, fewnerd, fewrel
     code, _, tcode = _ids(bank)
     out = {}
-    fr = []
-    for x in fewrel.load("train"):
-        if x["code"] in code:
-            fr.append({"tokens": x["tokens"], "head": x["head"], "tail": x["tail"],
-                       "rel": code[x["code"]]})
+    # Training items: relations that train. Zero-shot items ("val"): every
+    # FewRel sentence of a never-trained relation, from either split.
+    never = never_trained(bank)
+    fr, val = [], []
+    for sp in ("train", "val"):
+        for x in fewrel.load(sp):
+            if x["code"] not in code:
+                continue
+            item = {"tokens": x["tokens"], "head": x["head"], "tail": x["tail"],
+                    "rel": code[x["code"]]}
+            (val if item["rel"] in never else fr if sp == "train" else []).append(item)
     schema = sorted({r["rel"] for r in fr})
-    val = [{"tokens": x["tokens"], "head": x["head"], "tail": x["tail"], "rel": code[x["code"]]}
-           for x in fewrel.load("val") if x["code"] in code]
     (_corpus() / KNOWLEDGE_FILES["fewrel"]).write_text(
         json.dumps({"train": fr, "val": val, "schema": schema,
                     "val_schema": sorted({r["rel"] for r in val})}))
@@ -586,6 +604,39 @@ def pretrain_features(d: dict, bank_ids: dict, tok, max_subwords: int, n_rel: in
     return f
 
 
+def trex_features(d: dict, never: set, tok, max_subwords: int, n_rel: int, n_cls: int,
+                  stats: Counter, markers: bool = True) -> dict | None:
+    """A T-REx document (``gold.trex``): entities grouped by Wikidata id,
+    their linked mentions typed with Wikidata classes (span head), and the
+    aligned facts by bank id (relation head) -- both partial, against the
+    document's relation and type schemas."""
+    from .data import blank_window, marker_features
+    spans = [tuple(s) for s in d["sentence_spans"]]
+    f = blank_window(d["tokens"], spans, tok, max_subwords, n_cls)
+    W = f["_W"]
+    keep, ents, typed = {}, [], []
+    for i, e in enumerate(d["entities"]):
+        ms = sorted({(int(a), int(b)) for a, b in e["mentions"] if b <= W and f["word_ok"][a]})
+        if ms:
+            keep[i] = len(ents)
+            ents.append(np.asarray(ms, dtype=np.int32))
+        typed += [(t, a, b) for a, b in e["typed"] for t in e["types"]]
+    f["ents"] = span_targets(typed, W, f["word_ok"], d["types"], True, stats, "trex")
+    trip = sorted({(keep[h], keep[t], r) for h, t, r in d["facts"]
+                   if r not in never and h in keep and t in keep and keep[h] != keep[t]})
+    schema = sorted(r for r in d["relations"] if r not in never)
+    if len(ents) >= 2:
+        f.update(coref=None, _n_rel=n_rel,
+                 rel=_rel(ents, trip, schema, n_rel, True, UNLABELLED_KEEP["trex"]))
+        if markers:
+            f["rm"] = marker_features(d["tokens"], spans, ents, tok)
+    else:
+        f.update(coref=None, rel=None)
+    stats["trex_docs"] += 1
+    stats["trex_triples"] += len(trip)
+    return f
+
+
 def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: int,
                        bank: dict, markers: bool = True, limit: int | None = None,
                        stats: Counter | None = None, progress=None) -> list[dict]:
@@ -600,13 +651,14 @@ def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: i
         path = _corpus() / KNOWLEDGE_FILES[source]
     if not path.exists():
         raise SystemExit(f"{path} missing; run python -m v6.train.kdata --prep")
-    st = path.stat()
     hold_sig = (load_holdout() or {}).get("relations") if source == "teacher" else None
     key = hashlib.sha256(json.dumps([FEATURE_VERSION, hold_sig, source, split, tok.name_or_path,
                                      max_subwords, markers, limit,
-                                     bank.get("hash"), st.st_size, st.st_mtime_ns]).encode()
+                                     bank.get("hash"), _digest(path)]).encode()
                          ).hexdigest()[:16]
     cache = FEATURES / f"knowledge-{source}-{split}-{key}.pkl"
+    from .data import USED_CACHES
+    USED_CACHES.append(cache)
     if cache.exists():
         with cache.open("rb") as fh:
             feats, saved = pickle.load(fh)
@@ -634,12 +686,19 @@ def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: i
     else:
         data = json.loads(path.read_text())
         rows = data[split][:limit] if split in data else []
+        never = never_trained(bank)
         if source == "pretrain":
-            ids = {r["name"]: r["id"] for r in bank["relations"]}
+            ids = {r["name"]: r["id"] for r in bank["relations"] if r["id"] not in never}
             feats = [f for x in tick(data["docs"][:limit]) if (f := pretrain_features(
                 x, ids, tok, max_subwords, n_rel, n_cls, local, markers))]
+        elif source == "trex":
+            feats = [f for x in tick(data["docs"][:limit]) if (f := trex_features(
+                x, never, tok, max_subwords, n_rel, n_cls, local, markers))]
         elif source == "fewrel":
             sch = data["val_schema"] if split == "val" else data["schema"]
+            if split != "val":
+                rows = [x for x in rows if x["rel"] not in never]
+                sch = [r for r in sch if r not in never]
             feats = [f for x in tick(rows) if (f := fewrel_features(
                 x, sch, tok, max_subwords, n_rel, n_cls, local, markers))]
         elif source == "fewnerd":

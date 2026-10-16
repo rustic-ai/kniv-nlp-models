@@ -99,3 +99,9 @@ data/re-docred/
 data/v6-corpus/
 # Third-party ATLOP clone, fetched by v6/experiments/atlop_colab.sh.
 data/atlop-work/
+
+# T-REx download, extract and converted documents (v7 stage A data; rebuilt by v6.gold.trex)
+data/trex/
+# Wikidata SPARQL cache and the T-REx type vocabulary (rebuilt by v6.gold.trex types)
+data/wikidata/types_cache.jsonl
+data/wikidata/trex_types.json
