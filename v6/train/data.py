@@ -641,21 +641,43 @@ def featurise(spec, split: str, vocab: Vocab, tok=None,
 
 
 # ── batching ────────────────────────────────────────────────────────
+def _length(f: dict) -> int:
+    rm = f.get("rm")
+    return max(len(f["input_ids"]), len(rm["ids"]) if rm else 0)
+
+
 def batch_order(feats: list[dict], batch_size: int, seed: int,
-                epoch: int) -> list[list[int]]:
+                epoch: int, max_tokens: int | None = None) -> list[list[int]]:
     """Length-bucketed batches, reproducible from (seed, epoch).
 
     Resume replays the same order and skips the batches already taken, so a
     resumed run sees the same sample order as an uninterrupted one.
+
+    ``max_tokens``: batches of up to ``batch_size`` items whose size times
+    their longest input (plain or marker pass) stays within ``max_tokens`` --
+    short documents batch together, a long one goes alone. With the budget
+    at the encoder's window, no batch holds more tokens than one full window
+    and none has a larger attention matrix, so memory stays at batch 1's.
     """
     rng = np.random.default_rng([seed, epoch])
     order = rng.permutation(len(feats))
     chunk = batch_size * 50
     batches = []
     for c in range(0, len(order), chunk):
-        part = sorted(order[c:c + chunk], key=lambda i: len(feats[i]["input_ids"]))
-        batches += [list(map(int, part[i:i + batch_size]))
-                    for i in range(0, len(part), batch_size)]
+        part = sorted(order[c:c + chunk], key=lambda i: _length(feats[i]))
+        if not max_tokens:
+            batches += [list(map(int, part[i:i + batch_size]))
+                        for i in range(0, len(part), batch_size)]
+            continue
+        cur: list[int] = []
+        for i in part:
+            n = _length(feats[i])           # ascending: the newest item is the longest
+            if cur and (len(cur) >= batch_size or (len(cur) + 1) * n > max_tokens):
+                batches.append(cur)
+                cur = []
+            cur.append(int(i))
+        if cur:
+            batches.append(cur)
     rng.shuffle(batches)
     return batches
 

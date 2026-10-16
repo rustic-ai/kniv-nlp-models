@@ -515,6 +515,10 @@ def main() -> int:
     ap.add_argument("--attn-implementation", choices=["eager", "sdpa"],
                     help="override the encoder's attention implementation (eager: the marker "
                          "pass can read attention maps on Ettin/ModernBERT)")
+    ap.add_argument("--max-batch-tokens", type=int, metavar="N",
+                    help="batch up to --batch-size items while items x longest input <= N "
+                         "(set it to the encoder's window: short documents batch, long ones "
+                         "go alone, memory stays at batch 1's)")
     ap.add_argument("--word-pool", choices=["first", "mean"], default="first",
                     help="word vectors: the first subword, or the mean of a word's subwords "
                          "(for tokenizers that split words often)")
@@ -822,6 +826,23 @@ def main() -> int:
                             eps=1e-6, fused=device.type == "cuda")
 
     micro = spec.batch_size
+    if args.probe and args.max_batch_tokens:
+        # Worst cases among the batches training will actually form: the
+        # largest attention (items x longest^2), the most entity pairs, the
+        # most items.
+        from .data import _length
+        real = batch_order(train, micro, args.seed, 0, args.max_batch_tokens)
+
+        def pairs(b):
+            return sum(len(train[i]["rel"]["spans"]) ** 2 for i in b if train[i].get("rel"))
+        picks = [max(real, key=lambda b: len(b) * max(_length(train[i]) for i in b) ** 2),
+                 max(real, key=pairs), max(real, key=len)]
+        print(f"probe batches: {[len(b) for b in picks]} items, longest "
+              f"{[max(_length(train[i]) for i in b) for b in picks]} subwords, "
+              f"{[pairs(b) for b in picks]} pairs; {len(real):,} batches per epoch "
+              f"for {len(train):,} items", flush=True)
+        order = (picks * spec.grad_accum)[:max(spec.grad_accum, 3)]
+        return _probe(model, opt, train, order, args.probe, spec, tok, device, amp, label_coll)
     if args.probe:
         # Worst case: the longest windows, every step.
         longest = sorted(range(len(train)), key=lambda i: -len(train[i]["input_ids"]))
@@ -835,7 +856,7 @@ def main() -> int:
             order[-1] = sorted(range(len(train)), key=lambda i: -n_pairs(i))[:micro]
         return _probe(model, opt, train, order, args.probe, spec, tok, device, amp, label_coll)
 
-    per_epoch = len(batch_order(train, micro, args.seed, 0)) // spec.grad_accum
+    per_epoch = len(batch_order(train, micro, args.seed, 0, args.max_batch_tokens)) // spec.grad_accum
     total = args.max_steps or per_epoch * args.epochs
     warm = max(1, int(total * args.warmup))
     sched = torch.optim.lr_scheduler.LambdaLR(
@@ -905,7 +926,7 @@ def main() -> int:
     try:
         while rs.p.step < total:
             epoch = rs.p.epoch
-            batches = batch_order(train, micro, args.seed, epoch)
+            batches = batch_order(train, micro, args.seed, epoch, args.max_batch_tokens)
             start = (rs.p.step - epoch * per_epoch) * spec.grad_accum
             for m0 in range(start, per_epoch * spec.grad_accum, spec.grad_accum):
                 this, seen, bad = defaultdict(float), set(), []
