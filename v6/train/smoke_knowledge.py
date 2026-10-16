@@ -183,7 +183,7 @@ def main() -> int:
     check("teacher positives survive collation", int(mo["pair_labels"][tsel, 1:].sum()) == 2)
     # a schema sample without 'residence': its positive pairs are masked whole
     tcoll2 = LabelCollator(tok, bank, train=True, seed=3, unlabelled_keep=1.0)
-    tcoll2.columns = lambda pool: torch.as_tensor(sorted(sch - {rel["residence"]["id"]})).numpy()
+    tcoll2.columns = lambda pool, keep=(): torch.as_tensor(sorted(sch - {rel["residence"]["id"]})).numpy()
     m2 = tcoll2(dict(collate([tf], tok.pad_token_id)))
     pos_rows = old[mixed["pair_batch"] == 2][:, 1:].sum(1) > 0
     check("a pair whose teacher positive fell outside the columns is masked whole",
@@ -345,6 +345,35 @@ def main() -> int:
         zo_ = Z(hz)
     check("v6.2 hybrid: Re-DocRED columns are still the ATLOP head's margins",
           float((zo_["relation"][:, 1:] - want).abs().max()) < 1e-4)
+    # v7: T-REx documents, the label-ranking terms, word pooling.
+    Z.train(); no_dropout(Z)
+    Z.rel_lora.on = Z.rel_lora.sticky = False
+    for prm in Z.parameters():
+        prm.grad = None
+    trex = knowledge_features("trex", "train", tok, spec.max_subwords, vocab.size("cls"), bank, limit=6)
+    never = {r["id"] for r in bank["relations"] if not r["train"]}
+    check("T-REx documents carry typed spans and facts, none on a never-trained relation",
+          all(len(f["ents"]["spans"]) for f in trex) and sum(len(f["rel"]["triples"]) for f in trex if f["rel"])
+          and not any(r in never for f in trex if f["rel"] for *_, r in f["rel"]["triples"]))
+    tb = tc(collate(trex, tok.pad_token_id))
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        Lt = losses(Z(tb, relation_only=True), tb)
+    (Lt["relation_rank"][0] + Lt["ent_span_rank"][0]).backward()
+    gr = any(p.grad is not None and float(p.grad.abs().sum()) > 0
+             for n, p in Z.named_parameters() if n.startswith(("relation.", "span.")))
+    check("label-ranking terms are positive and reach the relation and span heads",
+          float(Lt["relation_rank"][0]) > 0 and float(Lt["ent_span_rank"][0]) > 0 and gr,
+          f"relation_rank {Lt['relation_rank'][0].item():.3f}, ent_span_rank {Lt['ent_span_rank'][0].item():.3f}")
+    Z.eval()
+    with torch.no_grad():
+        Z.word_pool = "first"
+        a = Z(tb, relation_only=True)["span"]
+        Z.word_pool = "mean"
+        b = Z(tb, relation_only=True)["span"]
+        Z.word_pool = "first"
+    multi = bool(((tb["word_end"] - tb["first_subword"]) > 1)[tb["word_mask"]].any())
+    check("mean word pooling changes span scores only where words have several subwords",
+          multi and not torch.allclose(a, b), f"max |diff| {float((a - b).abs().max()):.2e}")
     print("all knowledge-layer smoke checks passed")
     return 0
 

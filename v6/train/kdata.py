@@ -103,12 +103,19 @@ class LabelCollator:
             return self.allowed
         return np.asarray(sorted(set(int(x) for x in schema) & self.usable), dtype=np.int64)
 
-    def columns(self, pool: np.ndarray | None = None) -> np.ndarray:
+    def columns(self, pool: np.ndarray | None = None, keep=()) -> np.ndarray:
+        """Label dropout: a random subset of the pool, always including
+        ``keep`` (the batch's true labels). Dropping a true label would mask
+        its whole pair, losing the supervision instead of varying the
+        negatives."""
         pool = self.allowed if pool is None else pool
         if not self.train or len(pool) <= self.min_labels:
             return pool
+        keep = np.intersect1d(np.asarray(list(keep), dtype=np.int64), pool)
         k = int(self.rng.integers(self.min_labels, min(self.max_labels, len(pool)) + 1))
-        return np.sort(self.rng.choice(pool, size=k, replace=False))
+        rest = np.setdiff1d(pool, keep)
+        n = max(0, min(len(rest), k - len(keep)))
+        return np.sort(np.concatenate([keep, self.rng.choice(rest, size=n, replace=False)]))
 
     def __call__(self, batch: dict) -> dict:
         if "pair_labels" not in batch:
@@ -117,8 +124,9 @@ class LabelCollator:
         partial = batch.pop("rel_partial", None)
         keeps = batch.pop("rel_keep", None)
         old = batch["pair_labels"]                                       # [P, R+1]
+        true = (old[:, 1:].sum(0) > 0).nonzero(as_tuple=True)[0].numpy()
         if schemas is None:
-            cols = self.columns()
+            cols = self.columns(keep=true)
             new = old[:, 1 + torch.as_tensor(cols)]
             none = (new.sum(1, keepdim=True) == 0).to(new.dtype)
             batch["pair_labels"] = torch.cat([none, new], 1)
@@ -127,7 +135,7 @@ class LabelCollator:
             per = [self.schema_of(x) for x in schemas]
             used = sorted({int(b) for b in batch["pair_batch"].tolist()})
             pool = np.unique(np.concatenate([per[b] for b in used] or [self.allowed]))
-            cols = self.columns(pool)
+            cols = self.columns(pool, keep=true)
             ct = torch.as_tensor(cols)
             known = torch.zeros(len(per), len(cols))                       # [B, K]
             for b, sc in enumerate(per):
@@ -285,7 +293,13 @@ class TypeCollator:
         pool = sorted({t for x in items if x is not None for t in x["schema"]})
         cols = np.asarray(pool, dtype=np.int64)
         if self.train and len(cols) > self.max_types:
-            cols = np.sort(self.rng.choice(cols, size=self.max_types, replace=False))
+            # Keep every type a span in the batch has; sample the rest.
+            true = np.intersect1d(np.unique(np.concatenate(
+                [x["spans"][:, 2] for x in items if x is not None and len(x["spans"])]
+                or [np.zeros(0, dtype=np.int64)])).astype(np.int64), cols)
+            rest = np.setdiff1d(cols, true)
+            n = max(0, min(len(rest), self.max_types - len(true)))
+            cols = np.sort(np.concatenate([true, self.rng.choice(rest, size=n, replace=False)]))
         col_of = {int(c): j for j, c in enumerate(cols)}
         sb, ss, se, lab, msk = [], [], [], [], []
         for b, x in enumerate(items):

@@ -622,6 +622,25 @@ def atlop_loss(logits: torch.Tensor, labels: torch.Tensor,
     return (l1 + l2).mean()
 
 
+def rank_loss(logits: torch.Tensor, labels: torch.Tensor,
+              mask: torch.Tensor | None = None) -> torch.Tensor:
+    """Label ranking among a pair's (or span's) schema columns: the true
+    labels must outscore every other listed label, not only the threshold.
+    ATLOP's loss compares each label with the threshold column alone, so two
+    near-synonyms (``sport`` / ``competition class``) can both clear it in
+    any order -- the "label sink" where one label takes every instance.
+    ``-log(sum_true exp l / sum_schema exp l)`` per row with a true label."""
+    lab = labels[:, 1:] > 0.5
+    ok = torch.ones_like(lab) if mask is None else mask[:, 1:] > 0.5
+    lab = lab & ok
+    rows = lab.any(1)
+    if not bool(rows.any()):
+        return logits.sum() * 0.0
+    lg = logits[rows, 1:].float().masked_fill(~ok[rows], -1e4)
+    pos = lg.masked_fill(~lab[rows], -1e4)
+    return (torch.logsumexp(lg, -1) - torch.logsumexp(pos, -1)).mean()
+
+
 class RelationAdapter(nn.Module):
     """LoRA on the encoder's transformer-layer linears, applied only while
     switched on: the relation pass runs the encoder with it, every other head
@@ -694,8 +713,16 @@ class V6Model(nn.Module):
                  rel_head: str = "bilinear", label_dim: int = 1024,
                  label_plain: bool = True, legacy_relation: bool = False,
                  span_head: bool = False, label_adapter: int = 0,
-                 legacy_rank: int | None = None, trust_remote_code: bool = False):
+                 legacy_rank: int | None = None, trust_remote_code: bool = False,
+                 word_pool: str = "first"):
         super().__init__()
+        # Word vectors: the first subword (v6), or the mean of all of a word's
+        # subwords -- for tokenizers that split words often, with little in
+        # the first piece (UltraBERT's BPE: ``re|authorized``).
+        if word_pool not in ("first", "mean"):
+            raise ValueError(f"word_pool {word_pool!r}")
+        self.word_pool = word_pool
+        self._word_span = None
         from transformers import AutoConfig, AutoModel
         # fp32 master weights for every encoder; bf16 autocast does the
         # compute. transformers 5 keeps a checkpoint's stored dtype by default,
@@ -833,6 +860,15 @@ class V6Model(nn.Module):
     # ── pieces ─────────────────────────────────────────────────────
     def _words(self, layers, mix: str, first: torch.Tensor) -> torch.Tensor:
         h = self.mix[mix](layers)
+        span = self._word_span
+        if self.word_pool == "mean" and span is not None and first is span[0]:
+            # Plain-pass words: mean over [first, end) by cumulative sums (fp32).
+            cs = torch.nn.functional.pad(h.float().cumsum(1), (0, 0, 1, 0))
+            lo = first.unsqueeze(-1).expand(-1, -1, h.size(-1))
+            hi = span[1].unsqueeze(-1).expand(-1, -1, h.size(-1))
+            n = (span[1] - first).clamp(min=1).unsqueeze(-1).to(cs.dtype)
+            w = ((torch.gather(cs, 1, hi) - torch.gather(cs, 1, lo)) / n).to(h.dtype)
+            return self.drop(w)
         idx = first.unsqueeze(-1).expand(-1, -1, h.size(-1))
         return self.drop(torch.gather(h, 1, idx))
 
@@ -1080,6 +1116,7 @@ class V6Model(nn.Module):
         SRL roles are still scored on gold predicates."""
         predict_heads = predict if predict_heads is None else predict_heads
         first, wm = batch["first_subword"], batch["word_mask"]
+        self._word_span = (first, batch["word_end"]) if "word_end" in batch else None
         if relation_only:
             if self.rel_markers:
                 if self.rel_lora is not None:
@@ -1187,11 +1224,14 @@ def _ce(logits: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, int]:
                            ignore_index=IGNORE), n
 
 
-PHASE2_HEADS = ("coref", "coref_span", "relation", "relation_evidence", "ent")
-RELATION_HEADS = ("relation", "relation_evidence", "ent", "relation_kd", "ent_span")
+PHASE2_HEADS = ("coref", "coref_span", "relation", "relation_evidence", "ent",
+                "relation_rank", "ent_span_rank")
+RELATION_HEADS = ("relation", "relation_evidence", "ent", "relation_kd", "ent_span",
+                  "relation_rank", "ent_span_rank")
 # Fixed weights on top of the per-head loss scale: DREEAM weighs its evidence
 # term at 0.1 of the relation loss.
-HEAD_WEIGHT = {"relation_evidence": 0.1}
+# The label-ranking terms are off unless asked for (--head-weight relation_rank=0.5).
+HEAD_WEIGHT = {"relation_evidence": 0.1, "relation_rank": 0.0, "ent_span_rank": 0.0}
 
 
 def coref_targets(batch: dict, cand: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
@@ -1250,8 +1290,10 @@ def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
     if "relation" in o and len(o["relation"]):
         out["relation"] = (atlop_loss(o["relation"], batch["pair_labels"],
                                       batch.get("pair_label_mask")), len(o["relation"]))
+        out["relation_rank"] = (rank_loss(o["relation"], batch["pair_labels"],
+                                          batch.get("pair_label_mask")), len(o["relation"]))
     else:
-        out["relation"] = (_zero(o), 0)
+        out["relation"] = out["relation_rank"] = (_zero(o), 0)
     if "ent" in o and "ent" in batch:
         out["ent"] = _ce(o["ent"], batch["ent"])
     else:
@@ -1259,8 +1301,10 @@ def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
     if "span" in o and len(o["span"]):
         out["ent_span"] = (atlop_loss(o["span"], batch["span_labels"], batch.get("span_label_mask")),
                            len(o["span"]))
+        out["ent_span_rank"] = (rank_loss(o["span"], batch["span_labels"],
+                                          batch.get("span_label_mask")), len(o["span"]))
     else:
-        out["ent_span"] = (_zero(o), 0)
+        out["ent_span"] = out["ent_span_rank"] = (_zero(o), 0)
     kd = o.get("relation_kd_old")
     if kd is not None and len(o.get("relation", [])) and "rel_label_cols" in batch:
         out["relation_kd"] = (kd_margin_loss(o["relation"], kd, batch["rel_label_cols"]),

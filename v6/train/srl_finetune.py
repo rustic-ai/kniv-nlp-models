@@ -97,6 +97,7 @@ def cache_reps(model, sentences: list[tuple], tok, spec, vocab, device,
         out = model.encoder(input_ids=b["input_ids"], attention_mask=b["attention_mask"],
                             output_hidden_states=True)
         layers = tuple(F.layer_norm(h, h.shape[-1:]) for h in out.hidden_states)
+        model._word_span = (b["first_subword"], b["word_end"])       # the model's word pooling
         s = model._words(layers, "srl", b["first_subword"])          # eval: no dropout
         for j, i in enumerate(idx):
             reps[i] = s[j, :feats[i]["_W"]].to(torch.float16).cpu()
@@ -346,6 +347,8 @@ def main() -> int:
     ap.add_argument("--data", choices=["full", "root"], default="full",
                     help="full: every PropBank predicate (gold.propbank_full), predicate head "
                          "trained too; root: v5's one-root-predicate files, role head only")
+    ap.add_argument("--word-pool", choices=["first", "mean"],
+                    help="override the run's word pooling (a probe; the checkpoint keeps its own)")
     ap.add_argument("--no-upload", action="store_true",
                     help="keep the fine-tuned checkpoint local (default: also upload it to the runs repo)")
     ap.add_argument("--all-sources", action="store_true",
@@ -358,6 +361,8 @@ def main() -> int:
 
     model, tok, spec, vocab, best = load_run(args.run, HF_REPO, device)
     assert model.srl_mode == "joint", "fine-tunes the joint SRL head"
+    if args.word_pool:                     # a probe: the same encoder, other word vectors
+        model.word_pool = args.word_pool
     if args.data == "full":
         if args.out_run == "deberta-v3-large-srlft":
             args.out_run = "deberta-v3-large-srlft-full"

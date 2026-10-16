@@ -660,6 +660,21 @@ def batch_order(feats: list[dict], batch_size: int, seed: int,
     return batches
 
 
+def word_ends(first: np.ndarray, n: int) -> np.ndarray:
+    """Exclusive end of each word's subwords in a plain-pass input of length
+    ``n``: the next word's first subword, or the final special token. The
+    whole window is one tokenizer call, so a word's subwords are contiguous."""
+    end = np.ones(len(first), dtype=np.int64)
+    nxt = n - 1                                   # [SEP] / </s>
+    for i in range(len(first) - 1, -1, -1):
+        f = int(first[i])
+        if 0 <= f < nxt:
+            end[i], nxt = nxt, f
+        else:
+            end[i] = min(max(f, 0) + 1, n)
+    return end
+
+
 def collate(items: list[dict], pad_id: int):
     import torch
     B = len(items)
@@ -675,6 +690,7 @@ def collate(items: list[dict], pad_id: int):
         "input_ids": full((B, T), pad_id, torch.long),
         "attention_mask": torch.zeros(B, T, dtype=torch.long),
         "first_subword": torch.zeros(B, W, dtype=torch.long),
+        "word_end": torch.ones(B, W, dtype=torch.long),
         "word_mask": torch.zeros(B, W, dtype=torch.bool),
         "sent_of_word": full((B, W), -1, torch.long),
         "sent_whole": torch.zeros(B, S, dtype=torch.bool),
@@ -691,6 +707,7 @@ def collate(items: list[dict], pad_id: int):
         out["attention_mask"][b, :n] = 1
         out["first_subword"][b, :w] = torch.from_numpy(
             np.maximum(x["first_subword"], 0).astype(np.int64))
+        out["word_end"][b, :w] = torch.from_numpy(word_ends(x["first_subword"], n))
         out["word_mask"][b, :w] = torch.from_numpy(x["word_ok"])
         out["sent_of_word"][b, :w] = torch.from_numpy(x["sent_of_word"].astype(np.int64))
         for k in TOKEN_LAYERS + ("dep_head", "dep_rel", "srl_pred"):

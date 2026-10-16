@@ -515,6 +515,9 @@ def main() -> int:
     ap.add_argument("--attn-implementation", choices=["eager", "sdpa"],
                     help="override the encoder's attention implementation (eager: the marker "
                          "pass can read attention maps on Ettin/ModernBERT)")
+    ap.add_argument("--word-pool", choices=["first", "mean"], default="first",
+                    help="word vectors: the first subword, or the mean of a word's subwords "
+                         "(for tokenizers that split words often)")
     ap.add_argument("--prepare-only", action="store_true",
                     help="build every feature cache this run needs, list them in "
                          "features/manifest-<run>.json, and exit before training")
@@ -661,7 +664,8 @@ def main() -> int:
                     legacy_relation=bool(args.legacy_relation),
                     span_head=args.span_head, label_adapter=args.label_adapter,
                     legacy_rank=args.legacy_rank,
-                    trust_remote_code=spec.trust_remote_code).to(device)
+                    trust_remote_code=spec.trust_remote_code,
+                    word_pool=args.word_pool).to(device)
     init_relation = args.init_relation or "drop"
     if init_relation == "transplant" and args.rel_head != "label":
         raise SystemExit("--init-relation transplant needs --rel-head label")
@@ -864,6 +868,7 @@ def main() -> int:
                                  "span_head": args.span_head,
                                  "label_adapter": args.label_adapter,
                                  "legacy_rank": args.legacy_rank,
+                                 "word_pool": args.word_pool,
                                  "kg_holdout": hold_ids,
                                  "head_lr": spec.head_lr, "new_head_lr": args.new_head_lr,
                                  "redocred_train": args.redocred_train,
