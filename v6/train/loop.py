@@ -98,6 +98,9 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
             e_ = evaluate(model, f_, vocab, pad_id, device, amp, max(1, batch_size // 4),
                           label_coll=c_, beat=beat)
             extra[name] = e_.get("relation_rank_acc", 0.0)
+            # Fact attributes are scored on the teacher dev windows (their
+            # held-out relations' facts).
+            extra.update({k: v for k, v in e_.items() if k.startswith("attr_")})
             extra[name.replace("_acc", "_thr_f1")] = e_.get("relation_f1", 0.0)
     if span_gold:
         on_span = evaluate(model, span_gold, vocab, pad_id, device, amp, batch_size,
@@ -181,6 +184,15 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
                 top = cand.argmax(1)
                 c["rank_ok"] += gold[pos].gather(1, top.unsqueeze(1)).sum().item()
                 c["rank_n"] += int(pos.sum())
+        if "fact_attr" in o:
+            fa, ok = o["fact_attr"], o["fact_attr_ok"]
+            pp, gp = fa["polarity"].argmax(-1), b["attr_polarity"][ok]
+            c["neg_tp"] += int(((pp == 1) & (gp == 1)).sum())
+            c["neg_p"] += int((pp == 1).sum()); c["neg_g"] += int((gp == 1).sum())
+            c["mod_ok"] += int((fa["modality"].argmax(-1) == b["attr_modality"][ok]).sum())
+            c["hold_ok"] += int((fa["holder"].argmax(-1) - 1 == b["attr_holder"][ok]).sum())
+            c["time_ok"] += int((fa["time"].argmax(-1) - 1 == b["attr_time"][ok]).sum())
+            c["attr_n"] += int(ok.sum())
         if "span" in o and len(o["span"]):
             from .kdata import decode_spans
             pred = {(b_, s_, e_, t_) for b_, items in enumerate(decode_spans(o["span"].float(), b))
@@ -216,6 +228,10 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
         r["span_f1"] = _f1(c["span_tp"], c["span_p"], c["span_g"])
     if c["rank_n"]:
         r["relation_rank_acc"] = c["rank_ok"] / c["rank_n"]
+    if c["attr_n"]:
+        r["attr_negation_f1"] = 2 * c["neg_tp"] / max(c["neg_p"] + c["neg_g"], 1)
+        for k in ("mod", "hold", "time"):
+            r[f"attr_{k}_acc"] = c[f"{k}_ok"] / c["attr_n"]
     if on_zs is not None:
         r["relation_gold_zs_f1"] = on_zs["relation_f1"]
     if on_gold is not None:
@@ -515,6 +531,9 @@ def main() -> int:
     ap.add_argument("--attn-implementation", choices=["eager", "sdpa"],
                     help="override the encoder's attention implementation (eager: the marker "
                          "pass can read attention maps on Ettin/ModernBERT)")
+    ap.add_argument("--attr-head", action="store_true",
+                    help="fact attributes (polarity, modality, holder, time) on the zero-shot "
+                         "relation head, trained from the teacher corpus")
     ap.add_argument("--max-batch-tokens", type=int, metavar="N",
                     help="batch up to --batch-size items while items x longest input <= N "
                          "(set it to the encoder's window: short documents batch, long ones "
@@ -669,7 +688,7 @@ def main() -> int:
                     span_head=args.span_head, label_adapter=args.label_adapter,
                     legacy_rank=args.legacy_rank,
                     trust_remote_code=spec.trust_remote_code,
-                    word_pool=args.word_pool).to(device)
+                    word_pool=args.word_pool, attr_head=args.attr_head).to(device)
     init_relation = args.init_relation or "drop"
     if init_relation == "transplant" and args.rel_head != "label":
         raise SystemExit("--init-relation transplant needs --rel-head label")
@@ -775,7 +794,7 @@ def main() -> int:
         for n, prm in model.named_parameters():
             prm.requires_grad = n.startswith(("encoder.", "rel_lora.", "relation.",
                                               "mix.relation.", "label_enc.", "label_lora.",
-                                              "span.", "mix.ent_span."))
+                                              "span.", "mix.ent_span.", "attr."))
         model.plain_grad = True
         heads = RELATION_HEADS
     elif args.train_scope == "relation":
@@ -893,6 +912,7 @@ def main() -> int:
                                  "label_adapter": args.label_adapter,
                                  "legacy_rank": args.legacy_rank,
                                  "word_pool": args.word_pool,
+                                 "attr_head": args.attr_head,
                                  "kg_holdout": hold_ids,
                                  "head_lr": spec.head_lr, "new_head_lr": args.new_head_lr,
                                  "redocred_train": args.redocred_train,

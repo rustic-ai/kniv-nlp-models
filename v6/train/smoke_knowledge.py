@@ -374,6 +374,29 @@ def main() -> int:
     multi = bool(((tb["word_end"] - tb["first_subword"]) > 1)[tb["word_mask"]].any())
     check("mean word pooling changes span scores only where words have several subwords",
           multi and not torch.allclose(a, b), f"max |diff| {float((a - b).abs().max()):.2e}")
+    # v7: fact attributes on teacher windows.
+    from .model import FactAttrHead
+    tw = knowledge_features("teacher", "train", tok, spec.max_subwords, vocab.size("cls"), bank, limit=12)
+    tw = [f for f in tw if f["rel"] and f["rel"].get("attrs")][:4]
+    ab = tc(collate(tw, tok.pad_token_id))
+    n_attr = len(ab.get("attr_pair", []))
+    same_doc = all(int(ab["ent_batch"][e]) == int(ab["pair_batch"][p])
+                   for p, h, t in zip(ab["attr_pair"].tolist(), ab["attr_holder"].tolist(),
+                                      ab["attr_time"].tolist()) for e in (h, t) if e >= 0)
+    check("teacher facts carry attribute targets, holder and time pointers inside their window",
+          n_attr > 0 and same_doc and bool((ab["attr_col"] >= 0).all()), f"{n_attr} facts")
+    A = V6Model(spec.hf_id, sizes, phase2=True, rel_adapter=8, rel_markers=True, rel_head="zs",
+                span_head=True, label_adapter=4, attr_head=True)
+    A.train(); no_dropout(A)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        oa = A(ab, relation_only=True)
+        La = losses(oa, ab)
+    La["fact_attr"][0].backward()
+    ga = any(p.grad is not None and float(p.grad.abs().sum()) > 0 for n, p in A.named_parameters()
+             if n.startswith("attr."))
+    check("fact attribute loss is finite and reaches the attribute head (bf16)",
+          isinstance(A.attr, FactAttrHead) and torch.isfinite(La["fact_attr"][0]) and ga
+          and La["fact_attr"][1] == n_attr, f"fact_attr {La['fact_attr'][0].item():.3f} over {La['fact_attr'][1]}")
     print("all knowledge-layer smoke checks passed")
     return 0
 

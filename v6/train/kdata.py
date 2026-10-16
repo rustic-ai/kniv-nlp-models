@@ -166,6 +166,10 @@ class LabelCollator:
         batch["rel_label_ids"] = torch.tensor([x + [pad] * (L - len(x)) for x in ids])
         batch["rel_label_mask"] = torch.tensor([[1] * len(x) + [0] * (L - len(x)) for x in ids])
         batch["rel_label_cols"] = torch.as_tensor(cols)
+        if "attr_rel" in batch:                  # fact attributes: their relation's column
+            where = {int(c): j for j, c in enumerate(cols)}
+            batch["attr_col"] = torch.as_tensor([where.get(int(r), -1)
+                                                 for r in batch.pop("attr_rel").tolist()])
         return batch
 
 

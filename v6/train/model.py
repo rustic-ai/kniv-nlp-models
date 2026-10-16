@@ -341,6 +341,7 @@ class MarkerRelationHead(nn.Module):
                 ts_ = batch["rm_sent_of_tok"][b]
                 onehot = F.one_hot(ts_.clamp(min=0), S).float() * (ts_ >= 0).unsqueeze(-1)
                 sent_att[sel] = (ht @ onehot).to(sent_att.dtype)
+        self._ent = ent                                  # [E,H], read by the fact attribute head
         zs = torch.tanh(self.head_extractor(torch.cat([hs, rs], -1)))
         zo = torch.tanh(self.tail_extractor(torch.cat([ts, rs], -1)))
         if getattr(self, "_parts", False):
@@ -559,10 +560,66 @@ class ZeroShotRelationHead(MarkerRelationHead):
             sel = batch["pair_batch"] == b
             out[sel] = (pr[sel] @ q[b].T) * scale + bias[b]
         th = (pr @ self.th.float()) * scale
+        self._pair, self._labels = pr, q                 # [P,d], [B,K,d]: the attribute head's input
         return torch.cat([th.unsqueeze(1), out], 1), sent_att
 
     def gates(self) -> list[float]:
         return [round(float(torch.tanh(g)), 4) for blk in self.xattn for g in (blk.g_att, blk.g_ff)]
+
+
+class FactAttrHead(nn.Module):
+    """Per fact (head, relation, tail): truth polarity, modality, and two
+    pointers -- who holds the fact (a speaker or another entity, or none: the
+    author) and when it holds (a temporal entity, or none). Reads the zero-shot
+    relation head's pair vector, its relation's label vector (after the
+    label-to-document cross-attention) and the document's entity vectors."""
+
+    N_POL, N_MOD = 2, 6
+
+    def __init__(self, d: int, H: int, p: float = 0.1):
+        super().__init__()
+        self.fact = nn.Sequential(nn.Linear(3 * d, d), nn.GELU(), nn.Dropout(p), nn.Linear(d, d))
+        self.pol = nn.Linear(d, self.N_POL)
+        self.mod = nn.Linear(d, self.N_MOD)
+        self.ent = nn.Linear(H, d)
+        self.q_hold, self.q_time = nn.Linear(d, d), nn.Linear(d, d)
+        self.none_hold, self.none_time = nn.Parameter(torch.zeros(d)), nn.Parameter(torch.zeros(d))
+        self.d = d
+
+    def forward(self, pair, labels, ent, batch, pairs, cols) -> dict:
+        b = batch["pair_batch"][pairs]
+        pr, q = pair[pairs].float(), labels[b, cols].float()
+        x = self.fact(torch.cat([pr, q, pr * q], -1).to(self.fact[0].weight.dtype)).float()
+        e = self.ent(ent.to(self.ent.weight.dtype)).float()                      # [E,d]
+        same = batch["ent_batch"].unsqueeze(0) == b.unsqueeze(1)                 # [A,E]
+
+        def pointer(qp, none):
+            s = qp(x.to(qp.weight.dtype)).float()
+            ent_s = (s @ e.T).masked_fill(~same, -1e4) / self.d ** 0.5
+            return torch.cat([(s @ none.float()).unsqueeze(1) / self.d ** 0.5, ent_s], 1)
+        return {"polarity": self.pol(x.to(self.pol.weight.dtype)).float(),
+                "modality": self.mod(x.to(self.mod.weight.dtype)).float(),
+                "holder": pointer(self.q_hold, self.none_hold),                  # col 0: none
+                "time": pointer(self.q_time, self.none_time)}
+
+
+# Class weights: the teacher's facts are 98% positive and 77% asserted, so a
+# negation or a plan would otherwise barely register (1 / sqrt(frequency),
+# normalised to mean 1 over the classes).
+# Teacher counts (513,762 facts): positive 505,276 / negative 8,486; asserted
+# 394,547, hypothetical 44,742, planned 25,398, desired 29,993, questioned
+# 8,916, reported 10,166 -- in schemas.POLARITIES / MODALITIES order.
+ATTR_POL_WEIGHT = (0.229, 1.771)
+ATTR_MOD_WEIGHT = (0.246, 0.730, 0.968, 0.891, 1.634, 1.531)
+
+
+def fact_attr_loss(o: dict, batch: dict) -> torch.Tensor:
+    w_pol = o["polarity"].new_tensor(ATTR_POL_WEIGHT)
+    w_mod = o["modality"].new_tensor(ATTR_MOD_WEIGHT)
+    return (F.cross_entropy(o["polarity"], batch["attr_polarity_ok"], weight=w_pol)
+            + F.cross_entropy(o["modality"], batch["attr_modality_ok"], weight=w_mod)
+            + F.cross_entropy(o["holder"], batch["attr_holder_ok"] + 1)
+            + F.cross_entropy(o["time"], batch["attr_time_ok"] + 1)) / 4
 
 
 def hybrid_logits(label: torch.Tensor, cols: torch.Tensor, legacy: torch.Tensor) -> torch.Tensor:
@@ -714,7 +771,7 @@ class V6Model(nn.Module):
                  label_plain: bool = True, legacy_relation: bool = False,
                  span_head: bool = False, label_adapter: int = 0,
                  legacy_rank: int | None = None, trust_remote_code: bool = False,
-                 word_pool: str = "first"):
+                 word_pool: str = "first", attr_head: bool = False):
         super().__init__()
         # Word vectors: the first subword (v6), or the mean of all of a word's
         # subwords -- for tokenizers that split words often, with little in
@@ -834,6 +891,12 @@ class V6Model(nn.Module):
                 raise ValueError("span_head needs the label encoder (a label relation head)")
             self.mix["ent_span"] = ScalarMix(L)
             self.span = SpanTypeHead(H, label_dim, p=p)
+        # Fact attributes (v7): polarity, modality, holder, time.
+        self.attr = None
+        if attr_head:
+            if rel_head != "zs":
+                raise ValueError("attr_head reads the zero-shot relation head (--rel-head zs)")
+            self.attr = FactAttrHead(self.relation.d, H, p=p)
         # Set by a run that trains only heads: the encoder then runs without
         # gradient and without dropout, the features it will give at inference.
         self.freeze_encoder = False
@@ -1080,6 +1143,13 @@ class V6Model(nn.Module):
                 if emb is None:
                     emb = self.label_embeddings(batch["rel_label_ids"], batch["rel_label_mask"])
                 o["relation"], o["relation_sent_att"] = self.relation(seq, att, batch, emb)
+                if self.attr is not None and "attr_pair" in batch and len(o["relation"]):
+                    ok = batch["attr_col"] >= 0
+                    if bool(ok.any()):
+                        o["fact_attr"] = self.attr(self.relation._pair, self.relation._labels,
+                                                   self.relation._ent, batch,
+                                                   batch["attr_pair"][ok], batch["attr_col"][ok])
+                        o["fact_attr_ok"] = ok
                 if not self.training and self.zs_offset and len(o["relation"]):
                     o["relation"] = o["relation"].clone()
                     o["relation"][:, 0] += self.zs_offset      # shifts every label-path margin
@@ -1225,9 +1295,9 @@ def _ce(logits: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, int]:
 
 
 PHASE2_HEADS = ("coref", "coref_span", "relation", "relation_evidence", "ent",
-                "relation_rank", "ent_span_rank")
+                "relation_rank", "ent_span_rank", "fact_attr")
 RELATION_HEADS = ("relation", "relation_evidence", "ent", "relation_kd", "ent_span",
-                  "relation_rank", "ent_span_rank")
+                  "relation_rank", "ent_span_rank", "fact_attr")
 # Fixed weights on top of the per-head loss scale: DREEAM weighs its evidence
 # term at 0.1 of the relation loss.
 # The label-ranking terms are off unless asked for (--head-weight relation_rank=0.5).
@@ -1311,6 +1381,13 @@ def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
                               len(o["relation"]))
     else:
         out["relation_kd"] = (_zero(o), 0)
+    if "fact_attr" in o:
+        ok = o["fact_attr_ok"]
+        tb = {k + "_ok": batch[k][ok] for k in ("attr_polarity", "attr_modality",
+                                                "attr_holder", "attr_time")}
+        out["fact_attr"] = (fact_attr_loss(o["fact_attr"], tb), int(ok.sum()))
+    else:
+        out["fact_attr"] = (_zero(o), 0)
     sa = o.get("relation_sent_att")
     if sa is not None and batch["pair_ev_ok"].any():
         ok = batch["pair_ev_ok"]

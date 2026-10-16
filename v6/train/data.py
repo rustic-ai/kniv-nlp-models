@@ -797,6 +797,9 @@ def _collate_markers(items: list[dict], pad_id: int) -> dict:
             "rm_men_pos": torch.tensor(pos, dtype=torch.long), "rm_ok": torch.tensor(ok)}
 
 
+from ..schemas import MODALITIES, POLARITIES            # fact attribute classes (teacher)
+
+
 def _collate_phase2(items: list[dict], _unused=None) -> dict:
     """Coreference mentions and relation entities/pairs, flattened over the
     batch with a per-item index, as the SRL frames are.
@@ -809,6 +812,7 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
     cb, ch, cs, ce, cc, cok = [], [], [], [], [], []
     eb, et, me, ms, mx = [], [], [], [], []
     pb, ph, pt, plab, pev = [], [], [], [], []
+    ap, ar, apol, amod, ahold, atime = [], [], [], [], [], []
     S_max = max(len(x["sent_whole"]) for x in items)
     n_rel = None
     cluster_base = ent_base = 0
@@ -832,13 +836,25 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
         for h, tl, k in r["triples"]:
             lab.setdefault((int(h), int(tl)), set()).add(int(k))
         ev = {(int(h), int(tl)): sents for h, tl, sents in r.get("evidence", [])}
+        pidx = {}
         for h in range(E):
             for tl in range(E):
                 if h == tl:
                     continue
+                pidx[(h, tl)] = len(pb)
                 pb.append(b); ph.append(ent_base + h); pt.append(ent_base + tl)
                 plab.append(lab.get((h, tl), set()))
                 pev.append(ev.get((h, tl)))
+        # Fact attributes (teacher): per (head, relation, tail), entity
+        # pointers as batch-global entity indices, -1 for none.
+        for a in r.get("attrs") or []:
+            p = pidx.get((int(a["h"]), int(a["t"])))
+            if p is None:
+                continue
+            ap.append(p); ar.append(int(a["r"]))
+            apol.append(POLARITIES.index(a["polarity"])); amod.append(MODALITIES.index(a["modality"]))
+            ahold.append(ent_base + a["holder"] if a["holder"] is not None and a["holder"] >= 0 else -1)
+            atime.append(ent_base + a["time"] if a["time"] is not None and a["time"] >= 0 else -1)
         ent_base += E
     L = torch.long
     out = {"coref_batch": torch.tensor(cb, dtype=L), "coref_head": torch.tensor(ch, dtype=L),
@@ -849,6 +865,10 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
            "men_end": torch.tensor(mx, dtype=L),
            "pair_batch": torch.tensor(pb, dtype=L), "pair_h": torch.tensor(ph, dtype=L),
            "pair_t": torch.tensor(pt, dtype=L)}
+    if ap:
+        out.update(attr_pair=torch.tensor(ap, dtype=L), attr_rel=torch.tensor(ar, dtype=L),
+                   attr_polarity=torch.tensor(apol, dtype=L), attr_modality=torch.tensor(amod, dtype=L),
+                   attr_holder=torch.tensor(ahold, dtype=L), attr_time=torch.tensor(atime, dtype=L))
     R = (n_rel or items[0].get("_n_rel") or 0) + 1
     labels = torch.zeros(len(plab), R)
     for i, s in enumerate(plab):
