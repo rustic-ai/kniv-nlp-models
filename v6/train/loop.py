@@ -71,7 +71,7 @@ def _f1(tp: float, n_pred: float, n_gold: float) -> float:
 def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
              batch_size: int, rel_gold: list | None = None,
              label_coll=None, label_coll_zs=None, span_gold: list | None = None,
-             extra_rel: dict | None = None, beat=None) -> dict:
+             extra_rel: dict | None = None, beat=None, knowledge_only: bool = False) -> dict:
     """Dev scores and their composite. ``rel_gold``: human-annotated relation
     documents (Re-DocRED dev), scored as ``relation_gold_f1`` and counted in
     the composite. ``label_coll``: the label-conditioned head's batch labels;
@@ -252,6 +252,12 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
         # Zero-shot relations select best.pt; the label path on Re-DocRED's
         # own relations (answered by the frozen path) is reported only.
         keys = [k for k in keys if k != "relation_gold_label_f1"] + ["relation_zs_acc"]
+    if knowledge_only:
+        # A run that trains only the knowledge layer (--train-scope
+        # knowledge-full): the linguistic heads are untrained and drift at
+        # random, so they would decide best.pt. Only what trains counts.
+        keys = [k for k in ("relation_gold_f1", "span_gold_f1", "relation_zs_acc",
+                            "fewrel_zs_acc") if k in r]
     r = {k: round(v, 5) for k, v in r.items()}
     # One number to select best.pt on: every head counts equally.
     r["composite"] = round(sum(r[k] for k in keys) / len(keys), 5)
@@ -1064,7 +1070,8 @@ def main() -> int:
                                  rel_gold=rd_dev, label_coll=label_coll_dev,
                                  label_coll_zs=label_coll_zs, span_gold=span_dev,
                                  extra_rel=extra_dev,
-                                 beat=lambda: rs.status(state="evaluating"))
+                                 beat=lambda: rs.status(state="evaluating"),
+                                 knowledge_only=args.train_scope == "knowledge-full")
                     if hasattr(getattr(model, "relation", None), "gates"):
                         r["xattn_gates"] = model.relation.gates()
                     if frozen_digest is not None and _frozen_digest(model) != frozen_digest:
