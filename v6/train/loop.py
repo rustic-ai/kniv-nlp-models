@@ -345,7 +345,7 @@ def _load_init(model, init: str, vocab: Vocab, relation: str = "drop",
                                                       "mix.coref.", "mix.relation.", "ent.",
                                                       "mix.ent.", "rel_lora.", "label_enc.",
                                                       "legacy_", "span.", "mix.ent_span.",
-                                                      "label_lora."))]
+                                                      "label_lora.", "attr."))]
     if fresh or unexpected:
         raise SystemExit(f"--init does not fit this model: missing {fresh[:5]}, "
                          f"unexpected {unexpected[:5]}")
