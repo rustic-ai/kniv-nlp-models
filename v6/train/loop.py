@@ -961,7 +961,14 @@ def main() -> int:
                             0.0, 1.0 - rs.p.step / max(total / 2, 1))
                     loss = sum(scale.get(h, 1.0) * weight.get(h, 1.0) * l
                                for h, (l, _) in L.items()) / spec.grad_accum
-                    loss.backward()
+                    try:
+                        loss.backward()
+                    except torch.OutOfMemoryError:
+                        o = L = b = loss = None
+                        opt.zero_grad(set_to_none=True)
+                        torch.cuda.empty_cache()
+                        bad = ["out_of_memory"]
+                        break
                     for h, v in vals.items():
                         this[h] += v / spec.grad_accum
                         seen.add(h)
