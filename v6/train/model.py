@@ -39,6 +39,97 @@ from .data import IGNORE
 NEG = -1e4          # fits bf16; large enough to zero a softmax entry
 
 
+# ── dependency trees ────────────────────────────────────────────────
+def _cycle(heads) -> list[int] | None:
+    """A cycle in a head array (node 0 = root, never a dependent), or None."""
+    state = [0] * len(heads)                  # 0 new, 1 on the current path, 2 done
+    for start in range(1, len(heads)):
+        path, j = [], start
+        while j > 0 and state[j] == 0:
+            state[j] = 1
+            path.append(j)
+            j = int(heads[j])
+        if j > 0 and state[j] == 1:
+            return path[path.index(j):]
+        for k in path:
+            state[k] = 2
+    return None
+
+
+def _chu_liu_edmonds(S):
+    """Maximum spanning arborescence. ``S[d, h]`` scores head h for dependent
+    d, node 0 the root (its row unused). Returns heads, ``heads[0] = -1``."""
+    import numpy as np
+    N = S.shape[0]
+    heads = S.argmax(1)
+    heads[0] = -1
+    cyc = _cycle(heads)
+    if cyc is None:
+        return heads
+    inC = set(cyc)
+    rest = [i for i in range(N) if i not in inC]  # root first
+    c = len(rest)
+    S2 = np.full((c + 1, c + 1), -np.inf)
+    S2[:c, :c] = S[np.ix_(rest, rest)]
+    held = S[cyc, heads[cyc]]
+    enter = S[np.ix_(cyc, rest)] - held[:, None]   # [|C|, c]: break the cycle at its entry
+    S2[c, :c] = enter.max(0)
+    leave = S[np.ix_(rest, cyc)]                   # [c, |C|]
+    S2[:c, c] = leave.max(1)
+    np.fill_diagonal(S2, -np.inf)
+    sub = _chu_liu_edmonds(S2)
+    out = heads.copy()
+    for k, d in enumerate(rest):
+        if d == 0:
+            continue
+        out[d] = cyc[leave[k].argmax()] if sub[k] == c else rest[sub[k]]
+    h = sub[c]
+    out[cyc[enter[:, h].argmax()]] = rest[h]
+    return out
+
+
+def tree_heads(S):
+    """Best tree with exactly one word attached to the root (UD's rule): if
+    the unconstrained tree has several, each is tried as the only one."""
+    import numpy as np
+    heads = _chu_liu_edmonds(S)
+    roots = [i for i in range(1, len(heads)) if heads[i] == 0]
+    if len(roots) <= 1:
+        return heads
+    best, best_score = heads, -np.inf
+    for r in roots:
+        T = S.copy()
+        T[1:, 0] = -np.inf
+        T[r, 0] = S[r, 0]
+        h = _chu_liu_edmonds(T)
+        score = T[np.arange(1, len(h)), h[1:]].sum()
+        if score > best_score:
+            best, best_score = h, score
+    return best
+
+
+def decode_trees(arc: torch.Tensor, sent: torch.Tensor, wm: torch.Tensor) -> torch.Tensor:
+    """Per sentence of each window, the maximum spanning tree over the arc
+    scores ``[B, W, W+1]`` (column 0 = root, j+1 = word j). Returns head
+    columns ``[B, W]`` like ``arc.argmax(-1)``; words outside any sentence
+    keep the argmax."""
+    import numpy as np
+    out = arc.argmax(-1)
+    lp = torch.log_softmax(arc.float(), -1).cpu().numpy()
+    sent_np, wm_np, res = sent.cpu().numpy(), wm.cpu().numpy(), out.cpu().numpy()
+    for b in range(arc.size(0)):
+        for s in np.unique(sent_np[b][wm_np[b] & (sent_np[b] >= 0)]):
+            w = np.nonzero((sent_np[b] == s) & wm_np[b])[0]
+            n = len(w)
+            S = np.full((n + 1, n + 1), -np.inf)
+            S[1:, 0] = lp[b, w, 0]
+            S[1:, 1:] = lp[b][np.ix_(w, w + 1)]
+            np.fill_diagonal(S, -np.inf)
+            h = tree_heads(S)
+            res[b, w] = np.where(h[1:] == 0, 0, w[np.maximum(h[1:] - 1, 0)] + 1)
+    return torch.from_numpy(res).to(arc.device)
+
+
 class ScalarMix(nn.Module):
     def __init__(self, n: int):
         super().__init__()
@@ -768,6 +859,8 @@ class RelationAdapter(nn.Module):
 
 
 class V6Model(nn.Module):
+    tree_decode = True          # predicted heads form one tree per sentence (else argmax)
+
     def __init__(self, hf_id: str, sizes: dict[str, int], dropout: float = 0.1,
                  attn_implementation: str | None = None,
                  arc_dim: int = 512, rel_dim: int = 128, srl_dim: int = 256,
@@ -1230,7 +1323,12 @@ class V6Model(nn.Module):
         allowed = torch.cat([wm.unsqueeze(-1),
                              self._same_sentence(batch["sent_of_word"], wm)], -1)
         o["arc"] = arc.masked_fill(~allowed, NEG)                      # [B,W,W+1]
-        head = o["arc"].argmax(-1) if predict_heads else batch["dep_head"].clamp(min=0)
+        if not predict_heads:
+            head = batch["dep_head"].clamp(min=0)
+        elif self.tree_decode:
+            head = decode_trees(o["arc"], batch["sent_of_word"], wm)
+        else:
+            head = o["arc"].argmax(-1)
         hrep = torch.gather(self.rel_head(cand), 1,
                             head.unsqueeze(-1).expand(-1, -1, self.rel.U.size(1)))
         o["rel"] = self.rel.paired(self.rel_dep(d), hrep)              # [B,W,53]
