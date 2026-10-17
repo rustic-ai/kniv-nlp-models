@@ -260,8 +260,14 @@ def main() -> int:
         r["main"] = sum(r.values()) / 3
         return r
 
+    # Heads see only labelled word rows in training: MPS LayerNorm backward on
+    # the all-zero padding rows gives wrong (and in larger batches NaN) gradients.
     def loss_tag(b):
-        return sum(ce(getattr(model, h)(b[h + "_w"]), b[h]) for h in TAGGERS) / 3
+        out = 0.0
+        for h in TAGGERS:
+            m = b[h] != IGNORE
+            out = out + ce(getattr(model, h)(b[h + "_w"][m]), b[h][m]) / 3
+        return out
 
     tag_params = [p for h in TAGGERS for p in getattr(model, h).parameters()]
     r_tag = epochs("pos/morph/lemma", tag_params, ud_tr, ud_dv, loss_tag, score_tag, device, args, rng)
@@ -285,8 +291,9 @@ def main() -> int:
         return {"ner_f1": f1, "main": f1}
 
     def loss_ner(b):
-        pos_p = torch.softmax(model.pos(b["pos_w"]).float(), -1).detach()
-        return ce(model.ner(torch.cat([b["ner_w"], pos_p], -1)), b["ner"])
+        m = b["ner"] != IGNORE
+        pos_p = torch.softmax(model.pos(b["pos_w"][m]).float(), -1).detach()
+        return ce(model.ner(torch.cat([b["ner_w"][m], pos_p], -1)), b["ner"][m])
 
     r_ner = epochs("ner", list(model.ner.parameters()), c_tr, c_dv, loss_ner, score_ner,
                    device, args, rng)
