@@ -1023,6 +1023,112 @@ def cmd_queue(a) -> int:
     return 0 if all(v == "done" for v in outcome.values()) else 1
 
 
+# ── post-training jobs on a VM ──────────────────────────────────────
+EVAL_DATA = ["benchmarks", "crossner", "fewnerd", "fewrel", "litbank", "prepared/propbank-full",
+             "ud-english-ewt", "wikidata", "re-docred/train_revised.json",
+             "re-docred/dev_revised.json", "re-docred/test_revised.json",
+             "re-docred/rel_info_desc.json", "re-docred/rel_info.json",
+             "prepared/kniv-deberta-cascade/srl_train.json",
+             "prepared/kniv-deberta-cascade/srl_dev.json",
+             "prepared/kniv-deberta-cascade/srl_test.json", "trex/property_counts.json"]
+
+SGD_REVISION = "a8029ad8c12e13cdbfefc2f649e245fa135bc98a"
+POST_JOBS = {
+    "srlft": "python -m v6.train.srl_finetune --run {run} --out-run {run}-srlft --data full",
+    "hft": "python -m v6.train.head_finetune --run {run}-srlft --out-run {run}-ft",
+    "gold": "python -m v6.train.gold_eval --runs {run}-ft "
+            "--benchmarks ud,ner,srl,srl_full,cls,litbank,redocred",
+    "zs": "python -m v6.train.zs_protocol --runs {run}-ft",
+    "span": "python -m v6.train.span_eval --runs {run}-ft --describe --calibrate-on crossner_politics",
+    "rb": "python -m v6.train.rel_breakdown --runs {run}-ft",
+}
+POST_LINES = r"wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
+
+POST_START = r'''
+import json, os, subprocess, sys
+out = "{out}"
+os.makedirs(out, exist_ok=True)
+open(f"{{out}}/run.sh", "w").write({script!r}.replace("python -m ", sys.executable + " -m "))
+json.dump({{"state": "running"}}, open(f"{{out}}/status.json", "w"))
+subprocess.Popen(["bash", f"{{out}}/run.sh"], cwd="{repo}", start_new_session=True,
+                 stdout=open(f"{{out}}/post.log", "w"), stderr=subprocess.STDOUT)
+print("post jobs started")
+'''
+
+
+def eval_bundle() -> Path:
+    """The evaluation and fine-tuning data the training bundle leaves out."""
+    paths = [DATA_DIR / p for p in EVAL_DATA if (DATA_DIR / p).exists()]
+    sig = hashlib.sha1("|".join(f"{p}:{sum(f.stat().st_size for f in ([p] if p.is_file() else p.rglob('*')) if f.is_file())}"
+                                for p in paths).encode()).hexdigest()[:10]
+    out = BUNDLE / f"evaldata-{sig}.tar.gz"
+    if not out.exists():
+        BUNDLE.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(out, "w:gz") as t:
+            for p in paths:
+                t.add(p, arcname=str(p.relative_to(REPO)))
+    return out
+
+
+def cmd_post(a) -> int:
+    """After a run: the SRL and linguistic head fine-tunes and the full gold
+    evaluation on an A100, checkpoints uploaded as <run>-srlft / <run>-ft,
+    the scorecard printed here; the VM is released at the end."""
+    run = a.run_name
+    jobs = [j for j in a.jobs.split(",") if j]
+    bad = [j for j in jobs if j not in POST_JOBS]
+    if bad:
+        raise SystemExit(f"unknown post jobs {bad}; known: {', '.join(POST_JOBS)}")
+    sess = a.session or f"kniv-v6-{run}-post"
+    out = f"/content/post/{run}"
+    prepare(sess, token=True)
+    ev = eval_bundle()
+    upload_big(sess, ev, f"/content/{ev.name}")
+    vm_exec(sess, f"""
+import tarfile
+with tarfile.open("/content/{ev.name}") as t:
+    t.extractall("{VM_REPO}", filter="data")
+# The SGD dialogue-act benchmark reads the HF cache (gold.sgd_cls.SNAP): the
+# parquet revision the corpus was collected from.
+from huggingface_hub import snapshot_download
+snapshot_download("google-research-datasets/schema_guided_dstc8", repo_type="dataset",
+                  revision="{SGD_REVISION}", allow_patterns=["dialogues/test/*"])
+print("eval data unpacked")
+""", timeout=900)
+    lines = ["set -o pipefail", 'export HF_TOKEN="$(cat /content/.hf_token)"', "ok=1"]
+    for j in jobs:
+        lines.append(f'echo "=== {j} $(date +%H:%M)"; {POST_JOBS[j].format(run=run)} || ok=0')
+    lines.append(f'if [ $ok = 1 ]; then s=done; else s=failed; fi; '
+                 f'echo "{{\\"state\\": \\"$s\\"}}" > {out}/status.json')
+    vm_exec(sess, POST_START.format(out=out, repo=VM_REPO, script="\n".join(lines) + "\n"))
+    ensure_holder(sess, out)
+    print(f"{run}: post jobs {', '.join(jobs)} running on {sess}", flush=True)
+    state = "running"
+    with tempfile.TemporaryDirectory() as d:
+        while state == "running":
+            time.sleep(a.poll * 60)
+            r = colab("download", "-s", sess, f"{out}/status.json", f"{d}/s.json",
+                      check=False, quiet=True)
+            if r.returncode == 0:
+                state = json.loads(Path(f"{d}/s.json").read_text()).get("state", "running")
+            elif sess not in colab("sessions", check=False, quiet=True).stdout:
+                print(f"{sess} is gone; post jobs lost", flush=True)
+                return 1
+        local = RUNS_DIR / "post" / f"{run}.log"
+        local.parent.mkdir(parents=True, exist_ok=True)
+        colab("download", "-s", sess, f"{out}/post.log", str(local), check=False, quiet=True)
+    if local.exists():
+        import re
+        for ln in local.read_text(errors="replace").splitlines():
+            if ln.startswith("===") or re.search(POST_LINES, ln):
+                print(ln[:240], flush=True)
+    print(f"{run}: post jobs {state}; log {local}", flush=True)
+    _kill_holder(sess)
+    if not a.keep:
+        colab("stop", "-s", sess, check=False)
+    return 0 if state == "done" else 1
+
+
 def cmd_orphans(a) -> int:
     """List VMs Colab has allocated that no local session tracks.
 
@@ -1093,6 +1199,14 @@ def main() -> int:
     q.add_argument("--suffix", default="", help="run name = <encoder>-<suffix>; "
                    "without it a variant would resume the baseline's checkpoint")
     q.add_argument("extra", nargs=argparse.REMAINDER, help="passed to v6.train.loop, after --")
+    pp = sub.add_parser("post", help="SRL + head fine-tunes and full gold eval of a "
+                        "finished run, on an A100")
+    pp.add_argument("--run-name", required=True)
+    pp.add_argument("--jobs", default=",".join(POST_JOBS),
+                    help=f"comma-separated, in order (default all: {','.join(POST_JOBS)})")
+    pp.add_argument("--session")
+    pp.add_argument("--poll", type=float, default=5.0, help="minutes between status checks")
+    pp.add_argument("--keep", action="store_true", help="leave the VM running")
     w = sub.add_parser("watch")
     w.add_argument("runs", nargs="*", help="run names (default: the three encoders)")
     w.add_argument("--hf-repo", default=HF_REPO)
@@ -1113,7 +1227,8 @@ def main() -> int:
         a.extra = a.extra[1:]
     return {"launch": cmd_launch, "probe": cmd_probe, "status": cmd_status,
             "stop": cmd_stop, "checkpoint": cmd_checkpoint, "watch": cmd_watch,
-            "sweep": cmd_sweep, "orphans": cmd_orphans, "queue": cmd_queue}[a.cmd](a)
+            "sweep": cmd_sweep, "orphans": cmd_orphans, "queue": cmd_queue,
+            "post": cmd_post}[a.cmd](a)
 
 
 if __name__ == "__main__":
