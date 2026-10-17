@@ -63,6 +63,9 @@ def _spans(tags: list[str]) -> set[tuple]:
     return out
 
 
+GOLD_DEV_KEYS = ("pos", "morph", "lemma", "ner_f1", "las", "srl_pred_f1", "srl_role_f1")
+
+
 def _f1(tp: float, n_pred: float, n_gold: float) -> float:
     return 2 * tp / max(n_pred + n_gold, 1)
 
@@ -71,7 +74,8 @@ def _f1(tp: float, n_pred: float, n_gold: float) -> float:
 def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
              batch_size: int, rel_gold: list | None = None,
              label_coll=None, label_coll_zs=None, span_gold: list | None = None,
-             extra_rel: dict | None = None, beat=None, knowledge_only: bool = False) -> dict:
+             extra_rel: dict | None = None, beat=None, knowledge_only: bool = False,
+             gold_dev: list | None = None) -> dict:
     """Dev scores and their composite. ``rel_gold``: human-annotated relation
     documents (Re-DocRED dev), scored as ``relation_gold_f1`` and counted in
     the composite. ``label_coll``: the label-conditioned head's batch labels;
@@ -81,8 +85,15 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
     With the hybrid, Re-DocRED through the frozen path is a constant, so the
     label path is scored on its own too (``relation_gold_label_f1``), and
     ``span_gold`` (Few-NERD dev) scores the span head (``span_gold_f1``):
-    both join the composite, which then moves only with what trains."""
-    on_gold = on_zs = on_span = None
+    both join the composite, which then moves only with what trains.
+
+    ``gold_dev``: human-annotated linguistic dev items (``golddata.gold_dev``);
+    their POS, morphology, lemma, LAS, NER and SRL scores (``gold_*``) replace
+    the corpus-dev ones in the composite, so best.pt follows gold, not the
+    corpus's own annotators."""
+    on_gold = on_zs = on_span = on_lang = None
+    if gold_dev:
+        on_lang = evaluate(model, gold_dev, vocab, pad_id, device, amp, batch_size, beat=beat)
     sticky = model.rel_lora is not None and model.rel_lora.sticky
     if sticky:                       # the plain pass must be plain while evaluating
         model.rel_lora.sticky = model.rel_lora.on = False
@@ -215,6 +226,10 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
              sentiment=c["sent_ok"] / max(c["sent_n"], 1))
     keys = ["pos", "morph", "lemma", "ner_f1", "las", "srl_pred_f1", "srl_role_f1",
             "cls_f1", "sentiment"]
+    if on_lang is not None:
+        for k in GOLD_DEV_KEYS:
+            r[f"gold_{k}"] = on_lang[k]
+        keys = [f"gold_{k}" if k in GOLD_DEV_KEYS else k for k in keys]
     if c["link_g"] or c["rel_g"]:
         r.update(coref_link_f1=_f1(c["link_tp_p"], c["link_p"], c["link_g"])
                  if c["link_g"] else 0.0,
@@ -504,6 +519,13 @@ def main() -> int:
     ap.add_argument("--kg-data", default="", metavar="SRC=N,...",
                     help="knowledge sources, each N times per epoch: teacher, fewrel, fewnerd, "
                          "docred_distant (needs --rel-head label; python -m v6.train.kdata --prep)")
+    ap.add_argument("--gold-data", default="", metavar="SRC=N,...",
+                    help="human-annotated linguistic data, each N times per epoch (N < 1: that "
+                         "fraction): ud (UD EWT + PropBank EWT frames), v5ner (v5's "
+                         "gold-filtered NER); see golddata.py")
+    ap.add_argument("--gold-dev", action="store_true",
+                    help="score UD EWT dev, PropBank dev and v5 gold NER dev every eval; their "
+                         "linguistic scores replace the corpus dev ones in the composite")
     ap.add_argument("--kg-oversample", default="", metavar="DOMAIN=N,...",
                     help="repeat teacher windows of a domain N times, e.g. business=2")
     ap.add_argument("--legacy-relation", metavar="RUN",
@@ -686,6 +708,24 @@ def main() -> int:
             train = train + feats * int(w)
             print(f"{src}: {len(feats):,} items x{n}; "
                   + ", ".join(f"{k} {v:,}" for k, v in sorted(st.items())), flush=True)
+
+    gold_data = dict(x.split("=") for x in args.gold_data.split(",") if x)
+    gold_dev_items = None
+    if gold_data or args.gold_dev:
+        from .golddata import gold_dev, gold_features
+        for src, n in gold_data.items():
+            preparing(f"featurising gold {src}")
+            feats = gold_features(src, "train", tok, spec, vocab, phase2=args.phase2)
+            w = float(n)
+            if w < 1:
+                rng = np.random.default_rng([args.seed, len(src), 7])
+                feats = [feats[i] for i in sorted(rng.choice(len(feats), int(len(feats) * w),
+                                                             replace=False))]
+                w = 1
+            train = train + feats * int(w)
+            print(f"gold {src}: {len(feats):,} items x{n}", flush=True)
+        if args.gold_dev and not args.probe:
+            gold_dev_items = gold_dev(tok, spec, vocab, phase2=args.phase2)
 
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
                     attn_implementation=spec.attn_implementation,
@@ -1080,7 +1120,7 @@ def main() -> int:
                     r = evaluate(model, dev, vocab, tok.pad_token_id, device, amp, micro * 2,
                                  rel_gold=rd_dev, label_coll=label_coll_dev,
                                  label_coll_zs=label_coll_zs, span_gold=span_dev,
-                                 extra_rel=extra_dev,
+                                 extra_rel=extra_dev, gold_dev=gold_dev_items,
                                  beat=lambda: rs.status(state="evaluating"),
                                  knowledge_only=args.train_scope == "knowledge-full")
                     if hasattr(getattr(model, "relation", None), "gates"):
