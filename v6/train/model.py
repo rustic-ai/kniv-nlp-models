@@ -1302,7 +1302,7 @@ def _ce(logits: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, int]:
 
 
 PHASE2_HEADS = ("coref", "coref_span", "relation", "relation_evidence", "ent",
-                "relation_rank", "ent_span_rank", "fact_attr")
+                "ent_span", "relation_rank", "ent_span_rank", "fact_attr")
 RELATION_HEADS = ("relation", "relation_evidence", "ent", "relation_kd", "ent_span",
                   "relation_rank", "ent_span_rank", "fact_attr")
 # Fixed weights on top of the per-head loss scale: DREEAM weighs its evidence
