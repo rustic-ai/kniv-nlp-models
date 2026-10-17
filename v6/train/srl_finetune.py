@@ -347,6 +347,7 @@ def main() -> int:
     ap.add_argument("--data", choices=["full", "root"], default="full",
                     help="full: every PropBank predicate (gold.propbank_full), predicate head "
                          "trained too; root: v5's one-root-predicate files, role head only")
+    ap.add_argument("--local", type=Path, help="read <dir>/<run>/best.pt instead of the hub")
     ap.add_argument("--word-pool", choices=["first", "mean"],
                     help="override the run's word pooling (a probe; the checkpoint keeps its own)")
     ap.add_argument("--no-upload", action="store_true",
@@ -359,7 +360,7 @@ def main() -> int:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else
                                           "mps" if torch.backends.mps.is_available() else "cpu"))
 
-    model, tok, spec, vocab, best = load_run(args.run, HF_REPO, device)
+    model, tok, spec, vocab, best = load_run(args.run, HF_REPO, device, args.local)
     assert model.srl_mode == "joint", "fine-tunes the joint SRL head"
     if args.word_pool:                     # a probe: the same encoder, other word vectors
         model.word_pool = args.word_pool
