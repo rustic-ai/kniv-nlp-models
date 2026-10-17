@@ -82,7 +82,9 @@ def v5_ner_features(split: str, limit: int, tok, spec, vocab, rng) -> list[dict]
         n = len(r["words"])
         tags = []
         for t in r["ner_tags"]:                 # ~0.4% bare types from validation fixes
-            if t != "O" and t[:2] not in ("B-", "I-"):
+            if t.split("-", 1)[-1] in ("None", "NONE", "null", "_MISSING"):
+                t = "O"
+            elif t != "O" and t[:2] not in ("B-", "I-"):
                 t = ("I-" if tags and tags[-1] != "O" and tags[-1][2:] == t else "B-") + t
             tags.append(t)
         row = {"window_id": f"v5-ner-{split}-{k}", "domain": "v5", "tokens": r["words"],
@@ -171,13 +173,16 @@ def epochs(name, params, train, dev, step_loss, score, device, args, rng) -> flo
     stale = 0
     for ep in range(1, args.epochs + 1):
         order = rng.permutation(len(train))
-        tot, n = 0.0, 0
+        tot, n, skipped = 0.0, 0, 0
         for k in range(0, len(order), args.batch):
             b = pad([train[i] for i in order[k:k + args.batch]], device)
             loss = step_loss(b)
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(params, 1.0)
+            gn = torch.nn.utils.clip_grad_norm_(params, 1.0)
+            if not (torch.isfinite(loss) and torch.isfinite(gn)):
+                skipped += 1                       # one inf grad would turn every weight NaN
+                continue
             opt.step()
             tot += loss.item(); n += 1
         r = score(dev)
@@ -187,7 +192,7 @@ def epochs(name, params, train, dev, step_loss, score, device, args, rng) -> flo
             keep = [p.detach().clone() for p in params]
         else:
             stale += 1
-        print(f"{name} epoch {ep}: loss {tot / n:.4f}  " +
+        print(f"{name} epoch {ep}: loss {tot / max(n, 1):.4f}  " + (f"skipped {skipped}  " if skipped else "") +
               "  ".join(f"{k} {v:.4f}" for k, v in r.items()) + mark, flush=True)
         if stale >= args.patience:
             break
@@ -208,7 +213,7 @@ def main() -> int:
     ap.add_argument("--ner-train", type=int, default=45000, help="v5 NER sentences (all 45k)")
     ap.add_argument("--ner-dev", type=int, default=3000, help="v5 NER dev sample for selection")
     ap.add_argument("--epochs", type=int, default=10)
-    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--patience", type=int, default=2)
     ap.add_argument("--seed", type=int, default=13)
