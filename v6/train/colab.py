@@ -105,8 +105,12 @@ def sh(cmd: list[str], check: bool = True, timeout: float | None = None,
     except subprocess.TimeoutExpired as exc:
         # A hung CLI must not hang the launcher: on the A100 one colab exec
         # sat for 20 minutes without ever sending its cell.
-        r = subprocess.CompletedProcess(cmd, 124, exc.stdout or "",
-                                        (exc.stderr or "") + f"\ntimed out after {timeout}s")
+        out, err = exc.stdout or "", exc.stderr or ""
+        if isinstance(out, bytes):
+            out = out.decode(errors="replace")
+        if isinstance(err, bytes):
+            err = err.decode(errors="replace")
+        r = subprocess.CompletedProcess(cmd, 124, out, err + f"\ntimed out after {timeout}s")
         if isinstance(r.stdout, bytes):
             r.stdout = r.stdout.decode(errors="replace")
         if isinstance(r.stderr, bytes):
