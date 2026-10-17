@@ -1055,6 +1055,8 @@ class V6Model(nn.Module):
                            + str(tuple(ids.shape)).encode()).hexdigest()
         cache = self.__dict__.setdefault("_label_cache", {})
         if key not in cache:
+            if len(cache) >= 256:        # bounded: one entry per schema would otherwise
+                cache.clear()            # grow without limit over many varied schemas
             cache[key] = self._label_embeddings(ids, mask)
         return cache[key]
 

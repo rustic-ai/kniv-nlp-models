@@ -37,7 +37,16 @@ def cache(model, feats, tok, bank, device) -> list[dict]:
     from .loop import Chain
     coll = Chain(TypeCollator(tok, bank, train=False), LabelCollator(tok, bank, train=False))
     out = []
-    for f in feats:
+    for n, f in enumerate(feats):
+        if n % 200 == 0:
+            # Thousands of single-window passes: drop the per-schema label
+            # embedding cache and the device's freed blocks, or memory grows
+            # until the device runs out (seen on MPS).
+            model.__dict__.get("_label_cache", {}).clear()
+            if device.type == "mps":
+                torch.mps.empty_cache()
+            elif device.type == "cuda":
+                torch.cuda.empty_cache()
         b = coll(collate([f], tok.pad_token_id))
         if "attr_pair" not in b:
             continue
