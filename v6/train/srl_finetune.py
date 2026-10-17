@@ -222,7 +222,7 @@ def score_full(model, reps, rows, frames, tags, device) -> dict:
     return {"pred_id_f1": f1(pid), "role_f1": f1(role), "e2e_f1": f1(e2e)}
 
 
-def upload(out, run: str, enabled: bool) -> None:
+def upload(out, run: str, enabled: bool, what: str = "SRL head fine-tune") -> None:
     """Mirror a fine-tuned checkpoint to the runs repo beside the training
     runs' (``<run>/best.pt``, ``best.metric``), so a local fine-tune is not
     the only copy."""
@@ -231,7 +231,7 @@ def upload(out, run: str, enabled: bool) -> None:
     from huggingface_hub import HfApi
     HfApi().upload_folder(repo_id=HF_REPO, folder_path=str(out), path_in_repo=run,
                           allow_patterns=["best.pt", "best.metric"],
-                          commit_message=f"Add {run} (SRL head fine-tune)")
+                          commit_message=f"Add {run} ({what})")
     print(f"uploaded to {HF_REPO}/{run}", flush=True)
 
 

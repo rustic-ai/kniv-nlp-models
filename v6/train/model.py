@@ -589,9 +589,16 @@ class FactAttrHead(nn.Module):
     def forward(self, pair, labels, ent, batch, pairs, cols) -> dict:
         b = batch["pair_batch"][pairs]
         pr, q = pair[pairs].float(), labels[b, cols].float()
+        same = batch["ent_batch"].unsqueeze(0) == b.unsqueeze(1)                 # [A,E]
+        return self.score(pr, q, ent, same)
+
+    def score(self, pr, q, ent, same) -> dict:
+        """From a fact's pair and relation vectors ``[A,d]``, the candidate
+        entities ``[E,H]`` and which of them each fact may point to
+        ``[A,E]`` (its own window's) -- also run on cached vectors by
+        ``attr_finetune``."""
         x = self.fact(torch.cat([pr, q, pr * q], -1).to(self.fact[0].weight.dtype)).float()
         e = self.ent(ent.to(self.ent.weight.dtype)).float()                      # [E,d]
-        same = batch["ent_batch"].unsqueeze(0) == b.unsqueeze(1)                 # [A,E]
 
         def pointer(qp, none):
             s = qp(x.to(qp.weight.dtype)).float()
