@@ -219,6 +219,7 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=13)
     ap.add_argument("--device")
     ap.add_argument("--no-upload", action="store_true")
+    ap.add_argument("--train-on-mps", action="store_true", help="train the heads on MPS (default: CPU)")
     args = ap.parse_args()
     out_run = args.out_run or (args.run.replace("-srlft", "-ft") if args.run.endswith("-srlft")
                                else f"{args.run}-ft")
@@ -242,6 +243,13 @@ def main() -> int:
     for x in c_tr + c_dv:                      # NER items carry no dep vectors
         for k in ("dep_head", "dep_rel", "pos", "morph", "lemma"):
             x.pop(k, None)
+    if device.type == "mps" and not args.train_on_mps:
+        # MPS gives non-finite head gradients here (LayerNorm backward); the
+        # heads are small, so they train on CPU over the cached vectors.
+        device = torch.device("cpu")
+        model.to(device)
+        if hasattr(torch, "mps"):
+            torch.mps.empty_cache()
 
     def ce(logits, target):
         m = target != IGNORE
