@@ -1036,7 +1036,7 @@ EVAL_DATA = ["benchmarks", "crossner", "fewnerd", "fewrel", "litbank", "prepared
              "prepared/kniv-deberta-cascade/srl_dev.json",
              "prepared/kniv-deberta-cascade/srl_test.json", "trex/property_counts.json"]
 
-POST_PIP = ["conllu>=4.5", "seqeval>=1.2", "datasets>=2.18", "pandas"]
+POST_PIP = ["conllu>=4.5", "pandas"]     # seqeval no longer builds on Colab; v6 does not use it
 SGD_REVISION = "a8029ad8c12e13cdbfefc2f649e245fa135bc98a"
 POST_JOBS = {
     "srlft": "python -m v6.train.srl_finetune --run {run} --out-run {run}-srlft --data full",
@@ -1089,7 +1089,7 @@ def cmd_post(a) -> int:
     prepare(sess, token=True)
     ev = eval_bundle()
     upload_big(sess, ev, f"/content/{ev.name}")
-    vm_exec(sess, f"""
+    r = vm_exec(sess, f"""
 import subprocess, sys, tarfile
 # The evaluations' own dependencies (UD and PropBank readers, span scoring).
 r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", *{POST_PIP!r}],
@@ -1103,8 +1103,14 @@ with tarfile.open("/content/{ev.name}") as t:
 from huggingface_hub import snapshot_download
 snapshot_download("google-research-datasets/schema_guided_dstc8", repo_type="dataset",
                   revision="{SGD_REVISION}", allow_patterns=["dialogues/test/*"])
+import conllu
 print("eval data unpacked")
 """, timeout=900)
+    # colab exec exits 0 even when the cell raises: trust only the marker.
+    if "eval data unpacked" not in (r.stdout or ""):
+        colab("stop", "-s", sess, check=False)
+        raise SystemExit("post setup failed on the VM (VM released):\n" + (r.stdout or "")[-2000:]
+                         + (r.stderr or "")[-2000:])
     lines = ["set -o pipefail", 'export HF_TOKEN="$(cat /content/.hf_token)"', "ok=1"]
     for j in jobs:
         lines.append(f'echo "=== {j} $(date +%H:%M)"; {POST_JOBS[j].format(run=run)} || ok=0')
