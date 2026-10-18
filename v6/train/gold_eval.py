@@ -589,7 +589,8 @@ def calibrate_offset(model, tok, spec, vocab, device) -> float:
     return max(OFFSETS, key=f1)
 
 
-def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False) -> dict:
+def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
+                  split: str = "test") -> dict:
     """Re-DocRED test (documents up to 512 words).
 
     ``rel_f1``: gold entities given, micro triple-F1 -- the teacher ATLOP's
@@ -614,7 +615,7 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False) 
     """
     from ..entities import build_entities
     from ..gold.redocred import load_rel_items
-    items = load_rel_items(limit=limit)
+    items = load_rel_items(split, limit=limit)
     names = vocab.labels["relations"]
     tags = vocab.labels["ner"]
     allowed, start = bio_constraints(tags)
@@ -680,14 +681,21 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False) 
                                 t[i - s] = f"I-{en['type']}"
                 gtags.append(t if s < W else None)
             modes["rel_e2e_goldment"] = (gtags, o["coref"])
-            # The model's mentions merged by name only (no coreference chains).
-            modes["rel_e2e_nocoref"] = (ner, [])
-        for key, (tg, chains) in modes.items():
+            # Grouping variants of build_entities over the model's own
+            # mentions and coreference (the default is coref=all, no partial).
+            for cm in ("all", "compatible", "none"):
+                for pn in (False, True):
+                    if (cm, pn) != ("all", False):
+                        modes[f"rel_e2e_{cm}{'_partial' if pn else ''}"] = (ner, o["coref"], cm, pn)
+        for key, spec_ in modes.items():
+            tg, chains = spec_[0], spec_[1]
+            cm, pn = spec_[2:] if len(spec_) > 2 else ("all", False)
             if tg == "clusters":
                 ents = [c for c in chains]
             else:
                 sents, vertex = build_entities(it.tokens, [list(x) for x in sp], tg,
-                                               [[list(m) for m in c] for c in chains])
+                                               [[list(m) for m in c] for c in chains],
+                                               coref=cm, partial_names=pn)
                 if vertex is None:
                     continue
                 ents = [[(sp[m["sent_id"]][0] + m["pos"][0], sp[m["sent_id"]][0] + m["pos"][1])
@@ -709,8 +717,9 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False) 
                                         markers=model.rel_markers))
             order2.append((n, ents, key))
     outs2 = run_phase2(model, feats2, tok, device, batch=1)
-    keys = ["rel_e2e_f1"] + (["rel_e2e_goldclust", "rel_e2e_goldment", "rel_e2e_nocoref"]
-                              if oracle else [])
+    GRID = [f"rel_e2e_{cm}{'_partial' if pn else ''}" for cm in ("all", "compatible", "none")
+            for pn in (False, True) if (cm, pn) != ("all", False)]
+    keys = ["rel_e2e_f1"] + (["rel_e2e_goldclust", "rel_e2e_goldment", *GRID] if oracle else [])
     for r in rows:
         for key in keys:
             r[key] = [0, 0, r["rel_f1"][2]]
@@ -736,8 +745,8 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False) 
     kinds = {"rel_f1": "f1", "rel_f1_cal": "f1", "rel_reach": "acc", "ent_mention_f1": "f1",
              "rel_e2e_f1": "f1", "rel_e2e_docs": "acc"}
     if oracle:
-        kinds.update(rel_e2e_goldclust="f1", rel_e2e_goldment="f1", rel_e2e_nocoref="f1",
-                     ent_split="acc", ent_merged="acc")
+        kinds.update(rel_e2e_goldclust="f1", rel_e2e_goldment="f1", ent_split="acc",
+                     ent_merged="acc", **{k: "f1" for k in GRID})
         for r in rows:
             r.setdefault("ent_split", [0, 1]); r.setdefault("ent_merged", [0, 1])
     return {"items": rows, "kinds": kinds}
@@ -794,8 +803,9 @@ BENCHMARKS = {"ud": eval_ud, "srl": eval_srl, "srl_full": eval_srl_full,
               "ner": eval_ner, "cls": eval_cls,
               "litbank": eval_litbank, "redocred": eval_redocred,
               "redocred_oracle": lambda *a: eval_redocred(*a, oracle=True),
+              "redocred_dev_oracle": lambda *a: eval_redocred(*a, oracle=True, split="dev"),
               "fewrel": eval_fewrel}
-PHASE2_BENCHMARKS = ("litbank", "redocred", "redocred_oracle", "fewrel")
+PHASE2_BENCHMARKS = ("litbank", "redocred", "redocred_oracle", "redocred_dev_oracle", "fewrel")
 # Benchmarks that read label texts: only for label-conditioned heads.
 LABEL_BENCHMARKS = ("fewrel",)
 
