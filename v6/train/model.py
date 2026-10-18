@@ -871,7 +871,8 @@ class V6Model(nn.Module):
                  label_plain: bool = True, legacy_relation: bool = False,
                  span_head: bool = False, label_adapter: int = 0,
                  legacy_rank: int | None = None, trust_remote_code: bool = False,
-                 word_pool: str = "first", attr_head: bool = False):
+                 word_pool: str = "first", attr_head: bool = False,
+                 srl_pred_hidden: int = 0):
         super().__init__()
         # Word vectors: the first subword (v6), or the mean of all of a word's
         # subwords -- for tokenizers that split words often, with little in
@@ -915,7 +916,13 @@ class V6Model(nn.Module):
         self.root = nn.Parameter(torch.zeros(1, 1, dep_in))
         self.arc = Bilinear(arc_dim, 1)
         self.rel = Bilinear(rel_dim, S["dep"])
-        self.srl_pred = nn.Linear(H, 2)
+        # The predicate flag. Linear in v6/v7 training; ``srl_pred_hidden``
+        # gives it a hidden layer (set by srl_finetune --pred-hidden): a
+        # linear read-out of the SRL vectors misses nominal and adjectival
+        # predicates an MLP finds in the same vectors (dev F1 0.82 -> 0.89-0.93).
+        self.srl_pred = (nn.Sequential(nn.Linear(H, srl_pred_hidden), nn.GELU(), nn.Dropout(p),
+                                       nn.Linear(srl_pred_hidden, 2))
+                         if srl_pred_hidden else nn.Linear(H, 2))
         if srl_mode not in ("joint", "conditioned"):
             raise ValueError(f"srl_mode must be joint or conditioned, not {srl_mode!r}")
         self.srl_mode = srl_mode

@@ -237,6 +237,13 @@ def upload(out, run: str, enabled: bool, what: str = "SRL head fine-tune") -> No
 
 def main_full(args, model, tok, spec, vocab, best, device, rng) -> int:
     tags = vocab.labels["srl"]
+    if args.pred_hidden and isinstance(model.srl_pred, torch.nn.Linear):
+        # A fresh MLP predicate head in place of the linear one.
+        H = model.srl_pred.in_features
+        model.srl_pred = torch.nn.Sequential(
+            torch.nn.Linear(H, args.pred_hidden), torch.nn.GELU(), torch.nn.Dropout(0.1),
+            torch.nn.Linear(args.pred_hidden, 2)).to(device)
+        print(f"predicate head: fresh MLP, hidden {args.pred_hidden}", flush=True)
     test = {tuple(r["words"]) for r in load_full("test", set())} | {
         tuple(e["words"]) for e in json.loads((PREPARED_DIR / "srl_test.json").read_text())
         if e.get("words")}
@@ -326,9 +333,19 @@ def main_full(args, model, tok, spec, vocab, best, device, rng) -> int:
 
 
 def _write(args, best_state, best, history, before, after, data, trained) -> int:
-    src = CKPT_DIR / args.run / "best.pt"
+    src = (getattr(args, "local", None) or CKPT_DIR) / args.run / "best.pt"
     ck = torch.load(src, map_location="cpu", weights_only=False)
+    if getattr(args, "pred_hidden", 0):
+        # The predicate head changed shape: its old tensors go, the config says so.
+        for k in [k for k in ck["model"] if k.startswith("srl_pred.")]:
+            del ck["model"][k]
+        for n_, p in best_state.items():
+            if n_.startswith("srl_pred."):
+                ck["model"][n_] = p.detach().cpu().float()
+        ck.setdefault("model_config", {})["srl_pred_hidden"] = args.pred_hidden
     for n_, p in best_state.items():
+        if getattr(args, "pred_hidden", 0) and n_.startswith("srl_pred."):
+            continue
         assert n_ in ck["model"] and ck["model"][n_].shape == p.shape
         ck["model"][n_] = p.detach().cpu().to(ck["model"][n_].dtype)
     ck["srl_finetune"] = {"base": args.run, "base_dev": best["value"], "data": data,
@@ -367,6 +384,9 @@ def main() -> int:
     ap.add_argument("--pos-weight", default="", metavar="UPOS=W,...",
                     help="--data full: weight predicates of these parts of speech (their words "
                          "in the predicate loss, their frames in the role loss), e.g. NOUN=3,ADJ=3")
+    ap.add_argument("--pred-hidden", type=int, default=0, metavar="N",
+                    help="--data full: replace the linear predicate head with a fresh MLP of "
+                         "hidden width N (nominal and adjectival predicates)")
     ap.add_argument("--no-upload", action="store_true",
                     help="keep the fine-tuned checkpoint local (default: also upload it to the runs repo)")
     ap.add_argument("--all-sources", action="store_true",
