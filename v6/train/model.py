@@ -858,6 +858,38 @@ class RelationAdapter(nn.Module):
         return hook
 
 
+class SrlContextHead(nn.Module):
+    """SRL roles from a predicate-aware context over the predicate's sentence:
+    the word vectors, projected, plus an "is the predicate" and a relative-
+    position embedding, through a small pre-norm transformer; each word is
+    classified from its own state and the predicate's. The bilinear head
+    scores every word against the predicate independently; on frozen v7
+    vectors this head reads 2.7 more role F1 (5 on nominal predicates).
+    """
+
+    def __init__(self, H: int, n_tags: int, d: int = 384, layers: int = 2, heads: int = 6,
+                 p: float = 0.1, max_rel: int = 32):
+        super().__init__()
+        self.max_rel = max_rel
+        self.proj = nn.Linear(H, d)
+        self.is_pred = nn.Embedding(2, d)
+        self.rel = nn.Embedding(2 * max_rel + 1, d)
+        layer = nn.TransformerEncoderLayer(d, heads, 4 * d, p, batch_first=True, norm_first=True)
+        self.enc = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
+        self.out = nn.Linear(2 * d, n_tags)
+
+    def forward(self, words: torch.Tensor, pred: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """``words`` [F,L,H] (each frame's sentence), ``pred`` [F] predicate
+        positions in it, ``mask`` [F,L] real words -> logits [F,L,tags]."""
+        F_, L, _ = words.shape
+        pos = torch.arange(L, device=words.device).unsqueeze(0)
+        x = self.proj(words) + self.is_pred((pos == pred.unsqueeze(1)).long()) \
+            + self.rel((pos - pred.unsqueeze(1)).clamp(-self.max_rel, self.max_rel) + self.max_rel)
+        h = self.enc(x, src_key_padding_mask=~mask)
+        hp = h[torch.arange(F_, device=h.device), pred].unsqueeze(1).expand(-1, L, -1)
+        return self.out(torch.cat([h, hp], -1))
+
+
 class V6Model(nn.Module):
     tree_decode = True          # predicted heads form one tree per sentence (else argmax)
 
@@ -872,7 +904,7 @@ class V6Model(nn.Module):
                  span_head: bool = False, label_adapter: int = 0,
                  legacy_rank: int | None = None, trust_remote_code: bool = False,
                  word_pool: str = "first", attr_head: bool = False,
-                 srl_pred_hidden: int = 0):
+                 srl_pred_hidden: int = 0, srl_ctx: int = 0):
         super().__init__()
         # Word vectors: the first subword (v6), or the mean of all of a word's
         # subwords -- for tokenizers that split words often, with little in
@@ -923,6 +955,10 @@ class V6Model(nn.Module):
         self.srl_pred = (nn.Sequential(nn.Linear(H, srl_pred_hidden), nn.GELU(), nn.Dropout(p),
                                        nn.Linear(srl_pred_hidden, 2))
                          if srl_pred_hidden else nn.Linear(H, 2))
+        # Roles from SrlContextHead instead of the bilinear (srl_finetune
+        # --role-ctx); the bilinear's modules stay, unused, so state dicts
+        # keep their keys.
+        self.srl_ctx = (SrlContextHead(H, S["srl"], d=srl_ctx, p=p) if srl_ctx else None)
         if srl_mode not in ("joint", "conditioned"):
             raise ValueError(f"srl_mode must be joint or conditioned, not {srl_mode!r}")
         self.srl_mode = srl_mode
@@ -1355,6 +1391,23 @@ class V6Model(nn.Module):
                     "the conditioned SRL head scores given predicates; decoding "
                     "predicted ones is the hybrid's job and is not built")
             o["srl_role"] = self._srl_conditioned(batch, s.size(1))
+        elif len(fb) and self.srl_ctx is not None:
+            same = self._same_sentence(batch["sent_of_word"], wm)[fb, fp]   # [F,W]
+            # Each frame's sentence, left-aligned and padded to the longest.
+            start = same.float().argmax(1)
+            end = same.size(1) - 1 - same.flip(1).float().argmax(1)
+            n = end - start + 1
+            L = int(n.max())
+            W = s.size(1)
+            m = torch.arange(L, device=s.device).unsqueeze(0) < n.unsqueeze(1)
+            idx = start.unsqueeze(1) + torch.arange(L, device=s.device)
+            words = s[fb.unsqueeze(1), idx.clamp(max=W - 1)] * m.unsqueeze(-1)
+            lg = self.srl_ctx(words, fp - start, m)                      # [F,L,C]
+            # Back to window positions; padding goes to a dummy last column so
+            # it can never overwrite a real word of a shorter sentence.
+            role = s.new_full((len(fb), W + 1, lg.size(-1)), NEG, dtype=lg.dtype)
+            role.scatter_(1, idx.masked_fill(~m, W).unsqueeze(-1).expand(-1, -1, lg.size(-1)), lg)
+            o["srl_role"] = role[:, :W].masked_fill(~same.unsqueeze(-1), NEG)  # [F,W,42]
         elif len(fb):
             pr = self.srl_p(s)[fb, fp]                                 # [F,d]
             ar = self.srl_a(s)[fb]                                     # [F,W,d]

@@ -123,9 +123,15 @@ def role_logits(model, reps: list[torch.Tensor], frames: list, device) -> tuple:
     words = torch.zeros(len(frames), W, H, device=device)
     for k, (si, _, tags) in enumerate(frames):
         words[k, :len(tags)] = reps[si].to(device, torch.float32)
-    pred = words[torch.arange(len(frames), device=device),
-                 torch.tensor([f[1] for f in frames], device=device)]
-    logits = model.srl_role.against(model.srl_p(pred), model.srl_a(words))
+    pidx = torch.tensor([f[1] for f in frames], device=device)
+    if getattr(model, "srl_ctx", None) is not None:
+        mask = torch.zeros(len(frames), W, dtype=torch.bool, device=device)
+        for k, (_, _, tags) in enumerate(frames):
+            mask[k, :len(tags)] = True
+        logits = model.srl_ctx(words, pidx, mask)
+    else:
+        pred = words[torch.arange(len(frames), device=device), pidx]
+        logits = model.srl_role.against(model.srl_p(pred), model.srl_a(words))
     target = torch.full((len(frames), W), IGNORE, dtype=torch.long, device=device)
     for k, (_, _, tags) in enumerate(frames):
         target[k, :len(tags)] = torch.from_numpy(tags).to(device)
@@ -244,6 +250,12 @@ def main_full(args, model, tok, spec, vocab, best, device, rng) -> int:
             torch.nn.Linear(H, args.pred_hidden), torch.nn.GELU(), torch.nn.Dropout(0.1),
             torch.nn.Linear(args.pred_hidden, 2)).to(device)
         print(f"predicate head: fresh MLP, hidden {args.pred_hidden}", flush=True)
+    if args.role_ctx and getattr(model, "srl_ctx", None) is None:
+        from .model import SrlContextHead
+        model.srl_ctx = SrlContextHead(model.srl_pred[0].in_features if isinstance(
+            model.srl_pred, torch.nn.Sequential) else model.srl_pred.in_features,
+            len(tags), d=args.role_ctx).to(device)
+        print(f"role head: fresh SrlContextHead, width {args.role_ctx}", flush=True)
     test = {tuple(r["words"]) for r in load_full("test", set())} | {
         tuple(e["words"]) for e in json.loads((PREPARED_DIR / "srl_test.json").read_text())
         if e.get("words")}
@@ -255,6 +267,12 @@ def main_full(args, model, tok, spec, vocab, best, device, rng) -> int:
     train_r = cache_reps(model, [tuple(r["words"]) for r in train], tok, spec, vocab, device)
     dev_r = cache_reps(model, [tuple(r["words"]) for r in dev], tok, spec, vocab, device)
     print(f"cached representations in {time.time() - t0:.0f}s", flush=True)
+    if device.type == "mps" and args.role_ctx:
+        # The context head's LayerNorms train on CPU: MPS LayerNorm backward
+        # misbehaves on padded rows (head_finetune); the cache stays on CPU.
+        device = torch.device("cpu")
+        model.to(device)
+        torch.mps.empty_cache()
     ix = vocab.index["srl"]
 
     def frames(rows):
@@ -273,7 +291,7 @@ def main_full(args, model, tok, spec, vocab, best, device, rng) -> int:
     frame_w = {(si, f["predicate_idx"]): pw.get(r["upos"][f["predicate_idx"]], 1.0)
                for si, r in enumerate(train) for f in r["frames"]}
     for n, p in model.named_parameters():
-        p.requires_grad = n.startswith(SRL_PARAMS + PRED_PARAMS)
+        p.requires_grad = n.startswith(SRL_PARAMS + PRED_PARAMS + ("srl_ctx.",))
     params = [p for p in model.parameters() if p.requires_grad]
     print(f"trainable: {sum(p.numel() for p in params):,} parameters "
           f"({', '.join(SRL_PARAMS + PRED_PARAMS)})", flush=True)
@@ -287,7 +305,8 @@ def main_full(args, model, tok, spec, vocab, best, device, rng) -> int:
     best_state = {n: p.detach().clone() for n, p in model.named_parameters() if p.requires_grad}
     sent_batch = max(8, args.batch // 4)          # ~4 frames per sentence
     for epoch in range(1, args.epochs + 1):
-        for m in (model.srl_p, model.srl_a, model.srl_role, model.srl_pred):
+        for m in (model.srl_p, model.srl_a, model.srl_role, model.srl_pred,
+                  *([model.srl_ctx] if getattr(model, "srl_ctx", None) is not None else [])):
             m.train()
         order = rng.permutation(len(train))
         tot = n = 0
@@ -343,8 +362,14 @@ def _write(args, best_state, best, history, before, after, data, trained) -> int
             if n_.startswith("srl_pred."):
                 ck["model"][n_] = p.detach().cpu().float()
         ck.setdefault("model_config", {})["srl_pred_hidden"] = args.pred_hidden
+    if getattr(args, "role_ctx", 0):
+        for n_, p in best_state.items():
+            if n_.startswith("srl_ctx."):
+                ck["model"][n_] = p.detach().cpu().float()
+        ck.setdefault("model_config", {})["srl_ctx"] = args.role_ctx
     for n_, p in best_state.items():
-        if getattr(args, "pred_hidden", 0) and n_.startswith("srl_pred."):
+        if (getattr(args, "pred_hidden", 0) and n_.startswith("srl_pred.")) or \
+                (getattr(args, "role_ctx", 0) and n_.startswith("srl_ctx.")):
             continue
         assert n_ in ck["model"] and ck["model"][n_].shape == p.shape
         ck["model"][n_] = p.detach().cpu().to(ck["model"][n_].dtype)
@@ -387,6 +412,9 @@ def main() -> int:
     ap.add_argument("--pred-hidden", type=int, default=0, metavar="N",
                     help="--data full: replace the linear predicate head with a fresh MLP of "
                          "hidden width N (nominal and adjectival predicates)")
+    ap.add_argument("--role-ctx", type=int, default=0, metavar="D",
+                    help="--data full: replace the bilinear role head with a fresh "
+                         "SrlContextHead of width D (predicate-aware context)")
     ap.add_argument("--no-upload", action="store_true",
                     help="keep the fine-tuned checkpoint local (default: also upload it to the runs repo)")
     ap.add_argument("--all-sources", action="store_true",
