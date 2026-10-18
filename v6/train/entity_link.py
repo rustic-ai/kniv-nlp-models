@@ -157,6 +157,9 @@ def load_docs(source: str, limit: int, seed: int) -> list[dict]:
                              for e in d["entities"]]} for d in docs]
     else:
         raise SystemExit(f"unknown source {source}")
+    # Re-DocRED's own cap: the coreference scorer's pairwise tensor grows with
+    # the window, and long T-REx abstracts exhausted the MPS pool.
+    out = [d for d in out if len(d["tokens"]) <= 512]
     rng = np.random.default_rng(seed)
     keep = sorted(rng.choice(len(out), min(limit, len(out)), replace=False))
     return [out[i] for i in keep]
@@ -174,7 +177,7 @@ def cache(model, tok, spec, vocab, device, docs, max_pairs: int = 3000, seed: in
     feats = [phase2_window(d["tokens"], d["sentence_spans"], tok, spec, vocab, [],
                            markers=model.rel_markers) for d in docs]
     for k in range(0, len(docs), 64):
-        res = run_phase2(model, feats[k:k + 64], tok, device, batch=4)
+        res = run_phase2(model, feats[k:k + 64], tok, device, batch=2)
         for d, f, o in zip(docs[k:k + 64], feats[k:k + 64], res):
             W = f["_W"]
             ments, ent, typ = [], [], []
