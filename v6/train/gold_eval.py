@@ -680,6 +680,8 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False) 
                                 t[i - s] = f"I-{en['type']}"
                 gtags.append(t if s < W else None)
             modes["rel_e2e_goldment"] = (gtags, o["coref"])
+            # The model's mentions merged by name only (no coreference chains).
+            modes["rel_e2e_nocoref"] = (ner, [])
         for key, (tg, chains) in modes.items():
             if tg == "clusters":
                 ents = [c for c in chains]
@@ -690,13 +692,25 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False) 
                     continue
                 ents = [[(sp[m["sent_id"]][0] + m["pos"][0], sp[m["sent_id"]][0] + m["pos"][1])
                          for m in v] for v in vertex]
+            if key == "rel_e2e_f1" and oracle:
+                # Grouping errors of the deployed entities: a predicted entity
+                # is "split" when another predicted entity shares its gold
+                # entity, "merged" when its mentions belong to two gold ones.
+                ent_of_m = {(a, e + 1): gi for gi, en in enumerate(it.entities)
+                            for a, e in en["mentions"]}
+                owners = [{ent_of_m[m] for m in en if m in ent_of_m} for en in ents]
+                single = [next(iter(o_)) for o_ in owners if len(o_) == 1]
+                rows[n]["ent_split"] = [sum(single.count(g) - 1 for g in set(single)),
+                                        max(len(single), 1)]
+                rows[n]["ent_merged"] = [sum(len(o_) > 1 for o_ in owners), max(len(ents), 1)]
             if len(ents) < 2:
                 continue
             feats2.append(phase2_window(it.tokens, sp, tok, spec, vocab, ents,
                                         markers=model.rel_markers))
             order2.append((n, ents, key))
     outs2 = run_phase2(model, feats2, tok, device, batch=1)
-    keys = ["rel_e2e_f1"] + (["rel_e2e_goldclust", "rel_e2e_goldment"] if oracle else [])
+    keys = ["rel_e2e_f1"] + (["rel_e2e_goldclust", "rel_e2e_goldment", "rel_e2e_nocoref"]
+                              if oracle else [])
     for r in rows:
         for key in keys:
             r[key] = [0, 0, r["rel_f1"][2]]
@@ -722,7 +736,10 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False) 
     kinds = {"rel_f1": "f1", "rel_f1_cal": "f1", "rel_reach": "acc", "ent_mention_f1": "f1",
              "rel_e2e_f1": "f1", "rel_e2e_docs": "acc"}
     if oracle:
-        kinds.update(rel_e2e_goldclust="f1", rel_e2e_goldment="f1")
+        kinds.update(rel_e2e_goldclust="f1", rel_e2e_goldment="f1", rel_e2e_nocoref="f1",
+                     ent_split="acc", ent_merged="acc")
+        for r in rows:
+            r.setdefault("ent_split", [0, 1]); r.setdefault("ent_merged", [0, 1])
     return {"items": rows, "kinds": kinds}
 
 
