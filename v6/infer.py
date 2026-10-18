@@ -58,6 +58,7 @@ class Extractor:
         # How coreference groups mentions into entities, chosen per run on
         # Re-DocRED dev (gold_eval redocred_dev_oracle).
         self.entity_coref = cal.get("entity_coref", "all")
+        self.link_threshold = float(cal.get("link_threshold", 0.5))
         from .label_bank import load as load_bank
         self.bank_ids = {r["name"]: r["id"] for r in load_bank()["relations"]}
         self.frozen_path = True
@@ -104,9 +105,13 @@ class Extractor:
             allowed, start = bio_constraints(ENT_TAGS)
             ner = [[ENT_TAGS[x] for x in viterbi(o["ent"][s:min(e, W)], allowed, start)]
                    if s < W else None for s, e in sp]
+        link = None
+        if getattr(self.model, "linker", None) is not None and o.get("link_words") is not None:
+            from .train.entity_link import Linker
+            link = Linker(self.model, tokens, sp, o["link_words"], o["coref"], self.link_threshold)
         _, vertex = build_entities(tokens, [list(x) for x in sp], ner,
                                    [[list(m) for m in c] for c in o["coref"]],
-                                   coref=self.entity_coref)
+                                   coref=self.entity_coref, link=link)
         ents = []
         for v in vertex or []:
             ms = sorted({(sp[m["sent_id"]][0] + m["pos"][0], sp[m["sent_id"]][0] + m["pos"][1])

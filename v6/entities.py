@@ -110,7 +110,7 @@ def names_compatible(tokens: list[str], m1: tuple[int, int], m2: tuple[int, int]
 def build_entities(tokens: list[str], sentence_spans: list[list[int]],
                    ner_by_sentence: list[list[str] | None],
                    coref_chains: list[list[list[int]]] | None,
-                   coref: str = "all", partial_names: bool = False):
+                   coref: str = "all", partial_names: bool = False, link=None):
     """Return DocRED-format ``(sents, vertexSet)``, or ``(None, None)``.
 
     ``coref``: how coreference chains group the entity mentions -- ``all``
@@ -119,7 +119,10 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
     Measured on Re-DocRED (gold_eval ``redocred_oracle``), chains fused two
     gold entities in 3-8% of predicted entities. ``partial_names``: also merge
     an entity into the one other entity whose name contains it or is its
-    acronym (several candidates: ambiguous, left alone).
+    acronym (several candidates: ambiguous, left alone). ``link``: a function
+    from the typed mention spans ``[(type, start, end_exclusive)]`` to groups
+    of their indices (``entity_link.Linker``); it replaces both the chains and
+    the name rules.
 
     ``None`` when fewer than two entities survive — a relation needs a pair,
     and a window with one entity is not evidence of anything.
@@ -138,6 +141,10 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
     if len(spans) < 2:
         return None, None
 
+    if link is not None:
+        merged = [list(g) for g in link(spans)]
+        partial_names = False
+        coref_chains, coref = None, "none"
     used, groups = set(), []
     for chain in (coref_chains if coref != "none" else None) or []:
         members = []
@@ -184,8 +191,9 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
             groups.append([i])
 
     by_name: dict[tuple[str, str], int] = {}
-    merged: list[list[int]] = []
-    for g in groups:
+    if link is None:
+        merged = []
+    for g in (groups if link is None else []):
         ty = spans[g[0]][0]
         key = (ty, " ".join(tokens[spans[g[0]][1]:spans[g[0]][2]]).lower())
         if ty in MERGEABLE and len(key[1]) > 2 and key in by_name:

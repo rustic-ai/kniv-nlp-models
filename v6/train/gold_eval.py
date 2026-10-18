@@ -95,7 +95,8 @@ def load_run(run: str, repo: str, device, local: Path | None = None) -> tuple:
                     word_pool=cfg.get("word_pool", "first"),
                     attr_head=cfg.get("attr_head", False),
                     srl_pred_hidden=cfg.get("srl_pred_hidden", 0),
-                    srl_ctx=cfg.get("srl_ctx", 0))
+                    srl_ctx=cfg.get("srl_ctx", 0),
+                    linker=cfg.get("linker", 0))
     model.load_state_dict(ck["model"])          # strict: a mismatch raises
     model.to(device).eval()
     tok = AutoTokenizer.from_pretrained(spec.hf_id)
@@ -267,6 +268,7 @@ def eval_srl(model, tok, spec, vocab, device, limit) -> dict:
 
 
 POS_GROUPS = ("VERB", "AUX", "NOUN", "ADJ")
+LINK_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7)
 
 
 def _group(upos: str) -> str:
@@ -534,7 +536,9 @@ def run_phase2(model, feats: list[dict], tok, device, batch: int = 4,
                       "relation": rel[pair_b == j],
                       "ner": torch.log_softmax(o["ner"][j, :W].float(), -1).cpu().numpy(),
                       "ent": (torch.log_softmax(o["ent"][j, :W].float(), -1).cpu().numpy()
-                              if "ent" in o else None)}
+                              if "ent" in o else None),
+                      "link_words": (o["link_words"][j, :W].float().cpu()
+                                     if "link_words" in o else None)}
     return out
 
 
@@ -659,7 +663,11 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
         pm = {(s + a, s + b) for (s, _), t in zip(sp, ner) if t for _, a, b in bio_spans_t(t)}
         gm = {(a, e + 1) for en in it.entities for a, e in en["mentions"]}
         rows[-1]["ent_mention_f1"] = [len(pm & gm), len(pm), len(gm)]
-        modes = {"rel_e2e_f1": (ner, o["coref"], getattr(model, "entity_coref", "all"), False)}
+        if getattr(model, "linker", None) is not None:
+            modes = {"rel_e2e_f1": (ner, o["coref"], "all", False,
+                                    getattr(model, "link_threshold", 0.5))}
+        else:
+            modes = {"rel_e2e_f1": (ner, o["coref"], getattr(model, "entity_coref", "all"), False)}
         if oracle:
             # Gold clustering of the model's own mentions.
             pspans = [(t_, s + a, s + b) for (s, _), t in zip(sp, ner) if t
@@ -690,15 +698,23 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
                 for pn in (False, True):
                     if (cm, pn) != ("all", False):
                         modes[f"rel_e2e_{cm}{'_partial' if pn else ''}"] = (ner, o["coref"], cm, pn)
+            if getattr(model, "linker", None) is not None:
+                for thr in LINK_THRESHOLDS:
+                    modes[f"rel_e2e_link{thr}"] = (ner, o["coref"], "all", False, thr)
         for key, spec_ in modes.items():
             tg, chains = spec_[0], spec_[1]
-            cm, pn = spec_[2:] if len(spec_) > 2 else ("all", False)
+            cm, pn = spec_[2:4] if len(spec_) > 2 else ("all", False)
+            thr = spec_[4] if len(spec_) > 4 else None
             if tg == "clusters":
                 ents = [c for c in chains]
             else:
+                link = None
+                if thr is not None:
+                    from .entity_link import Linker
+                    link = Linker(model, it.tokens, sp, o["link_words"], chains, thr)
                 sents, vertex = build_entities(it.tokens, [list(x) for x in sp], tg,
                                                [[list(m) for m in c] for c in chains],
-                                               coref=cm, partial_names=pn)
+                                               coref=cm, partial_names=pn, link=link)
                 if vertex is None:
                     continue
                 ents = [[(sp[m["sent_id"]][0] + m["pos"][0], sp[m["sent_id"]][0] + m["pos"][1])
@@ -722,6 +738,8 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
     outs2 = run_phase2(model, feats2, tok, device, batch=1)
     GRID = [f"rel_e2e_{cm}{'_partial' if pn else ''}" for cm in ("all", "compatible", "none")
             for pn in (False, True) if (cm, pn) != ("all", False)]
+    if getattr(model, "linker", None) is not None:
+        GRID += [f"rel_e2e_link{thr}" for thr in LINK_THRESHOLDS]
     keys = ["rel_e2e_f1"] + (["rel_e2e_goldclust", "rel_e2e_goldment", *GRID] if oracle else [])
     for r in rows:
         for key in keys:
@@ -956,6 +974,7 @@ def main() -> int:
             except Exception:
                 cal = {}
         model.entity_coref = args.entity_coref or cal.get("entity_coref", "all")
+        model.link_threshold = float(cal.get("link_threshold", 0.5))
         if model.entity_coref != "all":
             print(f"{run}: entities grouped with coref={model.entity_coref}", flush=True)
         if hasattr(model, "zs_offset"):

@@ -890,6 +890,38 @@ class SrlContextHead(nn.Module):
         return self.out(torch.cat([h, hp], -1))
 
 
+class EntityLinker(nn.Module):
+    """Are two entity mentions the same entity? A mention is [start; end;
+    mean] of the plain pass's entity-span vectors, projected; a pair is
+    [a; b; a*b], cheap name/type/coref features (``entity_link.pair_features``)
+    and a sentence-distance bucket, through an MLP to one logit. Mentions are
+    grouped by average-link clustering on the probabilities
+    (``entity_link.cluster``). Replaces the coreference chains and name rules
+    that ``build_entities`` grouped mentions with.
+    """
+
+    N_FEAT = 10
+
+    def __init__(self, H: int, d: int = 256, p: float = 0.1):
+        super().__init__()
+        self.proj = nn.Sequential(nn.Linear(3 * H, d), nn.GELU(), nn.Dropout(p))
+        self.dist = nn.Embedding(8, 32)
+        self.mlp = nn.Sequential(nn.Linear(3 * d + self.N_FEAT + 32, d), nn.GELU(),
+                                 nn.Dropout(p), nn.Linear(d, 1))
+
+    @staticmethod
+    def mention_vectors(words: torch.Tensor, spans: list[tuple[int, int]]) -> torch.Tensor:
+        """``words`` [W,H], spans ``(start, end_exclusive)`` -> [M,3H]."""
+        return torch.stack([torch.cat([words[a], words[b - 1], words[a:b].mean(0)])
+                            for a, b in spans])
+
+    def forward(self, mvec: torch.Tensor, pairs: torch.Tensor, feats: torch.Tensor,
+                dist: torch.Tensor) -> torch.Tensor:
+        m = self.proj(mvec)
+        a, b = m[pairs[:, 0]], m[pairs[:, 1]]
+        return self.mlp(torch.cat([a, b, a * b, feats, self.dist(dist)], -1)).squeeze(-1)
+
+
 class V6Model(nn.Module):
     tree_decode = True          # predicted heads form one tree per sentence (else argmax)
 
@@ -904,7 +936,7 @@ class V6Model(nn.Module):
                  span_head: bool = False, label_adapter: int = 0,
                  legacy_rank: int | None = None, trust_remote_code: bool = False,
                  word_pool: str = "first", attr_head: bool = False,
-                 srl_pred_hidden: int = 0, srl_ctx: int = 0):
+                 srl_pred_hidden: int = 0, srl_ctx: int = 0, linker: int = 0):
         super().__init__()
         # Word vectors: the first subword (v6), or the mean of all of a word's
         # subwords -- for tokenizers that split words often, with little in
@@ -959,6 +991,10 @@ class V6Model(nn.Module):
         # --role-ctx); the bilinear's modules stay, unused, so state dicts
         # keep their keys.
         self.srl_ctx = (SrlContextHead(H, S["srl"], d=srl_ctx, p=p) if srl_ctx else None)
+        # The entity linker (entity_link.py); it reads the plain pass's
+        # entity-span vectors, which the forward then returns as link_words.
+        self.linker = EntityLinker(H, d=linker, p=p) if linker else None
+        self.emit_link_words = False
         if srl_mode not in ("joint", "conditioned"):
             raise ValueError(f"srl_mode must be joint or conditioned, not {srl_mode!r}")
         self.srl_mode = srl_mode
@@ -1275,6 +1311,9 @@ class V6Model(nn.Module):
         if self.ent is not None:
             o["ent"] = self.ent(self._words(plain_layers, "ent", first))
             o["_anchor"] = o["ent"].sum() * 0.0
+        if self.linker is not None or self.emit_link_words:
+            o["link_words"] = self._words(plain_layers, "ent_span" if "ent_span" in self.mix
+                                          else "ent", first)
         if self.span is not None and "span_batch" in batch:
             temb = batch.get("type_label_emb")
             if temb is None:
