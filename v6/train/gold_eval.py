@@ -269,7 +269,7 @@ def eval_srl(model, tok, spec, vocab, device, limit) -> dict:
 
 
 POS_GROUPS = ("VERB", "AUX", "NOUN", "ADJ")
-LINK_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7)
+LINK_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 
 
 def _group(upos: str) -> str:

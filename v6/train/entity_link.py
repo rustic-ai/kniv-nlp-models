@@ -139,7 +139,7 @@ def load_docs(source: str, limit: int, seed: int) -> list[dict]:
     if source == "redocred":
         from ..gold.redocred import load_rel_items
         out = []
-        for it in load_rel_items("train"):
+        for it in load_rel_items("train", limit=limit or None):
             out.append({"tokens": it.tokens, "sentence_spans": [tuple(x) for x in it.layers["sentence_spans"]],
                         "entities": [{"type": en["type"], "mentions": [(a, e + 1) for a, e in en["mentions"]]}
                                      for en in it.entities]})
@@ -213,6 +213,8 @@ def main() -> int:
     ap.add_argument("--out-run", required=True)
     ap.add_argument("--local", type=Path)
     ap.add_argument("--d", type=int, default=256)
+    ap.add_argument("--redocred", type=int, default=0, help="Re-DocRED train documents (0: all)")
+    ap.add_argument("--dev-limit", type=int, default=0, help="Re-DocRED dev documents (0: all)")
     ap.add_argument("--distant", type=int, default=8000, help="DocRED distant documents")
     ap.add_argument("--trex", type=int, default=8000, help="T-REx documents")
     ap.add_argument("--epochs", type=int, default=8)
@@ -228,12 +230,12 @@ def main() -> int:
     model, tok, spec, vocab, best = load_run(args.run, HF_REPO, device, args.local)
     model.eval()
     t0 = time.time()
-    train_docs = (load_docs("redocred", 0, args.seed) + load_docs("docred_distant", args.distant, args.seed)
+    train_docs = (load_docs("redocred", args.redocred, args.seed) + load_docs("docred_distant", args.distant, args.seed)
                   + load_docs("trex", args.trex, args.seed))
     from ..gold.redocred import load_rel_items
     dev_docs = [{"tokens": it.tokens, "sentence_spans": [tuple(x) for x in it.layers["sentence_spans"]],
                  "entities": [{"type": en["type"], "mentions": [(a, e + 1) for a, e in en["mentions"]]}
-                              for en in it.entities]} for it in load_rel_items("dev")]
+                              for en in it.entities]} for it in load_rel_items("dev", limit=args.dev_limit or None)]
     tr = cache(model, tok, spec, vocab, device, train_docs, seed=args.seed)
     dv = cache(model, tok, spec, vocab, device, dev_docs, max_pairs=10 ** 9)
     H = tr[0]["mv"].size(1) // 3
