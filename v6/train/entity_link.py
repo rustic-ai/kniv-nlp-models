@@ -226,29 +226,52 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=13)
     ap.add_argument("--device")
     ap.add_argument("--no-upload", action="store_true")
+    ap.add_argument("--stage", choices=["all", "cache", "train"], default="all",
+                    help="cache: one --part of --parts of the documents to --cache-dir, in its own "
+                         "process (MPS graph caches grow with every input shape and are only "
+                         "released at exit); train: train on every cached part")
+    ap.add_argument("--part", type=int, default=0)
+    ap.add_argument("--parts", type=int, default=1)
+    ap.add_argument("--cache-dir", type=Path)
     args = ap.parse_args()
     torch.manual_seed(args.seed)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else
                                           "mps" if torch.backends.mps.is_available() else "cpu"))
-    model, tok, spec, vocab, best = load_run(args.run, HF_REPO, device, args.local)
-    model.eval()
     t0 = time.time()
-    train_docs = (load_docs("redocred", args.redocred, args.seed) + load_docs("docred_distant", args.distant, args.seed)
-                  + load_docs("trex", args.trex, args.seed))
-    from ..gold.redocred import load_rel_items
-    dev_docs = [{"tokens": it.tokens, "sentence_spans": [tuple(x) for x in it.layers["sentence_spans"]],
-                 "entities": [{"type": en["type"], "mentions": [(a, e + 1) for a, e in en["mentions"]]}
-                              for en in it.entities]} for it in load_rel_items("dev", limit=args.dev_limit or None)]
-    tr = cache(model, tok, spec, vocab, device, train_docs, seed=args.seed)
-    dv = cache(model, tok, spec, vocab, device, dev_docs, max_pairs=10 ** 9)
+    if args.stage in ("all", "cache"):
+        model, tok, spec, vocab, best = load_run(args.run, HF_REPO, device, args.local)
+        model.eval()
+        train_docs = (load_docs("redocred", args.redocred, args.seed)
+                      + load_docs("docred_distant", args.distant, args.seed)
+                      + load_docs("trex", args.trex, args.seed))
+        train_docs = train_docs[args.part::args.parts]
+        from ..gold.redocred import load_rel_items
+        dev_docs = [{"tokens": it.tokens, "sentence_spans": [tuple(x) for x in it.layers["sentence_spans"]],
+                     "entities": [{"type": en["type"], "mentions": [(a, e + 1) for a, e in en["mentions"]]}
+                                  for en in it.entities]}
+                    for it in load_rel_items("dev", limit=args.dev_limit or None)] if args.part == 0 else []
+        tr = cache(model, tok, spec, vocab, device, train_docs, seed=args.seed + args.part)
+        dv = cache(model, tok, spec, vocab, device, dev_docs, max_pairs=10 ** 9) if dev_docs else []
+        if args.stage == "cache":
+            args.cache_dir.mkdir(parents=True, exist_ok=True)
+            torch.save({"train": tr, "dev": dv}, args.cache_dir / f"part{args.part:02d}.pt")
+            print(f"part {args.part}/{args.parts}: {len(tr):,} train, {len(dv):,} dev documents "
+                  f"in {time.time() - t0:.0f}s", flush=True)
+            return 0
+    else:
+        tr, dv = [], []
+        for f in sorted(args.cache_dir.glob("part*.pt")):
+            d = torch.load(f, weights_only=False)
+            tr += d["train"]; dv += d["dev"]
+        best = json.loads(((args.local or CKPT_DIR) / args.run / "best.metric").read_text())
     H = tr[0]["mv"].size(1) // 3
     print(f"cached {len(tr):,} train / {len(dv):,} dev documents, "
           f"{sum(len(x['y']) for x in tr):,} train pairs ({sum(float(x['y'].sum()) for x in tr):,.0f} "
           f"positive) in {time.time() - t0:.0f}s", flush=True)
-    cpu = torch.device("cpu")
-    model.to(cpu)
-    if device.type == "mps":
-        torch.mps.empty_cache()
+    if args.stage == "all":
+        model.to(torch.device("cpu"))
+        if device.type == "mps":
+            torch.mps.empty_cache()
     lk = EntityLinker(H, d=args.d)
     opt = torch.optim.AdamW(lk.parameters(), lr=args.lr, weight_decay=0.01)
 
