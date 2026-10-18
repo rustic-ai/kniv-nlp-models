@@ -1036,6 +1036,7 @@ EVAL_DATA = ["benchmarks", "crossner", "fewnerd", "fewrel", "litbank", "prepared
              "prepared/kniv-deberta-cascade/srl_dev.json",
              "prepared/kniv-deberta-cascade/srl_test.json", "trex/property_counts.json"]
 
+POST_PIP = ["conllu>=4.5", "seqeval>=1.2", "datasets>=2.18", "pandas"]
 SGD_REVISION = "a8029ad8c12e13cdbfefc2f649e245fa135bc98a"
 POST_JOBS = {
     "srlft": "python -m v6.train.srl_finetune --run {run} --out-run {run}-srlft --data full",
@@ -1089,7 +1090,12 @@ def cmd_post(a) -> int:
     ev = eval_bundle()
     upload_big(sess, ev, f"/content/{ev.name}")
     vm_exec(sess, f"""
-import tarfile
+import subprocess, sys, tarfile
+# The evaluations' own dependencies (UD and PropBank readers, span scoring).
+r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", *{POST_PIP!r}],
+                   capture_output=True, text=True)
+if r.returncode:
+    raise SystemExit("pip failed:\\n" + r.stderr[-2000:])
 with tarfile.open("/content/{ev.name}") as t:
     t.extractall("{VM_REPO}", filter="data")
 # The SGD dialogue-act benchmark reads the HF cache (gold.sgd_cls.SNAP): the
