@@ -132,6 +132,7 @@ def run_model(model, feats: list[dict], tok, device, batch: int = 32) -> list[di
                 # Padded to the batch's longest window: keep this window's own.
                 "cls": torch.sigmoid(o["cls"][j, :feats[i]["_S"]].float()).cpu().numpy(),
                 "srl_pred": o["srl_pred"][j, :W].argmax(-1).cpu().numpy(),
+                "srl_pred_p": torch.softmax(o["srl_pred"][j, :W].float(), -1)[:, 1].cpu().numpy(),
             }
     return out
 

@@ -256,6 +256,15 @@ def main_full(args, model, tok, spec, vocab, best, device, rng) -> int:
     train_f, dev_f = frames(train), frames(dev)
     pred_target = [torch.tensor([int(i in {f["predicate_idx"] for f in r["frames"]})
                                  for i in range(len(r["words"]))]) for r in train]
+    # --pos-weight: nominal and adjectival predicates are a small share of
+    # PropBank's (7k + 2k of 40k frames) and the weakest end to end; their
+    # words weigh more in the predicate loss (both classes, so the head learns
+    # which nouns are predicates rather than more of them) and their frames in
+    # the role loss.
+    pw = {k: float(v) for k, v in (x.split("=") for x in args.pos_weight.split(",") if x)}
+    word_w = [torch.tensor([pw.get(u, 1.0) for u in r["upos"]]) for r in train]
+    frame_w = {(si, f["predicate_idx"]): pw.get(r["upos"][f["predicate_idx"]], 1.0)
+               for si, r in enumerate(train) for f in r["frames"]}
     for n, p in model.named_parameters():
         p.requires_grad = n.startswith(SRL_PARAMS + PRED_PARAMS)
     params = [p for p in model.parameters() if p.requires_grad]
@@ -280,12 +289,17 @@ def main_full(args, model, tok, spec, vocab, best, device, rng) -> int:
             # predicate head: every word of these fully annotated sentences
             reps = [train_r[s].to(device, torch.float32) for s in sents]
             plog = model.srl_pred(torch.cat(reps))
-            ploss = F.cross_entropy(plog.float(), torch.cat([pred_target[s] for s in sents]).to(device))
+            ww = torch.cat([word_w[s] for s in sents]).to(device)
+            ploss = (F.cross_entropy(plog.float(), torch.cat([pred_target[s] for s in sents]).to(device),
+                                     reduction="none") * ww).sum() / ww.sum()
             # role head: every frame of these sentences
             chunk = [fr for s in sents for fr in frames_of_sent[s]]
             lg, tgt = role_logits(model, train_r, chunk, device)
-            rloss = F.cross_entropy(lg.reshape(-1, lg.size(-1)).float(), tgt.reshape(-1),
-                                    ignore_index=IGNORE)
+            tok_l = F.cross_entropy(lg.reshape(-1, lg.size(-1)).float(), tgt.reshape(-1),
+                                    ignore_index=IGNORE, reduction="none").view(tgt.shape)
+            fw = torch.tensor([frame_w[(fr[0], fr[1])] for fr in chunk], device=device)
+            m = (tgt != IGNORE).float() * fw.unsqueeze(1)
+            rloss = (tok_l * m).sum() / m.sum().clamp(min=1)
             loss = ploss + rloss
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -350,6 +364,9 @@ def main() -> int:
     ap.add_argument("--local", type=Path, help="read <dir>/<run>/best.pt instead of the hub")
     ap.add_argument("--word-pool", choices=["first", "mean"],
                     help="override the run's word pooling (a probe; the checkpoint keeps its own)")
+    ap.add_argument("--pos-weight", default="", metavar="UPOS=W,...",
+                    help="--data full: weight predicates of these parts of speech (their words "
+                         "in the predicate loss, their frames in the role loss), e.g. NOUN=3,ADJ=3")
     ap.add_argument("--no-upload", action="store_true",
                     help="keep the fine-tuned checkpoint local (default: also upload it to the runs repo)")
     ap.add_argument("--all-sources", action="store_true",
