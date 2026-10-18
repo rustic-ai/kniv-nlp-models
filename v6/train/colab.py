@@ -1041,11 +1041,10 @@ SGD_REVISION = "a8029ad8c12e13cdbfefc2f649e245fa135bc98a"
 POST_JOBS = {
     "srlft": "python -m v6.train.srl_finetune --run {run} --out-run {run}-srlft --data full",
     "hft": "python -m v6.train.head_finetune --run {run}-srlft --out-run {run}-ft",
-    "gold": "python -m v6.train.gold_eval --runs {run}-ft "
-            "--benchmarks ud,ner,srl,srl_full,cls,litbank,redocred",
-    "zs": "python -m v6.train.zs_protocol --runs {run}-ft",
-    "span": "python -m v6.train.span_eval --runs {run}-ft --describe --calibrate-on crossner_politics",
-    "rb": "python -m v6.train.rel_breakdown --runs {run}-ft",
+    "gold": "python -m v6.train.gold_eval --runs {ev} --benchmarks {bench}",
+    "zs": "python -m v6.train.zs_protocol --runs {ev}",
+    "span": "python -m v6.train.span_eval --runs {ev} --describe --calibrate-on crossner_politics",
+    "rb": "python -m v6.train.rel_breakdown --runs {ev}",
 }
 POST_LINES = r"wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
 
@@ -1113,7 +1112,8 @@ print("eval data unpacked")
                          + (r.stderr or "")[-2000:])
     lines = ["set -o pipefail", 'export HF_TOKEN="$(cat /content/.hf_token)"', "ok=1"]
     for j in jobs:
-        lines.append(f'echo "=== {j} $(date +%H:%M)"; {POST_JOBS[j].format(run=run)} || ok=0')
+        cmd = POST_JOBS[j].format(run=run, ev=a.eval_run or f"{run}-ft", bench=a.benchmarks)
+        lines.append(f'echo "=== {j} $(date +%H:%M)"; {cmd} || ok=0')
     lines.append(f'if [ $ok = 1 ]; then s=done; else s=failed; fi; '
                  f'echo "{{\\"state\\": \\"$s\\"}}" > {out}/status.json')
     vm_exec(sess, POST_START.format(out=out, repo=VM_REPO, script="\n".join(lines) + "\n"))
@@ -1220,6 +1220,10 @@ def main() -> int:
     pp.add_argument("--run-name", required=True)
     pp.add_argument("--jobs", default=",".join(POST_JOBS),
                     help=f"comma-separated, in order (default all: {','.join(POST_JOBS)})")
+    pp.add_argument("--eval-run", help="the checkpoint the evaluations read (default <run>-ft, "
+                    "what srlft + hft produce); the run itself after a knowledge-only pass")
+    pp.add_argument("--benchmarks", default="ud,ner,srl,srl_full,cls,litbank,redocred",
+                    help="gold_eval benchmarks for the gold job")
     pp.add_argument("--session")
     pp.add_argument("--poll", type=float, default=5.0, help="minutes between status checks")
     pp.add_argument("--keep", action="store_true", help="leave the VM running")
