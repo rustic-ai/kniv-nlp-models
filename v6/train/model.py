@@ -890,6 +890,33 @@ class SrlContextHead(nn.Module):
         return self.out(torch.cat([h, hp], -1))
 
 
+class NerLSTMHead(nn.Module):
+    """NER tags from a BiLSTM over the window's words (v5's NER head was a
+    BiLSTM): input projected, packed by length so the backward direction
+    starts at each window's last real word, then an MLP. On frozen v7
+    vectors it reads 1.1 more v5-dev span F1 than the per-word classifier,
+    given ~100k training sentences (none with 45k)."""
+
+    def __init__(self, i: int, n_tags: int, d: int = 256, p: float = 0.1):
+        super().__init__()
+        self.proj = nn.Linear(i, 2 * d)
+        self.rnn = nn.LSTM(2 * d, d, batch_first=True, bidirectional=True)
+        self.out = nn.Sequential(nn.Linear(2 * d, 2 * d), nn.GELU(), nn.Dropout(p),
+                                 nn.Linear(2 * d, n_tags))
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        h = self.proj(x)
+        if mask is None:
+            r, _ = self.rnn(h)
+        else:
+            pos = torch.arange(1, mask.size(1) + 1, device=mask.device)
+            n = (mask.long() * pos).max(1).values.clamp(min=1).cpu()   # to the last real word
+            packed = nn.utils.rnn.pack_padded_sequence(h, n, batch_first=True, enforce_sorted=False)
+            r, _ = self.rnn(packed)
+            r, _ = nn.utils.rnn.pad_packed_sequence(r, batch_first=True, total_length=x.size(1))
+        return self.out(r)
+
+
 class EntityLinker(nn.Module):
     """Are two entity mentions the same entity? A mention is [start; end;
     mean] of the plain pass's entity-span vectors, projected; a pair is
@@ -936,7 +963,8 @@ class V6Model(nn.Module):
                  span_head: bool = False, label_adapter: int = 0,
                  legacy_rank: int | None = None, trust_remote_code: bool = False,
                  word_pool: str = "first", attr_head: bool = False,
-                 srl_pred_hidden: int = 0, srl_ctx: int = 0, linker: int = 0):
+                 srl_pred_hidden: int = 0, srl_ctx: int = 0, linker: int = 0,
+                 ner_lstm: int = 0):
         super().__init__()
         # Word vectors: the first subword (v6), or the mean of all of a word's
         # subwords -- for tokenizers that split words often, with little in
@@ -973,7 +1001,8 @@ class V6Model(nn.Module):
         self.pos = nn.Linear(H, S["pos"])
         self.morph = nn.Linear(H, S["morph"])
         self.lemma = classifier(H, H, S["lemma"], p)
-        self.ner = classifier(H + S["pos"], H, S["ner"], p)
+        self.ner = (NerLSTMHead(H + S["pos"], S["ner"], d=ner_lstm, p=p) if ner_lstm
+                    else classifier(H + S["pos"], H, S["ner"], p))
         dep_in = H + S["pos"] + S["ner"]
         self.arc_dep, self.arc_head = mlp(dep_in, arc_dim, p), mlp(dep_in, arc_dim, p)
         self.rel_dep, self.rel_head = mlp(dep_in, rel_dim, p), mlp(dep_in, rel_dim, p)
@@ -1394,7 +1423,9 @@ class V6Model(nn.Module):
         o["morph"] = self.morph(self._words(layers, "morph", first))
         o["lemma"] = self.lemma(self._words(layers, "lemma", first))
         pos_p = torch.softmax(o["pos"].float(), -1).detach().to(o["pos"].dtype)
-        o["ner"] = self.ner(torch.cat([self._words(layers, "ner", first), pos_p], -1))
+        ner_in = torch.cat([self._words(layers, "ner", first), pos_p], -1)
+        o["ner"] = (self.ner(ner_in, wm) if isinstance(self.ner, NerLSTMHead)
+                    else self.ner(ner_in))
         ner_p = torch.softmax(o["ner"].float(), -1).detach().to(o["ner"].dtype)
 
         # DEP

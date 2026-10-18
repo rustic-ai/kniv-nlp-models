@@ -148,9 +148,14 @@ def pad(items: list[dict], device) -> dict:
     return b
 
 
+def ner_logits(model, x, mask):
+    from .model import NerLSTMHead
+    return model.ner(x, mask) if isinstance(model.ner, NerLSTMHead) else model.ner(x)
+
+
 def dep_logits(model, b: dict, predict: bool):
     pos_p = torch.softmax(model.pos(b["pos_w"]).float(), -1)
-    ner_p = torch.softmax(model.ner(torch.cat([b["ner_w"], pos_p], -1)).float(), -1)
+    ner_p = torch.softmax(ner_logits(model, torch.cat([b["ner_w"], pos_p], -1), b["word_ok"]).float(), -1)
     d = torch.cat([b["dep_w"], pos_p, ner_p], -1)
     wm = b["word_ok"]
     B = d.size(0)
@@ -211,6 +216,14 @@ def main() -> int:
     ap.add_argument("--local", type=Path, help="read <dir>/<run>/best.pt instead of the hub")
     ap.add_argument("--ud-limit", type=int, help="UD sentences per split (testing)")
     ap.add_argument("--ner-train", type=int, default=45000, help="v5 NER sentences (all 45k)")
+    ap.add_argument("--ner-source", choices=["prepared", "gold"], default="prepared",
+                    help="prepared: v5's 45k NER file; gold: a --ner-train sample of the 238k "
+                         "gold-filtered corpus (golddata v5ner)")
+    ap.add_argument("--ner-lstm", type=int, default=0, metavar="D",
+                    help="replace the NER classifier with a fresh BiLSTM head of width D")
+    ap.add_argument("--ner-lr", type=float, default=3e-4, help="learning rate of a fresh NER head")
+    ap.add_argument("--stages", default="tag,ner,dep",
+                    help="which heads to train, in order: tag (POS/morph/lemma), ner, dep")
     ap.add_argument("--ner-dev", type=int, default=3000, help="v5 NER dev sample for selection")
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--lr", type=float, default=1e-4)
@@ -234,7 +247,16 @@ def main() -> int:
     t0 = time.time()
     ud_tr = cache(model, ud_features("train", tok, spec, vocab, args.ud_limit), tok, device, MIXES)
     ud_dv = cache(model, ud_features("dev", tok, spec, vocab, args.ud_limit), tok, device, MIXES)
-    ctr = v5_ner_features("train", args.ner_train, tok, spec, vocab, rng)
+    if args.ner_source == "gold":
+        from .golddata import v5ner_rows
+        rows = v5ner_rows("train")
+        rows = [rows[i] for i in sorted(rng.choice(len(rows), min(args.ner_train, len(rows)),
+                                                   replace=False))]
+        st = Counter()
+        ctr = [encode_row(r, tok, spec.max_subwords, vocab, st) for r in rows]
+        del rows
+    else:
+        ctr = v5_ner_features("train", args.ner_train, tok, spec, vocab, rng)
     cdv = v5_ner_features("dev", args.ner_dev, tok, spec, vocab, rng)
     c_tr = cache(model, ctr, tok, device, ("pos", "ner"))
     c_dv = cache(model, cdv, tok, device, ("pos", "ner"))
@@ -278,7 +300,9 @@ def main() -> int:
         return out
 
     tag_params = [p for h in TAGGERS for p in getattr(model, h).parameters()]
-    r_tag = epochs("pos/morph/lemma", tag_params, ud_tr, ud_dv, loss_tag, score_tag, device, args, rng)
+    stages = set(args.stages.split(","))
+    r_tag = (epochs("pos/morph/lemma", tag_params, ud_tr, ud_dv, loss_tag, score_tag, device, args, rng)
+             if "tag" in stages else {})
 
     from .loop import _spans
     L = vocab.labels["ner"]
@@ -289,7 +313,7 @@ def main() -> int:
         for k in range(0, len(items), 16):
             b = pad(items[k:k + 16], device)
             pos_p = torch.softmax(model.pos(b["pos_w"]).float(), -1)
-            pred = model.ner(torch.cat([b["ner_w"], pos_p], -1)).argmax(-1).tolist()
+            pred = ner_logits(model, torch.cat([b["ner_w"], pos_p], -1), b["word_ok"]).argmax(-1).tolist()
             for pp, gg in zip(pred, b["ner"].tolist()):
                 g = [L[x] if x != IGNORE else "O" for x in gg]
                 q = [L[x] if y != IGNORE else "O" for x, y in zip(pp, gg)]
@@ -299,12 +323,32 @@ def main() -> int:
         return {"ner_f1": f1, "main": f1}
 
     def loss_ner(b):
+        from .model import NerLSTMHead
+        if isinstance(model.ner, NerLSTMHead):       # needs whole sentences
+            pos_p = torch.softmax(model.pos(b["pos_w"]).float(), -1).detach()
+            return ce(model.ner(torch.cat([b["ner_w"], pos_p], -1), b["word_ok"]), b["ner"])
         m = b["ner"] != IGNORE
         pos_p = torch.softmax(model.pos(b["pos_w"][m]).float(), -1).detach()
         return ce(model.ner(torch.cat([b["ner_w"][m], pos_p], -1)), b["ner"][m])
 
-    r_ner = epochs("ner", list(model.ner.parameters()), c_tr, c_dv, loss_ner, score_ner,
-                   device, args, rng)
+    old_ner = None
+    if args.ner_lstm and "ner" in stages:
+        from .model import NerLSTMHead
+        old_ner, old_score = model.ner, score_ner(c_dv)
+        print(f"NER: deployed classifier on dev {old_score['main']:.4f}", flush=True)
+        model.ner = NerLSTMHead(model.ner[1].in_features, len(L), d=args.ner_lstm).to(device)
+        for prm in model.ner.parameters():
+            prm.requires_grad = False
+        print(f"NER head: fresh BiLSTM, width {args.ner_lstm}", flush=True)
+    lr0 = args.lr
+    if old_ner is not None:
+        args.lr = args.ner_lr
+    r_ner = (epochs("ner", list(model.ner.parameters()), c_tr, c_dv, loss_ner, score_ner,
+                    device, args, rng) if "ner" in stages else {})
+    args.lr = lr0
+    if old_ner is not None and r_ner["main"] <= old_score["main"]:
+        print(f"NER: the BiLSTM ({r_ner['main']:.4f}) does not beat the classifier; kept", flush=True)
+        model.ner, args.ner_lstm, r_ner = old_ner, 0, old_score
 
     @torch.no_grad()
     def score_dep(items):
@@ -326,13 +370,26 @@ def main() -> int:
                   for p in (getattr(model, name).parameters()
                             if isinstance(getattr(model, name), torch.nn.Module)
                             else [getattr(model, name)])]
-    r_dep = epochs("dep", dep_params, ud_tr, ud_dv, loss_dep, score_dep, device, args, rng)
+    r_dep = (epochs("dep", dep_params, ud_tr, ud_dv, loss_dep, score_dep, device, args, rng)
+             if "dep" in stages else {})
 
     src = CKPT_DIR / args.run / "best.pt" if args.local is None else args.local / args.run / "best.pt"
     ck = torch.load(src, map_location="cpu", weights_only=False)
     changed = 0
+    if args.ner_lstm and "ner" in stages:
+        # The NER head changed shape: its old tensors go, the config says so.
+        for k in [k for k in ck["model"] if k.startswith("ner.")]:
+            del ck["model"][k]
+        for k, v in model.state_dict().items():
+            if k.startswith("ner."):
+                ck["model"][k] = v.detach().cpu().float()
+                changed += 1
+        ck.setdefault("model_config", {})["ner_lstm"] = args.ner_lstm
+    trained = (TAGGERS if "tag" in stages else ()) + (("ner",) if "ner" in stages and not
+                                                       args.ner_lstm else ()) + \
+        (DEP_MODULES if "dep" in stages else ())
     for k, v in model.state_dict().items():
-        if k.split(".")[0] in TAGGERS + ("ner",) + DEP_MODULES:
+        if k.split(".")[0] in trained:
             assert k in ck["model"] and ck["model"][k].shape == v.shape, k
             ck["model"][k] = v.detach().cpu().to(ck["model"][k].dtype)
             changed += 1
