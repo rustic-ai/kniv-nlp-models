@@ -55,6 +55,9 @@ class Extractor:
         self.model.zs_offset = float(zs_offset if zs_offset is not None else cal.get("offset", 0.0))
         self.span_offset = float(span_offset if span_offset is not None
                                  else cal.get("span_offset", 0.0))
+        # How coreference groups mentions into entities, chosen per run on
+        # Re-DocRED dev (gold_eval redocred_dev_oracle).
+        self.entity_coref = cal.get("entity_coref", "all")
         from .label_bank import load as load_bank
         self.bank_ids = {r["name"]: r["id"] for r in load_bank()["relations"]}
         self.frozen_path = True
@@ -102,7 +105,8 @@ class Extractor:
             ner = [[ENT_TAGS[x] for x in viterbi(o["ent"][s:min(e, W)], allowed, start)]
                    if s < W else None for s, e in sp]
         _, vertex = build_entities(tokens, [list(x) for x in sp], ner,
-                                   [[list(m) for m in c] for c in o["coref"]])
+                                   [[list(m) for m in c] for c in o["coref"]],
+                                   coref=self.entity_coref)
         ents = []
         for v in vertex or []:
             ms = sorted({(sp[m["sent_id"]][0] + m["pos"][0], sp[m["sent_id"]][0] + m["pos"][1])

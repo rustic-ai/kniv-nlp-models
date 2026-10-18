@@ -656,7 +656,7 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
         pm = {(s + a, s + b) for (s, _), t in zip(sp, ner) if t for _, a, b in bio_spans_t(t)}
         gm = {(a, e + 1) for en in it.entities for a, e in en["mentions"]}
         rows[-1]["ent_mention_f1"] = [len(pm & gm), len(pm), len(gm)]
-        modes = {"rel_e2e_f1": (ner, o["coref"])}
+        modes = {"rel_e2e_f1": (ner, o["coref"], getattr(model, "entity_coref", "all"), False)}
         if oracle:
             # Gold clustering of the model's own mentions.
             pspans = [(t_, s + a, s + b) for (s, _), t in zip(sp, ner) if t
@@ -929,6 +929,9 @@ def main() -> int:
     ap.add_argument("--zs-offset", type=float,
                     help="label-path threshold offset (calibrate_zs); default: the run's "
                          "calibration.json on the hub, if any, else 0")
+    ap.add_argument("--entity-coref", choices=["all", "compatible", "none"],
+                    help="how coreference groups entity mentions end to end (build_entities); "
+                         "default: the run's calibration.json, else all")
     ap.add_argument("--no-xattn", action="store_true",
                     help="v6.2 zero-shot head: switch the label cross-attention off, to measure "
                          "what it adds")
@@ -941,15 +944,19 @@ def main() -> int:
     for run in args.runs.split(","):
         t0 = time.time()
         model, tok, spec, vocab, best = load_run(run, args.repo, device, args.local)
+        cal = {}
+        if not args.local:
+            from huggingface_hub import hf_hub_download
+            try:
+                cal = json.loads(Path(hf_hub_download(args.repo, f"{run}/calibration.json",
+                                                      local_dir=str(CKPT_DIR))).read_text())
+            except Exception:
+                cal = {}
+        model.entity_coref = args.entity_coref or cal.get("entity_coref", "all")
+        if model.entity_coref != "all":
+            print(f"{run}: entities grouped with coref={model.entity_coref}", flush=True)
         if hasattr(model, "zs_offset"):
-            off = args.zs_offset
-            if off is None and not args.local:
-                from huggingface_hub import hf_hub_download
-                try:
-                    off = json.loads(Path(hf_hub_download(args.repo, f"{run}/calibration.json",
-                                                          local_dir=str(CKPT_DIR))).read_text())["offset"]
-                except Exception:
-                    off = 0.0
+            off = args.zs_offset if args.zs_offset is not None else cal.get("offset", 0.0)
             model.zs_offset = float(off or 0.0)
             if model.zs_offset:
                 print(f"{run}: label-path offset {model.zs_offset:+.2f}", flush=True)
