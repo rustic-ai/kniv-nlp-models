@@ -967,10 +967,11 @@ BENCHMARKS = {"ud": eval_ud, "srl": eval_srl, "srl_full": eval_srl_full,
               "redocred_dev_oracle": lambda *a: eval_redocred(*a, oracle=True, split="dev"),
               "redocred_dev_hybrid": lambda *a: eval_redocred(*a, split="dev", hybrid=True),
               "redocred_dev_decode": lambda *a: eval_redocred(*a, split="dev", decode_grid=True),
+              "redocred_dev": lambda *a: eval_redocred(*a, split="dev"),
               "gum_coref": eval_gum_coref,
               "fewrel": eval_fewrel}
 PHASE2_BENCHMARKS = ("litbank", "gum_coref", "redocred", "redocred_oracle", "redocred_dev_oracle",
-                     "redocred_dev_hybrid", "redocred_dev_decode", "fewrel")
+                     "redocred_dev_hybrid", "redocred_dev_decode", "redocred_dev", "fewrel")
 # Benchmarks that read label texts: only for label-conditioned heads.
 LABEL_BENCHMARKS = ("fewrel",)
 

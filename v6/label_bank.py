@@ -210,7 +210,18 @@ def extend(bank: dict) -> dict:
 def load(path: Path = BANK_PATH) -> dict:
     if not path.exists():
         raise SystemExit(f"{path} missing; run python -m v6.label_bank")
-    return json.loads(path.read_text())
+    bank = json.loads(path.read_text())
+    # An evaluation-time override of relation descriptions by name (a JSON
+    # file named by KNIV_LABEL_OVERRIDES): to test label wording without
+    # touching the bank that training caches are keyed on.
+    import os
+    ov = os.environ.get("KNIV_LABEL_OVERRIDES")
+    if ov:
+        new = json.loads(Path(ov).read_text())
+        for r in bank["relations"]:
+            if r["name"] in new:
+                r["description"] = new[r["name"]]
+    return bank
 
 
 def main() -> int:
