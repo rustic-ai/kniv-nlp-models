@@ -105,3 +105,14 @@ data/trex/
 # Wikidata SPARQL cache and the T-REx type vocabulary (rebuilt by v6.gold.trex types)
 data/wikidata/types_cache.jsonl
 data/wikidata/trex_types.json
+
+# Third-party evaluation and training data (never committed: licences vary, LoCoMo is CC BY-NC)
+data/crossner/
+data/docred/
+data/fewnerd/
+data/fewrel/
+data/gum/
+data/label-overrides/
+data/locomo/
+data/longmemeval/
+data/wikidata/
