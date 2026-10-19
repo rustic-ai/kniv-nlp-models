@@ -95,7 +95,7 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
              batch_size: int, rel_gold: list | None = None,
              label_coll=None, label_coll_zs=None, span_gold: list | None = None,
              extra_rel: dict | None = None, beat=None, knowledge_only: bool = False,
-             gold_dev: list | None = None) -> dict:
+             gold_dev: list | None = None, coref_dev: list | None = None) -> dict:
     """Dev scores and their composite. ``rel_gold``: human-annotated relation
     documents (Re-DocRED dev), scored as ``relation_gold_f1`` and counted in
     the composite. ``label_coll``: the label-conditioned head's batch labels;
@@ -111,7 +111,9 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
     their POS, morphology, lemma, LAS, NER and SRL scores (``gold_*``) replace
     the corpus-dev ones in the composite, so best.pt follows gold, not the
     corpus's own annotators."""
-    on_gold = on_zs = on_span = on_lang = None
+    on_gold = on_zs = on_span = on_lang = on_coref = None
+    if coref_dev:
+        on_coref = evaluate(model, coref_dev, vocab, pad_id, device, amp, batch_size, beat=beat)
     if gold_dev:
         on_lang = evaluate(model, gold_dev, vocab, pad_id, device, amp, batch_size, beat=beat)
     sticky = model.rel_lora is not None and model.rel_lora.sticky
@@ -250,11 +252,14 @@ def evaluate(model, feats, vocab: Vocab, pad_id: int, device, amp,
         for k in GOLD_DEV_KEYS:
             r[f"gold_{k}"] = on_lang[k]
         keys = [f"gold_{k}" if k in GOLD_DEV_KEYS else k for k in keys]
+    if on_coref is not None and "coref_link_f1" in on_coref:
+        r["gold_coref_link_f1"] = on_coref["coref_link_f1"]
     if c["link_g"] or c["rel_g"]:
         r.update(coref_link_f1=_f1(c["link_tp_p"], c["link_p"], c["link_g"])
                  if c["link_g"] else 0.0,
                  relation_f1=_f1(c["rel_tp"], c["rel_p"], c["rel_g"]))
-        keys += ["coref_link_f1", "relation_f1"]
+        keys += ["gold_coref_link_f1" if "gold_coref_link_f1" in r else "coref_link_f1",
+                 "relation_f1"]
     if c["ent_g"]:
         r["ent_f1"] = _f1(c["ent_tp"], c["ent_p"], c["ent_g"])
     if c["rlab_g"]:
@@ -524,7 +529,7 @@ def main() -> int:
     ap.add_argument("--rel-adapter", type=int, default=0, metavar="R",
                     help="rank of a LoRA adapter for a second, relation-only encoder pass "
                          "feeding the relation and entity heads (0 = none)")
-    ap.add_argument("--train-scope", choices=["all", "phase2", "relation", "relation-full",
+    ap.add_argument("--train-scope", choices=["all", "phase2", "coref", "relation", "relation-full",
                                               "knowledge-full"],
                     default="all",
                     help="phase2: train only the phase-2 heads and their layer mixes; "
@@ -549,6 +554,9 @@ def main() -> int:
                     help="SRL context role head of this width (srl_finetune --role-ctx)")
     ap.add_argument("--ner-lstm", type=int, default=0,
                     help="BiLSTM NER head of this width (head_finetune --ner-lstm)")
+    ap.add_argument("--coref-dev", choices=["gum"],
+                    help="score coreference on GUM dev windows (human-annotated) every eval; that "
+                         "link F1 replaces the corpus dev one in the composite")
     ap.add_argument("--hard-negatives", type=int, default=0, metavar="K",
                     help="offer each true relation's K nearest relations (by the model's label "
                          "embeddings) as negatives in its batch, within the source's schema")
@@ -755,6 +763,10 @@ def main() -> int:
             print(f"gold {src}: {len(feats):,} items x{n}", flush=True)
         if args.gold_dev and not args.probe:
             gold_dev_items = gold_dev(tok, spec, vocab, phase2=args.phase2)
+    coref_dev_items = None
+    if args.coref_dev and not args.probe:
+        from .golddata import gold_features
+        coref_dev_items = gold_features(args.coref_dev, "dev", tok, spec, vocab, phase2=True)
 
     model = V6Model(spec.hf_id, {k: vocab.size(k) for k in vocab.labels},
                     attn_implementation=spec.attn_implementation,
@@ -883,6 +895,16 @@ def main() -> int:
                                               "span.", "mix.ent_span.", "attr."))
         model.plain_grad = True
         heads = RELATION_HEADS
+    elif args.train_scope == "coref":
+        # The coreference head and its layer mix alone, on the plain pass;
+        # the encoder and every other head stay as --init left them.
+        if not args.phase2:
+            raise SystemExit("--train-scope coref needs --phase2")
+        for n, prm in model.named_parameters():
+            prm.requires_grad = n.startswith(("coref.", "mix.coref."))
+        model.freeze_encoder = True
+        heads = ("coref", "coref_span")
+        model.train()
     elif args.train_scope == "relation":
         # The relation adapter, relation and entity heads alone, on the adapted
         # pass only: encoder weights, phase 1 and coref stay bit-identical.
@@ -1160,6 +1182,7 @@ def main() -> int:
                                  rel_gold=rd_dev, label_coll=label_coll_dev,
                                  label_coll_zs=label_coll_zs, span_gold=span_dev,
                                  extra_rel=extra_dev, gold_dev=gold_dev_items,
+                                 coref_dev=coref_dev_items,
                                  beat=lambda: rs.status(state="evaluating"),
                                  knowledge_only=args.train_scope == "knowledge-full")
                     if hasattr(getattr(model, "relation", None), "gates"):

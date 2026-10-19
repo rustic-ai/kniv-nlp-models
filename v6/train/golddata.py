@@ -31,6 +31,7 @@ import argparse
 import hashlib
 import json
 import pickle
+import subprocess
 import time
 from collections import Counter
 
@@ -40,7 +41,16 @@ from ..config import DATA_DIR, PREPARED_DIR
 from .data import FEATURES, USED_CACHES, encode_row
 
 V5_DATA = "dragonscale-ai/kniv-corpus-en"
-SOURCES = ("ud", "v5ner")
+SOURCES = ("ud", "v5ner", "gum")
+# GUM genres whose text licence allows commercial training (CC BY / BY-SA,
+# data/gum/repo/LICENSE.md); fiction, essays, letters, podcasts, wikiHow are
+# non-commercial and reddit is not distributed; genres the licence file does
+# not list (conversation, speech, textbook, vlog) are left out unverified.
+GUM_GENRES = ("academic", "bio", "court", "interview", "news", "voyage")
+# LitBank-like entity mentions: people, places (incl. GPE, facility),
+# organisations. GUM also marks abstract, event, time, object ... mentions,
+# the generic noun phrases the corpus-trained coreference over-links.
+GUM_TYPES = ("person", "place", "organization")
 JUNK_NER = ("None", "NONE", "null", "_MISSING")
 
 
@@ -105,7 +115,111 @@ def v5ner_rows(split: str) -> list[dict]:
             if len(tok)]
 
 
+def _gum_entities(value: str):
+    """CorefUD ``Entity=`` value -> (opened [(eid, type)], single-token
+    [(eid, type)], closed [eid])."""
+    opens, singles, closes = [], [], []
+    i = 0
+    while i < len(value):
+        if value[i] == "(":
+            j = i + 1
+            while j < len(value) and value[j] not in "()":
+                j += 1
+            parts = value[i + 1:j].split("-")
+            ent = (parts[0], parts[1] if len(parts) > 1 else "")
+            if j < len(value) and value[j] == ")":
+                singles.append(ent); i = j + 1
+            else:
+                opens.append(ent); i = j
+        elif value[i].isdigit():
+            j = i
+            while j < len(value) and value[j].isdigit():
+                j += 1
+            if j < len(value) and value[j] == ")":
+                closes.append(value[i:j])
+            i = j + 1
+        else:
+            i += 1
+    return opens, singles, closes
+
+
+def gum_docs(split: str) -> list[dict]:
+    """GUM documents of the licence-cleared genres: tokens, sentence spans,
+    0-based document heads (root -1), and person/place/organization chains
+    of 2+ mentions (inclusive spans). ``split``: train, or dev (2 documents
+    per genre, by name order)."""
+    root = DATA_DIR / "gum" / "repo" / "dep"
+    if not root.exists():
+        raise SystemExit(f"{root} missing: sparse-clone github.com/amir-zeldes/gum (dep/)")
+    files = sorted(f for f in root.glob("GUM_*.conllu") if f.name.split("_")[1] in GUM_GENRES)
+    dev = {f.name for g in GUM_GENRES for f in sorted(x for x in files if x.name.split("_")[1] == g)[:2]}
+    files = [f for f in files if (f.name in dev) == (split == "dev")]
+    docs = []
+    for f in files:
+        tokens, heads, spans, ents = [], [], [], {}
+        stack: dict[str, list[int]] = {}
+        sent_start = 0
+        base = 0
+        for line in f.read_text(encoding="utf-8").splitlines() + [""]:
+            if not line.strip():
+                if len(tokens) > sent_start:
+                    spans.append([sent_start, len(tokens)])
+                    sent_start = len(tokens)
+                    base = len(tokens)
+                continue
+            if line.startswith("#"):
+                continue
+            cols = line.split("\t")
+            if "-" in cols[0] or "." in cols[0]:
+                continue
+            i = len(tokens)
+            tokens.append(cols[1])
+            h = int(cols[6])
+            heads.append(-1 if h == 0 else base + h - 1)
+            misc = dict(kv.split("=", 1) for kv in cols[9].split("|") if "=" in kv)
+            if "Entity" in misc:
+                opens, singles, closes = _gum_entities(misc["Entity"])
+                for eid, typ in opens:
+                    stack.setdefault(eid, []).append(i)
+                    ents.setdefault(eid, [typ, []])
+                for eid, typ in singles:
+                    ents.setdefault(eid, [typ, []])[1].append((i, i))
+                for eid in closes:
+                    if stack.get(eid):
+                        ents[eid][1].append((stack[eid].pop(), i))
+        chains = [sorted(m) for t, m in ents.values() if t in GUM_TYPES and len(m) >= 2]
+        docs.append({"name": f.stem, "tokens": tokens, "heads": heads, "spans": spans,
+                     "chains": chains})
+    return docs
+
+
+def gum_rows(split: str, max_words: int = 350) -> list[dict]:
+    """GUM documents as windows of whole sentences (at most ``max_words``),
+    each with the chains that keep 2+ mentions inside it."""
+    rows = []
+    for d in gum_docs(split):
+        win = []
+        for span in d["spans"] + [None]:
+            s, e = span if span is not None else (None, None)
+            if s is not None and (not win or e - win[0][0] <= max_words):
+                win.append((s, e))
+                continue
+            if win:
+                a, b = win[0][0], win[-1][1]
+                chains = [[[ms - a, me - a] for ms, me in c if a <= ms and me < b] for c in d["chains"]]
+                chains = [c for c in chains if len(c) >= 2]
+                rows.append(_row(f"gum-{split}-{d['name']}-{a}", d["tokens"][a:b],
+                                 dep_heads=[h - a if a <= h < b else -1 for h in d["heads"][a:b]],
+                                 coref=chains))
+                rows[-1]["sentence_spans"] = [[x - a, y - a] for x, y in win]
+            win = [(s, e)] if s is not None else []
+    return rows
+
+
 def _source_digest(src: str, split: str) -> str:
+    if src == "gum":
+        return "gum-" + subprocess.run(["git", "-C", str(DATA_DIR / "gum" / "repo"), "rev-parse",
+                                         "HEAD"], capture_output=True, text=True).stdout.strip()
     if src == "ud":
         # Fixed releases, keyed by name: a VM given the cache has no UD files
         # to hash (bump on a new UD or PropBank release).
@@ -130,7 +244,8 @@ def gold_features(src: str, split: str, tok, spec, vocab, phase2: bool = False,
         with path.open("rb") as fh:
             return pickle.load(fh)
     t0 = time.time()
-    rows = ud_rows(split) if src == "ud" else v5ner_rows(split)
+    rows = (ud_rows(split) if src == "ud" else gum_rows(split) if src == "gum"
+            else v5ner_rows(split))
     if limit and limit < len(rows):
         rng = np.random.default_rng(seed)
         rows = [rows[i] for i in sorted(rng.choice(len(rows), limit, replace=False))]
