@@ -469,10 +469,12 @@ def link_clusters(antecedent: dict[int, int]) -> list[list[int]]:
 def relation_triples(logits: np.ndarray, pairs: list[tuple[int, int]],
                      names: list[str], top: int = 4, offset: float = 0.0) -> set[tuple]:
     """ATLOP decoding: a relation holds when its logit beats the threshold
-    class (column 0) lowered by ``offset``, at most ``top`` per pair."""
+    class (column 0) lowered by ``offset`` -- one number, or one per relation
+    (``calibrate_offsets``) -- at most ``top`` per pair."""
+    off = np.broadcast_to(np.asarray(offset, dtype=np.float64), (len(names),))
     out = set()
     for (h, t), lg in zip(pairs, logits):
-        above = [k for k in np.argsort(-lg[1:])[:top] if lg[k + 1] > lg[0] - offset]
+        above = [k for k in np.argsort(-lg[1:])[:top] if lg[k + 1] > lg[0] - off[k]]
         out |= {(h, t, names[k]) for k in above}
     return out
 
@@ -572,30 +574,69 @@ def _pairs(n: int) -> list[tuple[int, int]]:
 OFFSETS = (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
 
 
-def calibrate_offset(model, tok, spec, vocab, device) -> float:
-    """The threshold offset that maximises triple-F1 on **Re-DocRED dev**,
-    for test. ATLOP's threshold class is learned on the training labels'
-    density; a head trained on sparse teacher labels sets it too high for
-    Re-DocRED's dense gold."""
+REL_OFFSETS = (-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
+MIN_DEV_FACTS = 20
+
+
+def calibrate_offsets(model, tok, spec, vocab, device):
+    """Threshold offsets chosen on **Re-DocRED dev**, for test: the global one
+    that maximises triple-F1 (ATLOP's threshold class is learned on the
+    training labels' density; a head trained on sparse teacher labels sets it
+    too high for Re-DocRED's dense gold), and per relation by coordinate
+    ascent on the same micro-F1 from it (relations with fewer than
+    ``MIN_DEV_FACTS`` dev facts keep the global one). Returns
+    ``(global, per_relation [K])``."""
     from ..gold.redocred import load_rel_items
     items = load_rel_items("dev")
     names = vocab.labels["relations"]
+    K = len(names)
     feats = [phase2_window(it.tokens, [tuple(x) for x in it.layers["sentence_spans"]], tok,
                            spec, vocab, [[(a, e + 1) for a, e in en["mentions"]]
                                          for en in it.entities],
                            markers=model.rel_markers) for it in items]
     outs = run_phase2(model, feats, tok, device, batch=1)
+    # Per relation, every candidate (pair in its top 4): margin over the
+    # threshold class and whether it is gold. What an offset predicts for
+    # one relation does not depend on the others' offsets.
+    idx = {r: k for k, r in enumerate(names)}
+    marg = [[] for _ in range(K)]
+    gold_n = np.zeros(K)
+    for it, f, o in zip(items, feats, outs):
+        keep = f["_ent_keep"]
+        gold = {(h, t, idx[r]) for h, t, r in (tuple(x) for x in it.layers["rel"]) if r in idx}
+        for h, t, k in gold:
+            gold_n[k] += 1
+        for (h, t), lg in zip(_pairs(len(keep)), o["relation"]):
+            for k in np.argsort(-lg[1:])[:4]:
+                marg[k].append((lg[k + 1] - lg[0], (keep[h], keep[t], k) in gold))
+    marg = [np.array(m, dtype=np.float64).reshape(-1, 2) for m in marg]
+    G = gold_n.sum()
 
-    def f1(off):
-        tp = p = g = 0
-        for it, f, o in zip(items, feats, outs):
-            keep = f["_ent_keep"]
-            pred = {(keep[h], keep[t], r) for h, t, r in
-                    relation_triples(o["relation"], _pairs(len(keep)), names, offset=off)}
-            gold = {tuple(x) for x in it.layers["rel"]}
-            tp += len(pred & gold); p += len(pred); g += len(gold)
-        return 2 * tp / max(p + g, 1)
-    return max(OFFSETS, key=f1)
+    def counts(k, off):
+        m = marg[k]
+        hit = m[:, 0] > -off
+        return float((hit & (m[:, 1] > 0)).sum()), float(hit.sum())
+
+    def f1(tp, p):
+        return 2 * tp / max(p + G, 1)
+
+    tab = {k: {off: counts(k, off) for off in REL_OFFSETS} for k in range(K)}
+    glob = max(OFFSETS, key=lambda off: f1(*map(sum, zip(*(counts(k, off) for k in range(K))))))
+    per = np.full(K, glob, dtype=np.float64)
+    cur = {k: counts(k, glob) for k in range(K)}
+    for _ in range(3):
+        for k in range(K):
+            if gold_n[k] < MIN_DEV_FACTS:
+                continue
+            TP = sum(c[0] for c in cur.values()) - cur[k][0]
+            P = sum(c[1] for c in cur.values()) - cur[k][1]
+            best = max(REL_OFFSETS, key=lambda off: f1(TP + tab[k][off][0], P + tab[k][off][1]))
+            per[k], cur[k] = best, tab[k][best]
+    return glob, per
+
+
+def calibrate_offset(model, tok, spec, vocab, device) -> float:
+    return calibrate_offsets(model, tok, spec, vocab, device)[0]
 
 
 def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
@@ -637,7 +678,11 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
     # One document at a time: a 40-entity document is 1,560 pairs, each a
     # 49k-wide bilinear input, and four of them exhaust a 48 GB Mac.
     outs = run_phase2(model, feats, tok, device, batch=1)
-    offset = calibrate_offset(model, tok, spec, vocab, device)
+    offset, rel_off = calibrate_offsets(model, tok, spec, vocab, device)
+    print("rel_offsets (dev): " + json.dumps({"global": offset, "per_relation": {
+        r: float(o_) for r, o_ in zip(names, rel_off) if o_ != offset}}), flush=True)
+    if getattr(model, "rel_offsets", None) is not None:   # deployed per-relation offsets
+        rel_off = model.rel_offsets
     from .data import ENT_TAGS
     ent_allowed, ent_start = bio_constraints(ENT_TAGS)
     rows, feats2, order2 = [], [], []
@@ -645,7 +690,7 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
         keep = f["_ent_keep"]
         gold = {tuple(x) for x in it.layers["rel"]}
         row = {}
-        for key, off in (("rel_f1", 0.0), ("rel_f1_cal", offset)):
+        for key, off in (("rel_f1", 0.0), ("rel_f1_cal", offset), ("rel_f1_relcal", rel_off)):
             pred = relation_triples(o["relation"], _pairs(len(keep)), names, offset=off)
             pred = {(keep[h], keep[t], r) for h, t, r in pred}
             row[key] = [len(pred & gold), len(pred), len(gold)]
@@ -757,8 +802,9 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
         GRID += [f"rel_e2e_link{thr}" for thr in LINK_THRESHOLDS]
     HYB = [f"rel_e2e_hybrid{thr}" for thr in HYBRID_THRESHOLDS] if hybrid else []
     keys = ["rel_e2e_f1"] + (["rel_e2e_goldclust", "rel_e2e_goldment", *GRID] if oracle else []) + HYB
+    deployed = rel_off if getattr(model, "rel_offsets", None) is not None else offset
     for r in rows:
-        for key in keys:
+        for key in keys + ["rel_e2e_relcal"]:
             r[key] = [0, 0, r["rel_f1"][2]]
         r["rel_e2e_docs"] = [0, 1]          # did the model find two entities?
     for (n, ents, key), f, o in zip(order2, feats2, outs2):
@@ -769,18 +815,23 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
             ov = [len(set(ents[ei]) & g) for g in gold_m]
             m = max(ov) if ov else 0
             match[k] = ov.index(m) if m and ov.count(m) == 1 else None
-        pred = relation_triples(o["relation"], _pairs(len(keep)), names, offset=offset)
-        pred_n = len({(h, t, r) for h, t, r in pred})
-        mapped = {(match[h], match[t], r) for h, t, r in pred
-                  if match[h] is not None and match[t] is not None and match[h] != match[t]}
         gold = {tuple(x) for x in it.layers["rel"]}
-        rows[n][key] = [len(mapped & gold), pred_n, len(gold)]
+
+        def score(off):
+            pred = relation_triples(o["relation"], _pairs(len(keep)), names, offset=off)
+            mapped = {(match[h], match[t], r) for h, t, r in pred
+                      if match[h] is not None and match[t] is not None and match[h] != match[t]}
+            return [len(mapped & gold), len(pred), len(gold)]
+        rows[n][key] = score(deployed if key == "rel_e2e_f1" else offset)
+        if key == "rel_e2e_f1":
+            rows[n]["rel_e2e_relcal"] = score(rel_off)
         if key == "rel_e2e_f1":
             rows[n]["rel_e2e_docs"] = [1, 1]
     for r in rows:
         r.setdefault("ent_mention_f1", [0, 0, 0])
-    kinds = {"rel_f1": "f1", "rel_f1_cal": "f1", "rel_reach": "acc", "ent_mention_f1": "f1",
-             "rel_e2e_f1": "f1", "rel_e2e_docs": "acc"}
+    kinds = {"rel_f1": "f1", "rel_f1_cal": "f1", "rel_f1_relcal": "f1", "rel_reach": "acc",
+             "ent_mention_f1": "f1", "rel_e2e_f1": "f1", "rel_e2e_relcal": "f1",
+             "rel_e2e_docs": "acc"}
     kinds.update({k: "f1" for k in HYB})
     if oracle:
         kinds.update(rel_e2e_goldclust="f1", rel_e2e_goldment="f1", ent_split="acc",
@@ -995,6 +1046,9 @@ def main() -> int:
         model.entity_coref = args.entity_coref or cal.get("entity_coref", "all")
         model.link_threshold = float(cal.get("link_threshold", 0.5))
         model.link_mode = cal.get("link_mode", "")
+        ro = cal.get("rel_offsets")
+        model.rel_offsets = (np.array([ro.get(r, cal.get("rel_offset", 0.0))
+                                       for r in vocab.labels["relations"]]) if ro else None)
         if model.entity_coref != "all":
             print(f"{run}: entities grouped with coref={model.entity_coref}", flush=True)
         if hasattr(model, "zs_offset"):

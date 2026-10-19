@@ -1046,7 +1046,7 @@ POST_JOBS = {
     "span": "python -m v6.train.span_eval --runs {ev} --describe --calibrate-on crossner_politics",
     "rb": "python -m v6.train.rel_breakdown --runs {ev}",
 }
-POST_LINES = r"wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
+POST_LINES = r"rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
 
 POST_START = r'''
 import json, os, subprocess, sys
