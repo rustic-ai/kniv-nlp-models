@@ -1,7 +1,9 @@
 """Memory probe: does kniv's extraction capture the facts a memory system
-would need? LongMemEval's oracle split (MIT), no LLM in the loop.
+would need? LongMemEval's oracle split (MIT) or LoCoMo (CC BY-NC 4.0:
+internal measurement only, never in public material), no LLM in the loop.
 
     uv run python -m v6.eval.memory_probe --questions 150
+    uv run python -m v6.eval.memory_probe --dataset locomo --questions 200
 
 Each question's evidence turns (flagged ``has_answer``) are run through
 ``v6.infer.Extractor``, each with the turn before it, as a two-speaker
@@ -29,6 +31,10 @@ from collections import Counter, defaultdict
 from ..config import DATA_DIR, RUNS_DIR
 
 ORACLE = DATA_DIR / "longmemeval" / "longmemeval_oracle.json"
+LOCOMO = DATA_DIR / "locomo" / "locomo10.json"
+# LoCoMo's QA categories as its evaluation code numbers them; 5 (adversarial,
+# unanswerable) is left out.
+LOCOMO_CATS = {1: "multi-hop", 2: "temporal", 3: "open-domain", 4: "single-hop"}
 
 RELATIONS = [
     ("residence", "the place where the person is or has been, resident"),
@@ -82,19 +88,64 @@ def overlap_f1(a: str, b: str) -> float:
     return 2 * p * r / (p + r)
 
 
+def longmemeval_questions(max_words: int) -> list[dict]:
+    """Each question's evidence turns (``has_answer``), each with the turn
+    before it, as a user/assistant conversation."""
+    out = []
+    for q in json.loads(ORACLE.read_text()):
+        if q["question_id"].endswith("_abs") or len(_words(q["answer"])) > max_words:
+            continue
+        ev = []
+        for s in q["haystack_sessions"]:
+            for i, turn in enumerate(s):
+                if turn.get("has_answer"):
+                    ev.append(([(s[i - 1]["role"], s[i - 1]["content"])] if i > 0 else [])
+                              + [(turn["role"], turn["content"])])
+        out.append({"type": q["question_type"], "answer": q["answer"], "evidence": ev,
+                    "speakers": {"user"}})
+    return out
+
+
+def locomo_questions(max_words: int) -> list[dict]:
+    """LoCoMo QA (categories 1-4): each evidence dialogue turn with the turn
+    before it, between the conversation's two named speakers."""
+    out = []
+    for conv in json.loads(LOCOMO.read_text()):
+        c = conv["conversation"]
+        turns, order = {}, []
+        for k in sorted((k for k in c if k.startswith("session_") and not k.endswith("date_time")),
+                        key=lambda k: int(k.split("_")[1])):
+            for t in c[k]:
+                turns[t["dia_id"]] = len(order)
+                order.append((t["speaker"], t["text"]))
+        for q in conv["qa"]:
+            cat = q.get("category")
+            if cat not in LOCOMO_CATS or "answer" not in q or len(_words(q["answer"])) > max_words:
+                continue
+            ev = []
+            for d in q.get("evidence", []):
+                for d1 in str(d).replace(" ", "").split(";"):
+                    if d1 in turns:
+                        i = turns[d1]
+                        ev.append(([order[i - 1]] if i > 0 else []) + [order[i]])
+            if ev:
+                out.append({"type": LOCOMO_CATS[cat], "answer": str(q["answer"]), "evidence": ev,
+                            "speakers": {c["speaker_a"], c["speaker_b"]}})
+    return out
+
+
 def main() -> int:
     from ..infer import Extractor
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--run", default="deberta-v3-large-p2-zs-v62-ftr")
     ap.add_argument("--questions", type=int, default=150)
     ap.add_argument("--max-answer-words", type=int, default=5)
+    ap.add_argument("--dataset", choices=["longmemeval", "locomo"], default="longmemeval")
     args = ap.parse_args()
-    data = json.loads(ORACLE.read_text())
-    qs = [q for q in data if not q["question_id"].endswith("_abs")
-          and len(_words(q["answer"])) <= args.max_answer_words]
+    qs = (locomo_questions if args.dataset == "locomo" else longmemeval_questions)(args.max_answer_words)
     by = defaultdict(list)
     for q in qs:
-        by[q["question_type"]].append(q)
+        by[q["type"]].append(q)
     per = max(1, args.questions // len(by))
     qs = [q for t in sorted(by) for q in by[t][:per]]
     ex = Extractor(args.run)
@@ -108,12 +159,8 @@ def main() -> int:
     examples = []
     for qi, q in enumerate(qs):
         ents_txt, fact_args, user_facts, n_facts = [], [], 0, 0
-        for s in q["haystack_sessions"]:
-            for i, turn in enumerate(s):
-                if not turn.get("has_answer"):
-                    continue
-                turns = ([(s[i - 1]["role"], s[i - 1]["content"])] if i > 0 else []) + \
-                    [(turn["role"], turn["content"])]
+        for turns in q["evidence"]:
+            if True:
                 for w in ex.extract(turns=turns, relations=rels, entity_types=types):
                     E = w["entities"]
                     for e in E:
@@ -123,12 +170,12 @@ def main() -> int:
                         rel_use[f["relation"]] += 1
                         h, t = E[f["head"]], E[f["tail"]]
                         fact_args += [h["text"], t["text"]] + h.get("mentions", []) + t.get("mentions", [])
-                        user_facts += int(h.get("text") == "user" or t.get("text") == "user")
+                        user_facts += int(h.get("text") in q["speakers"] or t.get("text") in q["speakers"])
                         if len(examples) < 25 and qi % 5 == 0:
-                            examples.append(f"[{q['question_type']}] {h['text']} --{f['relation']}--> "
+                            examples.append(f"[{q['type']}] {h['text']} --{f['relation']}--> "
                                             f"{t['text']} ({f['margin']})")
         a = q["answer"]
-        c = stats[q["question_type"]]
+        c = stats[q["type"]]
         c["questions"] += 1
         c["answer_in_entities"] += int(any(overlap_f1(a, x) >= 0.5 for x in ents_txt))
         c["answer_in_facts"] += int(any(overlap_f1(a, x) >= 0.5 for x in fact_args))
@@ -153,7 +200,8 @@ def main() -> int:
     print("\n".join(examples[:15]))
     out = RUNS_DIR / "memory-probe" / time.strftime("%Y%m%d-%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
-    (out / "results.json").write_text(json.dumps({"run": args.run, "rows": rows,
+    (out / "results.json").write_text(json.dumps({"run": args.run, "dataset": args.dataset,
+                                                  "rows": rows,
                                                   "relations": dict(rel_use), "examples": examples},
                                                  indent=1))
     print(f"written to {out}")
