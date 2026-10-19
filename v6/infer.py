@@ -69,6 +69,9 @@ class Extractor:
         # with them; any other relation: 0 (the label path's own threshold).
         self.rel_offsets = {n: float(cal.get("rel_offset", 0.0)) for n in rd} if "rel_offset" in cal else {}
         self.rel_offsets.update(cal.get("rel_offsets") or {})
+        # Every other relation: calibrate_zs's offset (held-out teacher
+        # windows), "predict when margin > unseen_offset".
+        self.unseen_offset = float(cal.get("unseen_offset", 0.0))
         self.top = int(cal.get("rel_top", 4))
         self.ent_o_bias = float(cal.get("ent_o_bias", 0.0))
         self.model.coref_link_bias = float(cal.get("coref_link_bias", 0.0))
@@ -183,7 +186,7 @@ class Extractor:
         o = self.model(b, relation_only=True)
         lg = o["relation"].float().cpu().numpy()
         facts = []
-        off = np.array([self.rel_offsets.get(r["name"], 0.0) for r in relations])
+        off = np.array([self.rel_offsets.get(r["name"], -self.unseen_offset) for r in relations])
         for (h, t), row in zip(zip(b["pair_h"].tolist(), b["pair_t"].tolist()), lg):
             m = row[1:] - row[0] + off
             for k in np.argsort(-m)[:top]:
