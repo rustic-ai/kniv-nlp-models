@@ -46,6 +46,7 @@ SOURCES = ("ud", "v5ner", "gum")
 # data/gum/repo/LICENSE.md); fiction, essays, letters, podcasts, wikiHow are
 # non-commercial and reddit is not distributed; genres the licence file does
 # not list (conversation, speech, textbook, vlog) are left out unverified.
+GUM_REV = "22fdf87f9c71c96bcc771461d06e689b1f90020d"         # data/gum/repo HEAD the windows were built from
 GUM_GENRES = ("academic", "bio", "court", "interview", "news", "voyage")
 # LitBank-like entity mentions: people, places (incl. GPE, facility),
 # organisations. GUM also marks abstract, event, time, object ... mentions,
@@ -151,6 +152,10 @@ def gum_docs(split: str) -> list[dict]:
     root = DATA_DIR / "gum" / "repo" / "dep"
     if not root.exists():
         raise SystemExit(f"{root} missing: sparse-clone github.com/amir-zeldes/gum (dep/)")
+    rev = subprocess.run(["git", "-C", str(root.parent), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    if rev != GUM_REV:
+        raise SystemExit(f"GUM checkout {rev[:10]} is not the pinned {GUM_REV[:10]}")
     files = sorted(f for f in root.glob("GUM_*.conllu") if f.name.split("_")[1] in GUM_GENRES)
     dev = {f.name for g in GUM_GENRES for f in sorted(x for x in files if x.name.split("_")[1] == g)[:2]}
     files = [f for f in files if (f.name in dev) == (split == "dev")]
@@ -218,8 +223,8 @@ def gum_rows(split: str, max_words: int = 350) -> list[dict]:
 
 def _source_digest(src: str, split: str) -> str:
     if src == "gum":
-        return "gum-" + subprocess.run(["git", "-C", str(DATA_DIR / "gum" / "repo"), "rev-parse",
-                                         "HEAD"], capture_output=True, text=True).stdout.strip()
+        # Pinned, so a VM given the cache (and no GUM checkout) finds it.
+        return "gum-" + GUM_REV
     if src == "ud":
         # Fixed releases, keyed by name: a VM given the cache has no UD files
         # to hash (bump on a new UD or PropBank release).
