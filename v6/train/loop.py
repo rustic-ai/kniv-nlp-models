@@ -63,6 +63,26 @@ def _spans(tags: list[str]) -> set[tuple]:
     return out
 
 
+@torch.no_grad()
+def relation_siblings(model, tok, device, bank, k: int) -> dict:
+    """Each trainable relation's ``k`` nearest relations by the model's own
+    label embeddings (cosine): the confusable ones (member of / member of
+    sports team, country / country of origin)."""
+    from .gold_eval import schema_embeddings
+    ids = [r["id"] for r in bank["relations"] if r.get("train", True)]
+    was = model.training
+    model.eval()
+    emb = torch.cat([schema_embeddings(model, tok, device, ids[i:i + 64]).float()
+                     for i in range(0, len(ids), 64)])
+    model.train(was)
+    emb = torch.nn.functional.normalize(emb, dim=-1)
+    sim = emb @ emb.T
+    sim.fill_diagonal_(-1)
+    top = sim.topk(k, dim=-1).indices.cpu().numpy()
+    arr = np.asarray(ids, dtype=np.int64)
+    return {int(arr[i]): arr[top[i]] for i in range(len(ids))}
+
+
 GOLD_DEV_KEYS = ("pos", "morph", "lemma", "ner_f1", "las", "srl_pred_f1", "srl_role_f1")
 
 
@@ -523,6 +543,15 @@ def main() -> int:
                     help="human-annotated linguistic data, each N times per epoch (N < 1: that "
                          "fraction): ud (UD EWT + PropBank EWT frames), v5ner (v5's "
                          "gold-filtered NER); see golddata.py")
+    ap.add_argument("--srl-pred-hidden", type=int, default=0,
+                    help="MLP predicate head of this width (as srl_finetune --pred-hidden built)")
+    ap.add_argument("--srl-ctx", type=int, default=0,
+                    help="SRL context role head of this width (srl_finetune --role-ctx)")
+    ap.add_argument("--ner-lstm", type=int, default=0,
+                    help="BiLSTM NER head of this width (head_finetune --ner-lstm)")
+    ap.add_argument("--hard-negatives", type=int, default=0, metavar="K",
+                    help="offer each true relation's K nearest relations (by the model's label "
+                         "embeddings) as negatives in its batch, within the source's schema")
     ap.add_argument("--gold-dev", action="store_true",
                     help="score UD EWT dev, PropBank dev and v5 gold NER dev every eval; their "
                          "linguistic scores replace the corpus dev ones in the composite")
@@ -737,7 +766,9 @@ def main() -> int:
                     span_head=args.span_head, label_adapter=args.label_adapter,
                     legacy_rank=args.legacy_rank,
                     trust_remote_code=spec.trust_remote_code,
-                    word_pool=args.word_pool, attr_head=args.attr_head).to(device)
+                    word_pool=args.word_pool, attr_head=args.attr_head,
+                    srl_pred_hidden=args.srl_pred_hidden, srl_ctx=args.srl_ctx,
+                    ner_lstm=args.ner_lstm).to(device)
     init_relation = args.init_relation or "drop"
     if init_relation == "transplant" and args.rel_head != "label":
         raise SystemExit("--init-relation transplant needs --rel-head label")
@@ -762,6 +793,12 @@ def main() -> int:
                                    exclude_holdout=args.label_holdout, exclude_ids=hold_ids,
                                    text_modes=([("name_desc", 1.0)] if args.label_text == "canonical"
                                                else None))
+        if args.hard_negatives:
+            label_coll.siblings = relation_siblings(model, tok, device, bank, args.hard_negatives)
+            print(f"hard negatives: {args.hard_negatives} siblings per relation, e.g. " + "; ".join(
+                f"{bank['relations'][i]['name']} -> "
+                + ", ".join(bank["relations"][j]["name"] for j in label_coll.siblings[i][:3])
+                for i in list(label_coll.siblings)[:4]), flush=True)
         label_coll_dev = LabelCollator(tok, bank, train=False, exclude_holdout=args.label_holdout)
         if args.label_holdout:
             label_coll_zs = LabelCollator(tok, bank, train=False, only_holdout=True)
@@ -968,6 +1005,8 @@ def main() -> int:
                                  "span_head": args.span_head,
                                  "label_adapter": args.label_adapter,
                                  "legacy_rank": args.legacy_rank,
+                                 "srl_pred_hidden": args.srl_pred_hidden,
+                                 "srl_ctx": args.srl_ctx, "ner_lstm": args.ner_lstm,
                                  "word_pool": args.word_pool,
                                  "attr_head": args.attr_head,
                                  "kg_holdout": hold_ids,

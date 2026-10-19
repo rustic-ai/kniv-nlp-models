@@ -91,6 +91,11 @@ class LabelCollator:
             self.usable &= set(only_ids)
             self.allowed = np.asarray([i for i in self.allowed if i in self.usable], dtype=np.int64)
         self._tok_cache: dict[str, list[int]] = {}
+        # Hard negatives (loop --hard-negatives): each relation's nearest
+        # relations by label embedding. A batch with a true relation always
+        # offers its siblings too -- within the pool, so only where the
+        # source was annotated against them (never an invented negative).
+        self.siblings: dict[int, np.ndarray] = {}
 
     def _ids(self, text: str) -> list[int]:
         if text not in self._tok_cache:
@@ -112,6 +117,10 @@ class LabelCollator:
         if not self.train or len(pool) <= self.min_labels:
             return pool
         keep = np.intersect1d(np.asarray(list(keep), dtype=np.int64), pool)
+        if self.siblings and len(keep):
+            sib = np.concatenate([self.siblings.get(int(k), np.zeros(0, dtype=np.int64))
+                                  for k in keep])
+            keep = np.union1d(keep, np.intersect1d(sib, pool))
         k = int(self.rng.integers(self.min_labels, min(self.max_labels, len(pool)) + 1))
         rest = np.setdiff1d(pool, keep)
         n = max(0, min(len(rest), k - len(keep)))
@@ -268,6 +277,11 @@ class TypeCollator:
         self.max_width, self.max_neg, self.max_types = max_width, max_neg, max_types
         self.unlabelled_keep = unlabelled_keep
         self._tok_cache: dict[str, list[int]] = {}
+        # Hard negatives (loop --hard-negatives): each relation's nearest
+        # relations by label embedding. A batch with a true relation always
+        # offers its siblings too -- within the pool, so only where the
+        # source was annotated against them (never an invented negative).
+        self.siblings: dict[int, np.ndarray] = {}
 
     def _ids(self, text: str) -> list[int]:
         if text not in self._tok_cache:
