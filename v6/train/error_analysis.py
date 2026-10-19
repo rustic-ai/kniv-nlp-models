@@ -128,6 +128,16 @@ def relations(model, tok, spec, vocab, device) -> dict:
         gold = defaultdict(set)
         for h, t, r in it.layers["rel"]:
             gold[(h, t)].add(r)
+        # A fact a two-step chain of other gold facts implies (X in county,
+        # county in state -> X in state): inferred, not read.
+        out_of = defaultdict(set)
+        for h, t, r in it.layers["rel"]:
+            out_of[h].add((t, r))
+
+        def inferable(h, t, r):
+            return any((t, r2) in out_of[e] for e, r1 in out_of[h] if e != t
+                       for r2 in (r, "located in the administrative territorial entity", "country")
+                       if r1 in (r, "located in the administrative territorial entity"))
         logits = {(keep[h], keep[t]): lg for (h, t), lg in zip(pairs, o["relation"])}
         for (h, t), lg in logits.items():
             above = [k for k in np.argsort(-lg[1:])[:4] if lg[k + 1] > lg[0] - offset]
@@ -138,13 +148,15 @@ def relations(model, tok, spec, vocab, device) -> dict:
             dk = "same" if d == 0 else "adjacent" if d == 1 else "2+ apart"
             tk = f"{it.entities[h]['type']}->{it.entities[t]['type']}"
             for r in g:
-                for key in ("all", dk, tk):
+                inf = "inferable" if inferable(h, t, r) else "direct"
+                for key in ("all", dk, tk, inf):
                     by[key]["gold"] += 1
                 if r in pred:
                     c["tp"] += 1; per_rel[r]["tp"] += 1
-                    for key in ("all", dk, tk):
+                    for key in ("all", dk, tk, inf):
                         by[key]["tp"] += 1
                     continue
+                c[f"fn_{inf}"] += 1
                 per_rel[r]["fn"] += 1
                 if top == r:
                     c["fn_threshold"] += 1
