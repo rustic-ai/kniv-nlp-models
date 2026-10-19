@@ -110,7 +110,8 @@ def names_compatible(tokens: list[str], m1: tuple[int, int], m2: tuple[int, int]
 def build_entities(tokens: list[str], sentence_spans: list[list[int]],
                    ner_by_sentence: list[list[str] | None],
                    coref_chains: list[list[list[int]]] | None,
-                   coref: str = "all", partial_names: bool = False, link=None):
+                   coref: str = "all", partial_names: bool = False, link=None,
+                   link_merge=None):
     """Return DocRED-format ``(sents, vertexSet)``, or ``(None, None)``.
 
     ``coref``: how coreference chains group the entity mentions -- ``all``
@@ -122,7 +123,8 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
     acronym (several candidates: ambiguous, left alone). ``link``: a function
     from the typed mention spans ``[(type, start, end_exclusive)]`` to groups
     of their indices (``entity_link.Linker``); it replaces both the chains and
-    the name rules.
+    the name rules. ``link_merge``: a function from the typed spans and the
+    rules' groups to coarser groups (``entity_link.Linker.merge``, the hybrid).
 
     ``None`` when fewer than two entities survive — a relation needs a pair,
     and a window with one entity is not evidence of anything.
@@ -202,6 +204,9 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
             if ty in MERGEABLE:
                 by_name[key] = len(merged)
             merged.append(list(g))
+
+    if link_merge is not None and link is None:
+        merged = link_merge(spans, merged)
 
     if partial_names:
         # A short name joins the single longer entity it is part of; with two

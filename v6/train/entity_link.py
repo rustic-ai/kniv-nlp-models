@@ -101,6 +101,31 @@ def chain_ids(spans, chains) -> list[int]:
     return out
 
 
+def merge_groups(n_groups_of, groups, pairs, probs, threshold: float, same_type) -> list[list[int]]:
+    """Average-link merging that starts from ``groups`` (the rules' grouping)
+    and only joins two groups whose mean pair probability is at least
+    ``threshold`` and whose types agree (``same_type(g1, g2)``)."""
+    n = n_groups_of
+    P = np.zeros((n, n))
+    for (i, j), p in zip(pairs, probs):
+        P[i, j] = P[j, i] = p
+    groups = [list(g) for g in groups]
+    while len(groups) > 1:
+        best, bi, bj = threshold, -1, -1
+        for x in range(len(groups)):
+            for y in range(x + 1, len(groups)):
+                if not same_type(groups[x], groups[y]):
+                    continue
+                s = P[np.ix_(groups[x], groups[y])].mean()
+                if s >= best:
+                    best, bi, bj = s, x, y
+        if bi < 0:
+            break
+        groups[bi] += groups[bj]
+        del groups[bj]
+    return groups
+
+
 class Linker:
     """``build_entities(link=...)``: groups typed mention spans with a model's
     linker head, given the window's link words and coreference chains."""
@@ -108,6 +133,46 @@ class Linker:
     def __init__(self, model, tokens, sentence_spans, link_words, chains, threshold: float):
         self.m, self.tokens, self.sp = model, tokens, sentence_spans
         self.words, self.chains, self.thr = link_words, chains, threshold
+
+    def probs(self, typed, idx):
+        sub = [(typed[k][1], typed[k][2]) for k in idx]
+        offs = [s for s, _ in self.sp]
+        sent = [max(i for i, o in enumerate(offs) if o <= a) for a, _ in sub]
+        pairs, feats, dist = pair_features(self.tokens, sub, [typed[k][0] for k in idx],
+                                           chain_ids(sub, self.chains), sent)
+        lk = self.m.linker
+        dev = next(lk.parameters()).device
+        with torch.no_grad():
+            mv = lk.mention_vectors(self.words.to(dev), sub)
+            p = torch.sigmoid(lk(mv, torch.from_numpy(pairs).to(dev),
+                                 torch.from_numpy(feats).to(dev),
+                                 torch.from_numpy(dist).to(dev))).cpu().numpy()
+        return pairs, p
+
+    def merge(self, typed, groups):
+        """The hybrid (``build_entities(link_merge=...)``): the rules' groups,
+        joined only where the linker is at least ``threshold`` sure."""
+        W = self.words.size(0)
+        idx = [k for k, (_, a, b) in enumerate(typed) if b <= W]
+        if len(idx) < 2:
+            return groups
+        pos = {k: i for i, k in enumerate(idx)}
+        pairs, p = self.probs(typed, idx)
+        local = [[pos[k] for k in g if k in pos] for g in groups]
+        keep = [g for g, lg in zip(groups, local) if lg]
+        rest = [g for g, lg in zip(groups, local) if not lg]
+        local = [lg for lg in local if lg]
+        merged = merge_groups(len(idx), local, pairs, p, self.thr,
+                              lambda g1, g2: typed[idx[g1[0]]][0] == typed[idx[g2[0]]][0])
+        back = {tuple(sorted(lg)): g for lg, g in zip(local, keep)}
+        out = []
+        for mg in merged:
+            members = []
+            for lg in local:
+                if set(lg) <= set(mg):
+                    members += back[tuple(sorted(lg))]
+            out.append(members)
+        return out + rest
 
     def __call__(self, typed):
         spans = [(a, b) for _, a, b in typed]

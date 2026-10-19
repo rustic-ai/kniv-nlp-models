@@ -270,6 +270,7 @@ def eval_srl(model, tok, spec, vocab, device, limit) -> dict:
 
 POS_GROUPS = ("VERB", "AUX", "NOUN", "ADJ")
 LINK_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+HYBRID_THRESHOLDS = (0.9, 0.95, 0.97, 0.99)
 
 
 def _group(upos: str) -> str:
@@ -598,7 +599,7 @@ def calibrate_offset(model, tok, spec, vocab, device) -> float:
 
 
 def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
-                  split: str = "test") -> dict:
+                  split: str = "test", hybrid: bool = False) -> dict:
     """Re-DocRED test (documents up to 512 words).
 
     ``rel_f1``: gold entities given, micro triple-F1 -- the teacher ATLOP's
@@ -664,11 +665,19 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
         pm = {(s + a, s + b) for (s, _), t in zip(sp, ner) if t for _, a, b in bio_spans_t(t)}
         gm = {(a, e + 1) for en in it.entities for a, e in en["mentions"]}
         rows[-1]["ent_mention_f1"] = [len(pm & gm), len(pm), len(gm)]
-        if getattr(model, "linker", None) is not None:
+        rule = getattr(model, "entity_coref", "all")
+        if getattr(model, "linker", None) is not None and getattr(model, "link_mode", "") == "replace":
             modes = {"rel_e2e_f1": (ner, o["coref"], "all", False,
                                     getattr(model, "link_threshold", 0.5))}
+        elif getattr(model, "linker", None) is not None and getattr(model, "link_mode", "") == "hybrid":
+            modes = {"rel_e2e_f1": (ner, o["coref"], rule, False,
+                                    ("hybrid", getattr(model, "link_threshold", 0.95)))}
         else:
-            modes = {"rel_e2e_f1": (ner, o["coref"], getattr(model, "entity_coref", "all"), False)}
+            modes = {"rel_e2e_f1": (ner, o["coref"], rule, False)}
+        if hybrid:
+            modes = {"rel_e2e_f1": (ner, o["coref"], rule, False)}
+            for thr in HYBRID_THRESHOLDS:
+                modes[f"rel_e2e_hybrid{thr}"] = (ner, o["coref"], rule, False, ("hybrid", thr))
         if oracle:
             # Gold clustering of the model's own mentions.
             pspans = [(t_, s + a, s + b) for (s, _), t in zip(sp, ner) if t
@@ -709,13 +718,18 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
             if tg == "clusters":
                 ents = [c for c in chains]
             else:
-                link = None
+                link = link_merge = None
                 if thr is not None:
                     from .entity_link import Linker
-                    link = Linker(model, it.tokens, sp, o["link_words"], chains, thr)
+                    if isinstance(thr, tuple):            # ("hybrid", threshold)
+                        link_merge = Linker(model, it.tokens, sp, o["link_words"], chains,
+                                            thr[1]).merge
+                    else:
+                        link = Linker(model, it.tokens, sp, o["link_words"], chains, thr)
                 sents, vertex = build_entities(it.tokens, [list(x) for x in sp], tg,
                                                [[list(m) for m in c] for c in chains],
-                                               coref=cm, partial_names=pn, link=link)
+                                               coref=cm, partial_names=pn, link=link,
+                                               link_merge=link_merge)
                 if vertex is None:
                     continue
                 ents = [[(sp[m["sent_id"]][0] + m["pos"][0], sp[m["sent_id"]][0] + m["pos"][1])
@@ -741,7 +755,8 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
             for pn in (False, True) if (cm, pn) != ("all", False)]
     if getattr(model, "linker", None) is not None:
         GRID += [f"rel_e2e_link{thr}" for thr in LINK_THRESHOLDS]
-    keys = ["rel_e2e_f1"] + (["rel_e2e_goldclust", "rel_e2e_goldment", *GRID] if oracle else [])
+    HYB = [f"rel_e2e_hybrid{thr}" for thr in HYBRID_THRESHOLDS] if hybrid else []
+    keys = ["rel_e2e_f1"] + (["rel_e2e_goldclust", "rel_e2e_goldment", *GRID] if oracle else []) + HYB
     for r in rows:
         for key in keys:
             r[key] = [0, 0, r["rel_f1"][2]]
@@ -766,6 +781,7 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
         r.setdefault("ent_mention_f1", [0, 0, 0])
     kinds = {"rel_f1": "f1", "rel_f1_cal": "f1", "rel_reach": "acc", "ent_mention_f1": "f1",
              "rel_e2e_f1": "f1", "rel_e2e_docs": "acc"}
+    kinds.update({k: "f1" for k in HYB})
     if oracle:
         kinds.update(rel_e2e_goldclust="f1", rel_e2e_goldment="f1", ent_split="acc",
                      ent_merged="acc", **{k: "f1" for k in GRID})
@@ -826,8 +842,10 @@ BENCHMARKS = {"ud": eval_ud, "srl": eval_srl, "srl_full": eval_srl_full,
               "litbank": eval_litbank, "redocred": eval_redocred,
               "redocred_oracle": lambda *a: eval_redocred(*a, oracle=True),
               "redocred_dev_oracle": lambda *a: eval_redocred(*a, oracle=True, split="dev"),
+              "redocred_dev_hybrid": lambda *a: eval_redocred(*a, split="dev", hybrid=True),
               "fewrel": eval_fewrel}
-PHASE2_BENCHMARKS = ("litbank", "redocred", "redocred_oracle", "redocred_dev_oracle", "fewrel")
+PHASE2_BENCHMARKS = ("litbank", "redocred", "redocred_oracle", "redocred_dev_oracle",
+                     "redocred_dev_hybrid", "fewrel")
 # Benchmarks that read label texts: only for label-conditioned heads.
 LABEL_BENCHMARKS = ("fewrel",)
 
@@ -976,6 +994,7 @@ def main() -> int:
                 cal = {}
         model.entity_coref = args.entity_coref or cal.get("entity_coref", "all")
         model.link_threshold = float(cal.get("link_threshold", 0.5))
+        model.link_mode = cal.get("link_mode", "")
         if model.entity_coref != "all":
             print(f"{run}: entities grouped with coref={model.entity_coref}", flush=True)
         if hasattr(model, "zs_offset"):
