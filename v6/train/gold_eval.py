@@ -546,6 +546,41 @@ def run_phase2(model, feats: list[dict], tok, device, batch: int = 4,
     return out
 
 
+COREF_FILTERS = ("none", "no_nominal_only")
+
+
+def filter_clusters(tokens, clusters, mode: str):
+    """``no_nominal_only``: drop clusters with no name and no pronoun -- all
+    common noun phrases ("the evening ... the evening"), which LitBank and
+    GUM's entity mentions mostly leave out."""
+    if mode in (None, "", "none"):
+        return clusters
+    from .error_analysis import kind
+    return [c for c in clusters if any(kind(tokens, tuple(m)) != "nominal" for m in c)]
+
+
+def eval_gum_coref(model, tok, spec, vocab, device, limit) -> dict:
+    """GUM dev (person / place / organization chains, licence-cleared genres):
+    CoNLL-F1 per window for every cluster filter -- the dev set coreference
+    decoding choices are made on, so LitBank stays a test set."""
+    from ..score.coref import conll_f1
+    from .golddata import gum_rows
+    rows = gum_rows("dev")[:limit] if limit else gum_rows("dev")
+    feats = [phase2_window(r["tokens"], [tuple(x) for x in r["sentence_spans"]], tok, spec, vocab)
+             for r in rows]
+    outs = run_phase2(model, feats, tok, device)
+    items = []
+    for r, f, o in zip(rows, feats, outs):
+        gold = [[tuple(m) for m in c if m[1] < f["_W"]] for c in r["coref"]]
+        gold = [c for c in gold if len(c) >= 2]
+        row = {}
+        for mode in COREF_FILTERS:
+            pred = filter_clusters(r["tokens"], o["coref"], mode)
+            row[f"gum_conll_{mode}"] = [conll_f1(gold, pred)["conll_f1"] if gold else 1.0, 1]
+        items.append(row)
+    return {"items": items, "kinds": {f"gum_conll_{m}": "acc" for m in COREF_FILTERS}}
+
+
 def eval_litbank(model, tok, spec, vocab, device, limit) -> dict:
     """LitBank coreference, the bake-off's 400-word windows: CoNLL-F1 (mean of
     MUC, B³, CEAF-e) per window, averaged -- the teacher LingMess's protocol."""
@@ -558,7 +593,8 @@ def eval_litbank(model, tok, spec, vocab, device, limit) -> dict:
     rows = []
     for it, f, o in zip(items, feats, outs):
         gold = it.layers["coref"]
-        r = conll_f1(gold, o["coref"]) if gold else {"conll_f1": 1.0, "b3_f1": 1.0, "muc_f1": 1.0}
+        pred = filter_clusters(it.tokens, o["coref"], getattr(model, "coref_filter", "none"))
+        r = conll_f1(gold, pred) if gold else {"conll_f1": 1.0, "b3_f1": 1.0, "muc_f1": 1.0}
         n_gold = sum(len(c) for c in gold)
         reach = sum(e < f["_W"] for c in gold for _, e in c)
         rows.append({"coref_conll": [r["conll_f1"], 1], "coref_b3": [r["b3_f1"], 1],
@@ -894,8 +930,9 @@ BENCHMARKS = {"ud": eval_ud, "srl": eval_srl, "srl_full": eval_srl_full,
               "redocred_oracle": lambda *a: eval_redocred(*a, oracle=True),
               "redocred_dev_oracle": lambda *a: eval_redocred(*a, oracle=True, split="dev"),
               "redocred_dev_hybrid": lambda *a: eval_redocred(*a, split="dev", hybrid=True),
+              "gum_coref": eval_gum_coref,
               "fewrel": eval_fewrel}
-PHASE2_BENCHMARKS = ("litbank", "redocred", "redocred_oracle", "redocred_dev_oracle",
+PHASE2_BENCHMARKS = ("litbank", "gum_coref", "redocred", "redocred_oracle", "redocred_dev_oracle",
                      "redocred_dev_hybrid", "fewrel")
 # Benchmarks that read label texts: only for label-conditioned heads.
 LABEL_BENCHMARKS = ("fewrel",)
@@ -1046,6 +1083,7 @@ def main() -> int:
         model.entity_coref = args.entity_coref or cal.get("entity_coref", "all")
         model.link_threshold = float(cal.get("link_threshold", 0.5))
         model.link_mode = cal.get("link_mode", "")
+        model.coref_filter = cal.get("coref_filter", "none")
         ro = cal.get("rel_offsets")
         model.rel_offsets = (np.array([ro.get(r, cal.get("rel_offset", 0.0))
                                        for r in vocab.labels["relations"]]) if ro else None)
