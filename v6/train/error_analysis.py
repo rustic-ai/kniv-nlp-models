@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .gold_eval import (HF_REPO, _pairs, _sentences, calibrate_offset, load_run, phase2_window,
+from .gold_eval import (HF_REPO, _pairs, _sentences, calibrate_offsets, load_run, phase2_window,
                         run_phase2)
 
 PRONOUNS = {"i", "me", "my", "mine", "myself", "you", "your", "yours", "yourself", "he", "him",
@@ -109,7 +109,7 @@ def relations(model, tok, spec, vocab, device) -> dict:
     from ..gold.redocred import load_rel_items
     items = load_rel_items("test")
     names = vocab.labels["relations"]
-    offset = calibrate_offset(model, tok, spec, vocab, device)
+    _, offset = calibrate_offsets(model, tok, spec, vocab, device)   # per relation, as deployed
     feats = [phase2_window(it.tokens, [tuple(x) for x in it.layers["sentence_spans"]], tok, spec,
                            vocab, [[(a, e + 1) for a, e in en["mentions"]] for en in it.entities],
                            markers=model.rel_markers) for it in items]
@@ -140,7 +140,7 @@ def relations(model, tok, spec, vocab, device) -> dict:
                        if r1 in (r, "located in the administrative territorial entity"))
         logits = {(keep[h], keep[t]): lg for (h, t), lg in zip(pairs, o["relation"])}
         for (h, t), lg in logits.items():
-            above = [k for k in np.argsort(-lg[1:])[:4] if lg[k + 1] > lg[0] - offset]
+            above = [k for k in np.argsort(-lg[1:])[:4] if lg[k + 1] > lg[0] - offset[k]]
             pred = {names[k] for k in above}
             top = names[int(np.argmax(lg[1:]))]
             g = gold.get((h, t), set())
@@ -180,7 +180,31 @@ def relations(model, tok, spec, vocab, device) -> dict:
                 by[key]["pred"] += len(pred)
     return {"counts": dict(c), "by": {k: dict(v) for k, v in by.items()},
             "confusions": [(a, b, n) for (a, b), n in confusions.most_common(25)],
-            "per_relation": {r: dict(v) for r, v in per_rel.items()}, "offset": offset}
+            "per_relation": {r: dict(v) for r, v in per_rel.items()}, "offset": "per relation"}
+
+
+def summarise(d: dict) -> list[str]:
+    c = d["counts"]
+    fn = c.get("fn_threshold", 0) + c.get("fn_confused", 0) + c.get("fn_pair_missed", 0)
+    fp = c.get("fp_confused", 0) + c.get("fp_reversed", 0) + c.get("fp_spurious", 0)
+    g = c.get("tp", 0) + fn
+    out = [f"ERR gold {g} tp {c.get('tp', 0)} missed {fn} ({fn / max(g, 1):.1%}): threshold "
+           f"{c.get('fn_threshold', 0)}, confused {c.get('fn_confused', 0)}, pair missed "
+           f"{c.get('fn_pair_missed', 0)}; false {fp}: confused {c.get('fp_confused', 0)}, "
+           f"reversed {c.get('fp_reversed', 0)}, spurious pair {c.get('fp_spurious', 0)}"]
+
+    def f1(x):
+        return 2 * x.get("tp", 0) / max(x.get("pred", 0) + x.get("gold", 0), 1)
+    out.append("ERR distance: " + "  ".join(f"{k} F1 {f1(d['by'][k]):.3f} (n {d['by'][k].get('gold', 0)})"
+                                           for k in ("same", "adjacent", "2+ apart") if k in d["by"]))
+    out.append("ERR inferable vs direct recall: " + "  ".join(
+        f"{k} {d['by'][k].get('tp', 0) / max(d['by'][k].get('gold', 1), 1):.3f}"
+        for k in ("inferable", "direct") if k in d["by"]))
+    pr = sorted(d["per_relation"].items(), key=lambda kv: -(kv[1].get("fn", 0) + kv[1].get("fp", 0)))[:8]
+    out.append("ERR worst relations: " + "; ".join(
+        f"{r} (tp {v.get('tp', 0)}, fn {v.get('fn', 0)}, fp {v.get('fp', 0)})" for r, v in pr))
+    out.append("ERR top confusions: " + "; ".join(f"{a} -> {b} ({n})" for a, b, n in d["confusions"][:10]))
+    return out
 
 
 def main() -> int:
@@ -199,6 +223,8 @@ def main() -> int:
         res["coref"] = coref(model, tok, spec, vocab, device)
     if args.part in ("relations", "both"):
         res["relations"] = relations(model, tok, spec, vocab, device)
+        for line in summarise(res["relations"]):
+            print(line, flush=True)
     out = args.out or Path(f"error-analysis-{args.run}.json")
     out.write_text(json.dumps(res, indent=1, default=str))
     print(f"wrote {out}", flush=True)

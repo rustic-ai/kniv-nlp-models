@@ -1045,8 +1045,9 @@ POST_JOBS = {
     "zs": "python -m v6.train.zs_protocol --runs {ev}",
     "span": "python -m v6.train.span_eval --runs {ev} --describe --calibrate-on crossner_politics",
     "rb": "python -m v6.train.rel_breakdown --runs {ev}",
+    "err": "python -m v6.train.error_analysis --run {ev} --part relations --out /content/err-{ev}.json",
 }
-POST_LINES = r"rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
+POST_LINES = r"ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
 
 POST_START = r'''
 import json, os, subprocess, sys
