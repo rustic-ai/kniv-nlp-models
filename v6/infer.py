@@ -59,6 +59,19 @@ class Extractor:
         # Re-DocRED dev (gold_eval redocred_dev_oracle).
         self.entity_coref = cal.get("entity_coref", "all")
         self.link_threshold = float(cal.get("link_threshold", 0.5))
+        # Decoding chosen on dev (gold_eval): per-relation threshold offsets
+        # for relations the bank knows from Re-DocRED (others keep the
+        # label-path offset), facts per pair, the entity head's O bias and
+        # the coreference link bias.
+        from .label_bank import load as _load_bank
+        rd = {r["name"] for r in _load_bank()["relations"] if r["source"] == "redocred"}
+        # Re-DocRED relations: their own offset, else the global one tuned
+        # with them; any other relation: 0 (the label path's own threshold).
+        self.rel_offsets = {n: float(cal.get("rel_offset", 0.0)) for n in rd} if "rel_offset" in cal else {}
+        self.rel_offsets.update(cal.get("rel_offsets") or {})
+        self.top = int(cal.get("rel_top", 4))
+        self.ent_o_bias = float(cal.get("ent_o_bias", 0.0))
+        self.model.coref_link_bias = float(cal.get("coref_link_bias", 0.0))
         from .label_bank import load as load_bank
         self.bank_ids = {r["name"]: r["id"] for r in load_bank()["relations"]}
         self.frozen_path = True
@@ -103,7 +116,9 @@ class Extractor:
                 ner.append(tags if s < W else None)
         else:
             allowed, start = bio_constraints(ENT_TAGS)
-            ner = [[ENT_TAGS[x] for x in viterbi(o["ent"][s:min(e, W)], allowed, start)]
+            lp = o["ent"].copy()
+            lp[:, 0] += self.ent_o_bias                 # ENT_TAGS[0] is O
+            ner = [[ENT_TAGS[x] for x in viterbi(lp[s:min(e, W)], allowed, start)]
                    if s < W else None for s, e in sp]
         link = None
         if getattr(self.model, "linker", None) is not None and o.get("link_words") is not None:
@@ -168,8 +183,9 @@ class Extractor:
         o = self.model(b, relation_only=True)
         lg = o["relation"].float().cpu().numpy()
         facts = []
+        off = np.array([self.rel_offsets.get(r["name"], 0.0) for r in relations])
         for (h, t), row in zip(zip(b["pair_h"].tolist(), b["pair_t"].tolist()), lg):
-            m = row[1:] - row[0]
+            m = row[1:] - row[0] + off
             for k in np.argsort(-m)[:top]:
                 if m[k] > 0:
                     facts.append({"head": h, "relation": relations[k]["name"], "tail": t,
@@ -177,11 +193,11 @@ class Extractor:
         return nodes, facts
 
     def extract(self, text: str | None = None, turns=None, relations: list[dict] = (),
-                entity_types: list[dict] | None = None, top: int = 4) -> list[dict]:
+                entity_types: list[dict] | None = None, top: int | None = None) -> list[dict]:
         types = [t["name"] for t in entity_types] if entity_types else None
         out = []
         for w in self.windows(text, turns):
             ents = self._entities(w, types)
-            nodes, facts = self._relations(w, ents, list(relations), top)
+            nodes, facts = self._relations(w, ents, list(relations), top or self.top)
             out.append({"tokens": w["tokens"], "entities": nodes, "facts": facts})
         return out

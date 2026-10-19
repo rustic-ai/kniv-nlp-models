@@ -496,7 +496,7 @@ def schema_embeddings(model, tok, device, cols: list[int] | None = None):
 
 @torch.no_grad()
 def run_phase2(model, feats: list[dict], tok, device, batch: int = 4,
-               cols: list[int] | None = None) -> list[dict]:
+               cols: list[int] | None = None, coref_bias: float | None = None) -> list[dict]:
     """Per window: predicted coref clusters (inclusive word spans), relation
     logits per ordered entity pair, and NER log-probabilities."""
     order = sorted(range(len(feats)), key=lambda i: len(feats[i]["input_ids"]))
@@ -516,7 +516,12 @@ def run_phase2(model, feats: list[dict], tok, device, batch: int = 4,
             b["rel_label_emb"] = label_emb
             b["rel_label_cols"] = label_cols     # the hybrid routes columns by bank id
         o = model(b, predict=False, predict_heads=True)
-        best = o["coref_scores"].argmax(-1).cpu()                    # [B,W]
+        # A positive bias on the dummy "no antecedent" column links less
+        # (calibration.json coref_link_bias, chosen on GUM dev).
+        cb = getattr(model, "coref_link_bias", 0.0) if coref_bias is None else coref_bias
+        sc = o["coref_scores"].float().clone()
+        sc[..., 0] += cb
+        best = sc.argmax(-1).cpu()                                     # [B,W]
         cand = o["coref_cand"].cpu()
         rel = (o["relation"].float().cpu().numpy() if "relation" in o
                else np.zeros((0, model.sizes["relations"] + 1), dtype=np.float32))
@@ -559,6 +564,9 @@ def filter_clusters(tokens, clusters, mode: str):
     return [c for c in clusters if any(kind(tokens, tuple(m)) != "nominal" for m in c)]
 
 
+COREF_BIASES = (-1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0)
+
+
 def eval_gum_coref(model, tok, spec, vocab, device, limit) -> dict:
     """GUM dev (person / place / organization chains, licence-cleared genres):
     CoNLL-F1 per window for every cluster filter -- the dev set coreference
@@ -568,17 +576,20 @@ def eval_gum_coref(model, tok, spec, vocab, device, limit) -> dict:
     rows = gum_rows("dev")[:limit] if limit else gum_rows("dev")
     feats = [phase2_window(r["tokens"], [tuple(x) for x in r["sentence_spans"]], tok, spec, vocab)
              for r in rows]
-    outs = run_phase2(model, feats, tok, device)
-    items = []
-    for r, f, o in zip(rows, feats, outs):
-        gold = [[tuple(m) for m in c if m[1] < f["_W"]] for c in r["coref"]]
-        gold = [c for c in gold if len(c) >= 2]
-        row = {}
-        for mode in COREF_FILTERS:
-            pred = filter_clusters(r["tokens"], o["coref"], mode)
-            row[f"gum_conll_{mode}"] = [conll_f1(gold, pred)["conll_f1"] if gold else 1.0, 1]
-        items.append(row)
-    return {"items": items, "kinds": {f"gum_conll_{m}": "acc" for m in COREF_FILTERS}}
+    items = [{} for _ in rows]
+    for cb in COREF_BIASES:
+        outs = run_phase2(model, feats, tok, device, coref_bias=cb)
+        for row, r, f, o in zip(items, rows, feats, outs):
+            gold = [[tuple(m) for m in c if m[1] < f["_W"]] for c in r["coref"]]
+            gold = [c for c in gold if len(c) >= 2]
+            for mode in COREF_FILTERS:
+                if mode != "none" and cb != 0.0:
+                    continue
+                pred = filter_clusters(r["tokens"], o["coref"], mode)
+                key = f"gum_conll_{mode}" if cb == 0.0 else f"gum_conll_b{cb}"
+                row[key] = [conll_f1(gold, pred)["conll_f1"] if gold else 1.0, 1]
+    keys = sorted(items[0])
+    return {"items": items, "kinds": {k: "acc" for k in keys}}
 
 
 def eval_litbank(model, tok, spec, vocab, device, limit) -> dict:
@@ -675,8 +686,12 @@ def calibrate_offset(model, tok, spec, vocab, device) -> float:
     return calibrate_offsets(model, tok, spec, vocab, device)[0]
 
 
+ENT_BIASES = (-1.0, -0.5, 0.5, 1.0)
+REL_TOPS = (2, 3, 6)
+
+
 def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
-                  split: str = "test", hybrid: bool = False) -> dict:
+                  split: str = "test", hybrid: bool = False, decode_grid: bool = False) -> dict:
     """Re-DocRED test (documents up to 512 words).
 
     ``rel_f1``: gold entities given, micro triple-F1 -- the teacher ATLOP's
@@ -722,14 +737,28 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
     from .data import ENT_TAGS
     ent_allowed, ent_start = bio_constraints(ENT_TAGS)
     rows, feats2, order2 = [], [], []
+    # Deployed decoding (calibration.json, chosen on dev): facts per pair and
+    # a bias on the entity head's O tag (positive: fewer, surer mentions).
+    top = int(getattr(model, "rel_top", 4))
+    ent_b = float(getattr(model, "ent_o_bias", 0.0))
+
+    def ent_tags(o, sp, W, bias):
+        lp = o["ent"].copy()
+        lp[:, 0] += bias                          # ENT_TAGS[0] is O
+        return [[ENT_TAGS[x] for x in viterbi(lp[s:min(e, W)], ent_allowed, ent_start)]
+                if s < W else None for s, e in sp]
     for n, (it, f, o) in enumerate(zip(items, feats, outs)):
         keep = f["_ent_keep"]
         gold = {tuple(x) for x in it.layers["rel"]}
         row = {}
+        tops = [("", top)] + ([(f"_top{k}", k) for k in REL_TOPS] if decode_grid else [])
         for key, off in (("rel_f1", 0.0), ("rel_f1_cal", offset), ("rel_f1_relcal", rel_off)):
-            pred = relation_triples(o["relation"], _pairs(len(keep)), names, offset=off)
-            pred = {(keep[h], keep[t], r) for h, t, r in pred}
-            row[key] = [len(pred & gold), len(pred), len(gold)]
+            for suffix, k in tops:
+                if suffix and key != "rel_f1_relcal":
+                    continue
+                pred = relation_triples(o["relation"], _pairs(len(keep)), names, top=k, offset=off)
+                pred = {(keep[h], keep[t], r) for h, t, r in pred}
+                row[key + suffix] = [len(pred & gold), len(pred), len(gold)]
         row["rel_reach"] = [sum(h in keep and t in keep for h, t, _ in gold), len(gold)]
         row["_offset"] = offset
         rows.append(row)
@@ -738,8 +767,7 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
         W = f["_W"]
         sp = [tuple(x) for x in it.layers["sentence_spans"]]
         if o["ent"] is not None:
-            ner = [[ENT_TAGS[x] for x in viterbi(o["ent"][s:min(e, W)], ent_allowed, ent_start)]
-                   if s < W else None for s, e in sp]
+            ner = ent_tags(o, sp, W, ent_b)
         else:
             ner = [[tags[x] for x in viterbi(o["ner"][s:min(e, W)], allowed, start)]
                    if s < W else None for s, e in sp]
@@ -755,6 +783,9 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
                                     ("hybrid", getattr(model, "link_threshold", 0.95)))}
         else:
             modes = {"rel_e2e_f1": (ner, o["coref"], rule, False)}
+        if decode_grid and o["ent"] is not None:
+            for b in ENT_BIASES:
+                modes[f"rel_e2e_entb{b}"] = (ent_tags(o, sp, W, b), o["coref"], rule, False)
         if hybrid:
             modes = {"rel_e2e_f1": (ner, o["coref"], rule, False)}
             for thr in HYBRID_THRESHOLDS:
@@ -837,6 +868,8 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
     if getattr(model, "linker", None) is not None:
         GRID += [f"rel_e2e_link{thr}" for thr in LINK_THRESHOLDS]
     HYB = [f"rel_e2e_hybrid{thr}" for thr in HYBRID_THRESHOLDS] if hybrid else []
+    if decode_grid:
+        HYB += [f"rel_e2e_entb{b}" for b in ENT_BIASES]
     keys = ["rel_e2e_f1"] + (["rel_e2e_goldclust", "rel_e2e_goldment", *GRID] if oracle else []) + HYB
     deployed = rel_off if getattr(model, "rel_offsets", None) is not None else offset
     for r in rows:
@@ -854,11 +887,12 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
         gold = {tuple(x) for x in it.layers["rel"]}
 
         def score(off):
-            pred = relation_triples(o["relation"], _pairs(len(keep)), names, offset=off)
+            pred = relation_triples(o["relation"], _pairs(len(keep)), names, top=top, offset=off)
             mapped = {(match[h], match[t], r) for h, t, r in pred
                       if match[h] is not None and match[t] is not None and match[h] != match[t]}
             return [len(mapped & gold), len(pred), len(gold)]
-        rows[n][key] = score(deployed if key == "rel_e2e_f1" else offset)
+        rows[n][key] = score(deployed if key == "rel_e2e_f1" or key.startswith("rel_e2e_entb")
+                             else offset)
         if key == "rel_e2e_f1":
             rows[n]["rel_e2e_relcal"] = score(rel_off)
         if key == "rel_e2e_f1":
@@ -869,6 +903,8 @@ def eval_redocred(model, tok, spec, vocab, device, limit, oracle: bool = False,
              "ent_mention_f1": "f1", "rel_e2e_f1": "f1", "rel_e2e_relcal": "f1",
              "rel_e2e_docs": "acc"}
     kinds.update({k: "f1" for k in HYB})
+    if decode_grid:
+        kinds.update({f"rel_f1_relcal_top{k}": "f1" for k in REL_TOPS})
     if oracle:
         kinds.update(rel_e2e_goldclust="f1", rel_e2e_goldment="f1", ent_split="acc",
                      ent_merged="acc", **{k: "f1" for k in GRID})
@@ -930,10 +966,11 @@ BENCHMARKS = {"ud": eval_ud, "srl": eval_srl, "srl_full": eval_srl_full,
               "redocred_oracle": lambda *a: eval_redocred(*a, oracle=True),
               "redocred_dev_oracle": lambda *a: eval_redocred(*a, oracle=True, split="dev"),
               "redocred_dev_hybrid": lambda *a: eval_redocred(*a, split="dev", hybrid=True),
+              "redocred_dev_decode": lambda *a: eval_redocred(*a, split="dev", decode_grid=True),
               "gum_coref": eval_gum_coref,
               "fewrel": eval_fewrel}
 PHASE2_BENCHMARKS = ("litbank", "gum_coref", "redocred", "redocred_oracle", "redocred_dev_oracle",
-                     "redocred_dev_hybrid", "fewrel")
+                     "redocred_dev_hybrid", "redocred_dev_decode", "fewrel")
 # Benchmarks that read label texts: only for label-conditioned heads.
 LABEL_BENCHMARKS = ("fewrel",)
 
@@ -1084,6 +1121,9 @@ def main() -> int:
         model.link_threshold = float(cal.get("link_threshold", 0.5))
         model.link_mode = cal.get("link_mode", "")
         model.coref_filter = cal.get("coref_filter", "none")
+        model.coref_link_bias = float(cal.get("coref_link_bias", 0.0))
+        model.ent_o_bias = float(cal.get("ent_o_bias", 0.0))
+        model.rel_top = int(cal.get("rel_top", 4))
         ro = cal.get("rel_offsets")
         model.rel_offsets = (np.array([ro.get(r, cal.get("rel_offset", 0.0))
                                        for r in vocab.labels["relations"]]) if ro else None)
