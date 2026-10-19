@@ -154,7 +154,7 @@ def gum_docs(split: str) -> list[dict]:
         raise SystemExit(f"{root} missing: sparse-clone github.com/amir-zeldes/gum (dep/)")
     rev = subprocess.run(["git", "-C", str(root.parent), "rev-parse", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
-    if rev != GUM_REV:
+    if (root.parent / ".git").exists() and rev != GUM_REV:     # a VM gets the files, no checkout
         raise SystemExit(f"GUM checkout {rev[:10]} is not the pinned {GUM_REV[:10]}")
     files = sorted(f for f in root.glob("GUM_*.conllu") if f.name.split("_")[1] in GUM_GENRES)
     dev = {f.name for g in GUM_GENRES for f in sorted(x for x in files if x.name.split("_")[1] == g)[:2]}

@@ -1034,7 +1034,8 @@ EVAL_DATA = ["benchmarks", "crossner", "fewnerd", "fewrel", "litbank", "prepared
              "re-docred/rel_info_desc.json", "re-docred/rel_info.json",
              "prepared/kniv-deberta-cascade/srl_train.json",
              "prepared/kniv-deberta-cascade/srl_dev.json",
-             "prepared/kniv-deberta-cascade/srl_test.json", "trex/property_counts.json"]
+             "prepared/kniv-deberta-cascade/srl_test.json", "trex/property_counts.json",
+             "gum/repo/dep"]
 
 POST_PIP = ["conllu>=4.5", "pandas"]     # seqeval no longer builds on Colab; v6 does not use it
 SGD_REVISION = "a8029ad8c12e13cdbfefc2f649e245fa135bc98a"
