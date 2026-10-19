@@ -564,7 +564,7 @@ def filter_clusters(tokens, clusters, mode: str):
     return [c for c in clusters if any(kind(tokens, tuple(m)) != "nominal" for m in c)]
 
 
-COREF_BIASES = (-1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0)
+COREF_BIASES = (-1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
 
 
 def eval_gum_coref(model, tok, spec, vocab, device, limit) -> dict:
