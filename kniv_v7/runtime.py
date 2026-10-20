@@ -551,7 +551,9 @@ class Kniv:
             names = [t["name"] for t in entity_types]
             cands = span_candidates(sent, wm)
             if cands:
-                temb = self.label_emb([type_text({"name": n, "description": ""}) for n in names])
+                # "entity type: <name>. <description>", as the span head trained
+                # (no description: the name alone)
+                temb = self.label_emb([type_text(t) for t in entity_types])
                 lg = self.run("span", span_words=o["span_words"],
                               start=np.asarray([s for s, _ in cands], dtype=np.int64),
                               end=np.asarray([e for _, e in cands], dtype=np.int64), type_emb=temb)[0]
