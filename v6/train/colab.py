@@ -218,7 +218,7 @@ def vm_exec(sess: str, code: str, timeout: float = 600, check: bool = True):
 
 # ── bundles ─────────────────────────────────────────────────────────
 def build_bundles() -> tuple[Path, Path, str]:
-    dirty = sh(["git", "-C", str(REPO), "status", "--porcelain", "--", "v6"],
+    dirty = sh(["git", "-C", str(REPO), "status", "--porcelain", "--", "v6", "kniv_v7"],
                quiet=True).stdout.strip()
     if dirty:
         raise SystemExit("v6/ has uncommitted changes; commit them so the run "
@@ -230,7 +230,7 @@ def build_bundles() -> tuple[Path, Path, str]:
     if not code.exists():
         part = code.with_name(f"{code.name}.{os.getpid()}.part")
         sh(["git", "-C", str(REPO), "archive", "--format=tar.gz", "-o", str(part),
-            "HEAD", "v6", "pyproject.toml"], quiet=True)
+            "HEAD", "v6", "kniv_v7", "pyproject.toml"], quiet=True)
         part.rename(code)
     corpus = DATA_DIR / "v6-corpus"
     vocab = corpus / "vocab.json"

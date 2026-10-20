@@ -197,7 +197,10 @@ def dump(args) -> int:
     release = {"ultrabert-380m-v7b8ev": "release/ultrabert-380m",
                "deberta-v3-large-v7b8ev": "release/deberta-v3-large"}
     rel_dir = Path(args.release or release[args.run])
-    sys.path.insert(0, str(rel_dir))
+    if not (rel_dir / "onnx" / "onnx_meta.json").exists():       # a VM: build what the runtime needs
+        from ..export.release_dir import minimal
+        minimal(args.run, rel_dir)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))      # kniv_v7 from the repository
     from kniv_v7 import Kniv
     from ..export.torch_backend import TorchBackend
     torch.set_grad_enabled(False)

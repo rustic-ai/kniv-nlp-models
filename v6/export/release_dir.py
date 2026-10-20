@@ -87,6 +87,31 @@ def assemble(run: str, out: Path, onnx: bool) -> None:
             raise SystemExit("ONNX parity failed")
 
 
+def minimal(run: str, out: Path) -> Path:
+    """What the runtime needs to run ``run`` on PyTorch graphs (no ONNX):
+    ``onnx/onnx_meta.json`` (graph inputs and outputs, labels, tokenizer
+    ids), tokenizer, calibration and label bank. For VMs that run teachers."""
+    from huggingface_hub import hf_hub_download
+    from transformers import AutoTokenizer
+    from .onnx_v7 import SPEC
+    ck = torch.load(Path(hf_hub_download(HF_REPO, f"{run}/best.pt", local_dir=str(CKPT_DIR))),
+                    map_location="cpu", weights_only=False)
+    enc = ck["encoder"]
+    tok = AutoTokenizer.from_pretrained(enc["hf_id"], trust_remote_code=enc.get("trust_remote_code", False))
+    (out / "onnx").mkdir(parents=True, exist_ok=True)
+    tok.save_pretrained(out)
+    meta = {"run": run, "encoder": enc["hf_id"], "max_subwords": enc["max_subwords"],
+            "graphs": {k: {"inputs": v[0], "outputs": v[1]} for k, v in SPEC.items()},
+            "labels": ck["vocab"]["labels"], "pad_token_id": tok.pad_token_id,
+            "sep_token_id": tok.sep_token_id}
+    (out / "onnx" / "onnx_meta.json").write_text(json.dumps(meta))
+    cal = json.loads(Path(hf_hub_download(HF_REPO, f"{run}/calibration.json")).read_text())
+    cal.pop("notes", None)
+    (out / "calibration.json").write_text(json.dumps(cal))
+    (out / "label_bank.json").write_text(json.dumps(public_bank()))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--run", required=True)
