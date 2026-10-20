@@ -228,8 +228,10 @@ def build_bundles() -> tuple[Path, Path, str]:
     BUNDLE.mkdir(parents=True, exist_ok=True)
     code = BUNDLE / f"code-{sha}.tar.gz"
     if not code.exists():
-        sh(["git", "-C", str(REPO), "archive", "--format=tar.gz", "-o", str(code),
+        part = code.with_name(f"{code.name}.{os.getpid()}.part")
+        sh(["git", "-C", str(REPO), "archive", "--format=tar.gz", "-o", str(part),
             "HEAD", "v6", "pyproject.toml"], quiet=True)
+        part.rename(code)
     corpus = DATA_DIR / "v6-corpus"
     vocab = corpus / "vocab.json"
     if not vocab.exists():
@@ -250,9 +252,13 @@ def build_bundles() -> tuple[Path, Path, str]:
                                 for p in [vocab, *extra]).encode()).hexdigest()[:10]
     data = BUNDLE / f"corpus-{stamp}-{sig}.tar.gz"
     if not data.exists():
-        with tarfile.open(data, "w:gz") as t:
+        # Written under a temporary name and renamed: a second launcher
+        # started meanwhile must not find, and upload, a half-written bundle.
+        part = data.with_name(f"{data.name}.{os.getpid()}.part")
+        with tarfile.open(part, "w:gz") as t:
             for p in [corpus / "corpus", vocab, corpus / "MANIFEST.json", *extra]:
                 t.add(p, arcname=str(p.relative_to(REPO)))
+        part.rename(data)
     print(f"bundles: {code.name} ({code.stat().st_size >> 10} KB), "
           f"{data.name} ({data.stat().st_size >> 20} MB)")
     return code, data, sha
