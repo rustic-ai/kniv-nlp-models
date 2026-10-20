@@ -108,6 +108,11 @@ knowledge against a schema you supply at inference time.
 A sibling model, [{other}](https://huggingface.co/{org}/{other}), shares the
 design. Choose this one if you want {choose}.
 
+**[GUIDE.md](GUIDE.md)** compares the two models task by task, lists the
+failure modes the evaluations found, and shows how to work around each one
+in your own code (schema design, thresholds, entity handling,
+conversations, long inputs).
+
 ## Model details
 
 | | |

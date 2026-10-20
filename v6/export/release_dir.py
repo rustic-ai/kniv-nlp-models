@@ -38,6 +38,9 @@ def assemble(run: str, out: Path, onnx: bool) -> None:
     tok = AutoTokenizer.from_pretrained(ck["encoder"]["hf_id"],
                                         trust_remote_code=ck["encoder"].get("trust_remote_code", False))
     tok.save_pretrained(out)
+    guide = (REPO / "docs" / "v7-strengths-and-workarounds.md").read_text()
+    (out / "GUIDE.md").write_text(guide.replace(
+        "(v7-stage-b.md)", "(https://github.com/rustic-ai/kniv-nlp-models/blob/main/docs/v7-stage-b.md)"))
     pkg = out / "kniv_v7"
     if pkg.exists():
         shutil.rmtree(pkg)
