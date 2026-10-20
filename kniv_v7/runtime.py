@@ -43,21 +43,28 @@ SPAN_MAX_WIDTH = 12
 
 # ── backends ─────────────────────────────────────────────────────────
 class OnnxBackend:
-    """The eight graphs in onnxruntime. ``int8``: the quantised encoder
-    graphs (``plain``, ``label``, ``marker``) where present."""
+    """The eight graphs in onnxruntime. ``variant="fp16"``: the encoder
+    graphs in half precision; ``int8=True``: ``plain`` and ``marker`` in
+    INT8 (feed-forward down-projections fp32), ``label`` in FP16."""
 
     def __init__(self, onnx_dir: Path, int8: bool = False, providers=None, variant: str | None = None):
         import onnxruntime as ort
         self.dir = Path(onnx_dir)
-        self.variant = variant or ("int8" if int8 else None)
+        # int8: the INT8 encoder graphs, the label graph (run once per schema)
+        # in FP16.
+        self.variant = variant or ("int8,fp16" if int8 else None)
         self.providers = providers or ["CPUExecutionProvider"]
         self._ort, self._sess = ort, {}
 
     def _session(self, name: str):
         if name not in self._sess:
-            path = self.dir / f"{name}-{self.variant}.onnx"
-            if not (self.variant and path.exists()):
-                path = self.dir / f"{name}.onnx"
+            # ``variant``: a suffix, or a fallback chain ("int8,fp16"): the
+            # first that exists for this graph, else the fp32 graph.
+            path = self.dir / f"{name}.onnx"
+            for v in (self.variant or "").split(","):
+                if v and (self.dir / f"{name}-{v}.onnx").exists():
+                    path = self.dir / f"{name}-{v}.onnx"
+                    break
             self._sess[name] = self._ort.InferenceSession(str(path), providers=self.providers)
         return self._sess[name]
 
