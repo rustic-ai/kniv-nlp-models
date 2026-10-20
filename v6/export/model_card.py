@@ -196,10 +196,21 @@ FewRel's unseen relations are a fixed set removed from every training
 source, so the protocol is comparable in task and metric, not in which
 relations are unseen.
 
-The ONNX graphs are fp32. Standard INT8 and FP16 conversions did not hold
-accuracy (dynamic INT8 cost up to 58 points on relations; see
-[the release notes]({github}/blob/main/docs/v7-release-plan.md)), so no
-compressed variant is provided yet.
+**FP16.** `onnx/*-fp16.onnx` are the three encoder graphs exported in half
+precision (the heads stay fp32). Use them with `Kniv(path, variant="fp16")`.
+On the release's dev subsets they match fp32 to within 0.001 (UD POS and LAS,
+Re-DocRED relations, CrossNER spans), at half the size. They are for download
+size and GPUs (`providers=["CUDAExecutionProvider"]`); on CPU they are no
+faster than fp32. To download only what FP16 needs:
+
+```python
+path = snapshot_download("{org}/{repo}", ignore_patterns=[
+    "model.pt", "onnx/plain.onnx", "onnx/label.onnx", "onnx/marker.onnx"])
+kniv = Kniv(path, variant="fp16")
+```
+
+No INT8 variant is provided: dynamic INT8 cost up to 56 points on relations
+([release notes]({github}/blob/main/docs/v7-release-plan.md)).
 
 ### Agent memory (LongMemEval, oracle sessions, 150 questions)
 
