@@ -73,6 +73,26 @@ ENCODERS: dict[str, EncoderSpec] = {s.name: s for s in [
     EncoderSpec("ettin-17m", "jhu-clsp/ettin-encoder-17m",
                 max_subwords=1024, encoder_lr=1e-4, batch_size=4,
                 grad_accum=1, grad_checkpointing=False),
+    # v7 student candidates (docs/v7-students-plan.md): ~150M, ~30-70M, ~17M.
+    # Learning rates follow each family's v7 setting (Ettin, DeBERTa,
+    # UltraBERT) or its authors' fine-tuning range (ModernBERT).
+    EncoderSpec("ettin-17m-s", "jhu-clsp/ettin-encoder-17m",
+                max_subwords=1024, encoder_lr=2.8e-4, grad_checkpointing=False),
+    EncoderSpec("ettin-32m", "jhu-clsp/ettin-encoder-32m",
+                max_subwords=1024, encoder_lr=2.8e-4, grad_checkpointing=False),
+    EncoderSpec("ettin-68m", "jhu-clsp/ettin-encoder-68m",
+                max_subwords=1024, encoder_lr=2.8e-4, grad_checkpointing=False),
+    EncoderSpec("ettin-150m", "jhu-clsp/ettin-encoder-150m",
+                max_subwords=1024, encoder_lr=2.8e-4, grad_checkpointing=False),
+    EncoderSpec("modernbert-base", "answerdotai/ModernBERT-base",
+                max_subwords=1024, encoder_lr=8e-5, grad_checkpointing=False),
+    EncoderSpec("deberta-v3-small", "microsoft/deberta-v3-small",
+                max_subwords=512, encoder_lr=1e-4, grad_checkpointing=False),
+    EncoderSpec("deberta-v3-xsmall-s", "microsoft/deberta-v3-xsmall",
+                max_subwords=512, encoder_lr=1e-4, grad_checkpointing=False),
+    EncoderSpec("ultrabert-150m-s", "dmis-lab/UltraBERT-150M",
+                max_subwords=1024, encoder_lr=1e-4, attn_implementation="eager",
+                trust_remote_code=True, grad_checkpointing=False),
 ]}
 
 
