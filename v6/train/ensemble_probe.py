@@ -43,6 +43,7 @@ from .gold_eval import (HF_REPO, OFFSETS, REL_OFFSETS, MIN_DEV_FACTS, _pairs, lo
                         phase2_window, run_phase2)
 
 OUT = RUNS_DIR / "ensemble-probe"
+WEIGHTS = (0.25, 0.75)          # w * A + (1 - w) * B, besides A, B and the even average
 SEEDS = 5
 
 
@@ -243,6 +244,8 @@ def score_redocred(A: list[dict], B: list[dict], names: list[str]) -> dict:
     K = len(names)
     halves = [np.arange(len(A)) % 2 == 0, np.arange(len(A)) % 2 == 1]
     systems = {"A": A, "B": B, "avg": combine_docs(A, B)}
+    for w in WEIGHTS:
+        systems[f"w{w}"] = combine_docs(A, B, wa=w)
     preds = {s: [None] * len(A) for s in systems}
     for cal, ev in (halves, halves[::-1]):
         for s, docs in systems.items():
@@ -288,7 +291,7 @@ def score_fewrel(A: dict, B: dict) -> dict:
         return x - np.logaddexp.reduce(x, axis=1, keepdims=True)
     res = {}
     for name, seeds in splits.items():
-        f = {"A": [], "B": [], "avg": []}
+        f: dict[str, list] = {"A": [], "B": [], "avg": []}
         ov = np.zeros(4)
         for cs in seeds:
             sel = [pos[c] for c in cs]
@@ -298,6 +301,9 @@ def score_fewrel(A: dict, B: dict) -> dict:
             pa, pb, pe = (np.asarray(cs)[x.argmax(1)] for x in (la, lb, (la + lb) / 2))
             for s, p in (("A", pa), ("B", pb), ("avg", pe)):
                 f[s].append(macro(g.tolist(), p.tolist(), cs)["f1"])
+            for w in WEIGHTS:
+                pw = np.asarray(cs)[np.logaddexp(np.log(w + 1e-12) + la, np.log(1 - w + 1e-12) + lb).argmax(1)]
+                f.setdefault(f"w{w}", []).append(macro(g.tolist(), pw.tolist(), cs)["f1"])
             ca, cb = pa == g, pb == g
             ov += [(ca & cb).sum(), (ca & ~cb).sum(), (~ca & cb).sum(), (~ca & ~cb).sum()]
         res[name] = {s: float(np.mean(v)) for s, v in f.items()}
@@ -325,7 +331,7 @@ def decode(item: dict, offset: float) -> set:
     return out
 
 
-def combine_items(a: list[dict], b: list[dict]) -> list[dict]:
+def combine_items(a: list[dict], b: list[dict], wa: float = 0.5) -> list[dict]:
     out = []
     for x, y in zip(a, b):
         if not len(x.get("spans", [])) or not len(y.get("spans", [])):
@@ -334,8 +340,8 @@ def combine_items(a: list[dict], b: list[dict]) -> list[dict]:
         ky = {(int(s), int(e)): k for k, (s, e) in enumerate(y["spans"])}
         keep = [k for k, (s, e) in enumerate(x["spans"]) if (int(s), int(e)) in ky]
         sp = x["spans"][keep]
-        m = (x["margin"][keep].astype(np.float32)
-             + y["margin"][[ky[(int(s), int(e))] for s, e in sp]].astype(np.float32)) / 2
+        m = (wa * x["margin"][keep].astype(np.float32)
+             + (1 - wa) * y["margin"][[ky[(int(s), int(e))] for s, e in sp]].astype(np.float32))
         out.append({"spans": sp, "margin": m})
     return out
 
@@ -353,7 +359,9 @@ SPAN_OFFSETS = np.round(np.arange(-5.0, 1.01, 0.5), 2)
 
 def score_spans(A: dict, B: dict) -> dict:
     systems = {"A": {n: v["items"] for n, v in A.items()}, "B": {n: v["items"] for n, v in B.items()},
-               "avg": {n: combine_items(A[n]["items"], B[n]["items"]) for n in A}}
+               "avg": {n: combine_items(A[n]["items"], B[n]["items"]) for n in A},
+               **{f"w{w}": {n: combine_items(A[n]["items"], B[n]["items"], w) for n in A}
+                  for w in WEIGHTS}}
     res = {}
     for s, sets in systems.items():
         cal = "crossner_politics"
