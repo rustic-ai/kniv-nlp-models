@@ -76,6 +76,15 @@ def load_run(run: str, repo: str, device, local: Path | None = None) -> tuple:
         metric_path = hf_hub_download(repo, f"{run}/best.metric", local_dir=str(CKPT_DIR))
     metric = json.loads(Path(metric_path).read_text())
     ck = torch.load(path, map_location="cpu", weights_only=False)
+    model, tok, spec, vocab = model_from_checkpoint(ck, device)
+    return model, tok, spec, vocab, metric
+
+
+def model_from_checkpoint(ck: dict, device) -> tuple:
+    """``(model, tokenizer, encoder spec, vocab)`` from a loaded ``best.pt``
+    (or a release's ``model.pt``)."""
+    from transformers import AutoTokenizer
+    from .model import V6Model
     spec = EncoderSpec(**ck["encoder"])
     vocab = Vocab.from_json(ck["vocab"])
     cfg = ck.get("model_config") or {}
@@ -101,7 +110,7 @@ def load_run(run: str, repo: str, device, local: Path | None = None) -> tuple:
     model.load_state_dict(ck["model"])          # strict: a mismatch raises
     model.to(device).eval()
     tok = AutoTokenizer.from_pretrained(spec.hf_id)
-    return model, tok, spec, vocab, metric
+    return model, tok, spec, vocab
 
 
 def window(tokens: list[str], spans: list[tuple[int, int]], tok, spec,

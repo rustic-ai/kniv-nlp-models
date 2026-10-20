@@ -4,7 +4,7 @@ with its ``model.pt``.
 
     from kniv_v7 import Kniv
     from v6.export.torch_backend import TorchBackend
-    k = Kniv("release/ultrabert-380m", backend=TorchBackend.load("ultrabert-380m-v7b8ev"))
+    k = Kniv(path, backend=TorchBackend.from_release(path))    # a release directory
 """
 from __future__ import annotations
 
@@ -27,6 +27,14 @@ class TorchBackend:
     def load(cls, run: str, local: Path | None = Path("data/v6-eval/checkpoints"), device=None):
         from ..train.gold_eval import HF_REPO, load_run
         model, *_ = load_run(run, HF_REPO, torch.device("cpu"), local)
+        return cls(model, device)
+
+    @classmethod
+    def from_release(cls, path, device=None):
+        """From a release directory's ``model.pt``."""
+        from ..train.gold_eval import model_from_checkpoint
+        ck = torch.load(Path(path) / "model.pt", map_location="cpu", weights_only=False)
+        model, *_ = model_from_checkpoint(ck, torch.device("cpu"))
         return cls(model, device)
 
     @torch.no_grad()
