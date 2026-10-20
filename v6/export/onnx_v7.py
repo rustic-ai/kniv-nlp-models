@@ -23,7 +23,7 @@ from ..train.data import collate
 from ..train.gold_eval import HF_REPO, load_run, phase2_window, window
 from .check_graphs import diff, plain_inputs, windows
 from ..train.model import NEG
-from .graphs import COREF_K, GRAPHS
+from .graphs import COREF_K, GRAPHS, halve
 
 TOL = 2e-3
 OPSET = 17
@@ -127,6 +127,46 @@ def coref_diff(sa, ca, sb, cb) -> float:
     return worst
 
 
+def export_fp16(run: str, local: Path | None, out: Path) -> int:
+    """The encoder graphs (``plain``, ``label``, ``marker``) with their encoder
+    copy in fp16, as ``<graph>-fp16.onnx``; compared with the fp32 PyTorch
+    graphs on the parity windows (reported, not gated: the gate is accuracy,
+    ``int8_eval --variants fp16``)."""
+    import onnxruntime as ort
+    torch.backends.mha.set_fastpath_enabled(False)
+    model, tok, spec, vocab, _ = load_run(run, HF_REPO, torch.device("cpu"), local)
+    g32 = {k: v(model).eval() for k, v in GRAPHS.items()}
+    from ..label_bank import load as load_bank
+    rels = [r for r in load_bank()["relations"] if r["source"] == "redocred"][:12]
+    ws = windows()
+    example = inputs_for(g32, model, tok, spec, vocab, ws[-1], rels)
+    worst: dict[str, float] = {}
+    for name in ENCODER_GRAPHS:
+        ins, outs, axes = SPEC[name]
+        g16 = halve(GRAPHS[name](model).eval())
+        path = out / f"{name}-fp16.onnx"
+        torch.onnx.export(g16, example[name], path, input_names=ins, output_names=outs,
+                          dynamic_axes=axes, opset_version=OPSET, dynamo=False, external_data=True)
+        print(f"exported {path.name}", flush=True)
+        sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+        want = {i.name for i in sess.get_inputs()}
+        for w in ws[:-1]:
+            inp = inputs_for(g32, model, tok, spec, vocab, w, rels)
+            with torch.no_grad():
+                ref = g32[name](*inp[name])
+            ref = ref if isinstance(ref, tuple) else (ref,)
+            got = sess.run(None, {k: v.numpy() for k, v in zip(ins, inp[name]) if k in want})
+            for o, a, r in zip(outs, got, ref):
+                if o in ("coref_cand",):
+                    continue
+                worst[f"{name}.{o}"] = max(worst.get(f"{name}.{o}", 0.0),
+                                           diff(torch.from_numpy(np.asarray(a)), r))
+        del g16
+    for k, v in sorted(worst.items()):
+        print(f"fp16 {k:28s} max |diff| {v:.2e}")
+    return 0
+
+
 def export(run: str, local: Path | None, out: Path, int8: bool) -> int:
     import onnxruntime as ort
     torch.backends.mha.set_fastpath_enabled(False)
@@ -190,7 +230,10 @@ def main() -> int:
     ap.add_argument("--local", type=Path)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--int8", action="store_true")
+    ap.add_argument("--fp16", action="store_true", help="export only the fp16 encoder graphs")
     args = ap.parse_args()
+    if args.fp16:
+        return export_fp16(args.run, args.local, args.out)
     return export(args.run, args.local, args.out, args.int8)
 
 

@@ -351,5 +351,32 @@ class Attr(nn.Module):
         return o["polarity"], o["modality"], o["holder"], o["time"]
 
 
+class HalfEncoder(nn.Module):
+    """An encoder copy run in fp16, its outputs returned in fp32 (the heads
+    stay fp32): the FP16 export. The encoders' own code keeps normalisation
+    in fp32, which UltraBERT's large activations (up to ~3,800 in the
+    residual stream) need."""
+
+    def __init__(self, enc: nn.Module):
+        super().__init__()
+        self.enc = enc.half()
+        self.config = enc.config
+
+    def forward(self, **kw):
+        from types import SimpleNamespace
+        o = self.enc(**kw)
+        f = lambda t: None if t is None else tuple(x.float() for x in t)
+        return SimpleNamespace(last_hidden_state=o.last_hidden_state.float(),
+                               hidden_states=f(getattr(o, "hidden_states", None)),
+                               attentions=f(getattr(o, "attentions", None)))
+
+
+def halve(graph: nn.Module) -> nn.Module:
+    """``graph`` with its encoder copy in fp16 (graphs without one unchanged)."""
+    if hasattr(graph, "enc"):
+        graph.enc = HalfEncoder(graph.enc)
+    return graph
+
+
 GRAPHS = {"plain": Plain, "dep_rel": DepRel, "srl_roles": SrlRoles, "coref_spans": CorefSpans,
           "label": Label, "span": Span, "marker": Marker, "attr": Attr}
