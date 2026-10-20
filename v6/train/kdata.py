@@ -350,7 +350,7 @@ class TypeCollator:
                 if types and not hit:                 # its types fell outside the columns
                     m[:] = 0
                 elif x["partial"] and not types and self.train \
-                        and self.rng.random() >= self.unlabelled_keep:
+                        and self.rng.random() >= x.get("unlabelled_keep", self.unlabelled_keep):
                     m[:] = 0
                 sb.append(b); ss.append(s); se.append(e); lab.append(row); msk.append(m)
         L = torch.long

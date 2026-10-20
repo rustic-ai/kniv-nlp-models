@@ -521,6 +521,12 @@ def main() -> int:
                     help="relation distillation from the averaged teacher (kd_teacher merge: "
                          "data/v6-corpus/kd_teacher.pkl) on Re-DocRED train and its unseen "
                          "DocRED-distant documents; weight with --head-weight relation_distil=W")
+    ap.add_argument("--student-targets",
+                    help="distil from both v7 teachers (student_kd): directory with "
+                         "<teacher>/shard-*.pkl (fetched from the runs repo when missing)")
+    ap.add_argument("--student-weight", type=int, default=1,
+                    help="with --student-targets: copies of the student windows in the mix")
+    ap.add_argument("--student-limit", type=int, help="with --student-targets: at most this many windows")
     ap.add_argument("--distil-distant", type=int, default=1,
                     help="with --distil: copies of the teacher's DocRED-distant documents")
     ap.add_argument("--label-holdout", action="store_true",
@@ -697,6 +703,9 @@ def main() -> int:
     dev = (featurise(spec, "dev", vocab, tok, limit=args.dev_limit, srl_sentences=cond,
                      phase2=args.phase2) if not args.probe else [])
     heads = HEADS + (PHASE2_HEADS if args.phase2 else ())
+    if args.student_targets:
+        from .student_kd import KD_HEADS
+        heads = heads + KD_HEADS
     weight = dict(HEAD_WEIGHT)
     for hw in args.head_weight:
         h, _, w = hw.partition("=")
@@ -737,6 +746,27 @@ def main() -> int:
         train = train + dd * args.distil_distant
         print(f"distillation from {'+'.join(teacher['runs'])}: Re-DocRED train {n_rd:,} documents, "
               f"distant {n_dd:,} x{args.distil_distant}", flush=True)
+
+    if args.student_targets:
+        from ..label_bank import load as load_bank
+        from .student_kd import TEACHERS, build
+        from .student_targets import WINDOWS
+        st_dir = Path(args.student_targets)
+        if not all((st_dir / t).exists() for t in TEACHERS):
+            from huggingface_hub import snapshot_download
+            from .gold_eval import HF_REPO
+            snapshot_download(HF_REPO, allow_patterns=[f"{t}/student-targets/*" for t in TEACHERS],
+                              local_dir=str(st_dir.parent / "hub"))
+            st_dir = st_dir.parent / "hub"
+            paths = {t: sorted((st_dir / t / "student-targets").glob("shard-*.pkl")) for t in TEACHERS}
+        else:
+            paths = {t: sorted((st_dir / t).glob("shard-*.pkl")) for t in TEACHERS}
+        preparing("featurising the student windows")
+        sfeats = build(WINDOWS, paths, tok, spec, vocab, load_bank(), markers=args.rel_markers,
+                       limit=args.student_limit)
+        train = train + sfeats * args.student_weight
+        print(f"student windows: {len(sfeats):,} x{args.student_weight} from "
+              f"{', '.join(f'{t} {len(p)} shards' for t, p in paths.items())}", flush=True)
 
     kg_data = dict(x.split("=") for x in args.kg_data.split(",") if x)
     if args.kg_teacher:
@@ -1092,13 +1122,21 @@ def main() -> int:
             for m0 in range(start, per_epoch * spec.grad_accum, spec.grad_accum):
                 this, seen, bad = defaultdict(float), set(), []
                 for m in range(m0, m0 + spec.grad_accum):
-                    b = collate([train[i] for i in batches[m]], tok.pad_token_id)
-                    b = _to(label_coll(b) if label_coll is not None else b, device)
+                    items = [train[i] for i in batches[m]]
+                    b = collate(items, tok.pad_token_id)
+                    b = label_coll(b) if label_coll is not None else b
+                    if args.student_targets:
+                        from .student_kd import kd_collate
+                        b = kd_collate(items, b, vocab)
+                    b = _to(b, device)
                     try:
                         with amp():
                             o = model(b, relation_only=args.train_scope.startswith("relation")
                                       or args.train_scope == "knowledge-full")
                         L = losses(o, b)
+                        if args.student_targets:
+                            from .student_kd import student_losses
+                            L.update(student_losses(o, b))
                     except torch.OutOfMemoryError:
                         # One oversized batch must not end a run that fits
                         # otherwise: drop this step (like a non-finite one),
