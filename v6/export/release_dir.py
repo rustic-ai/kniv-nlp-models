@@ -6,7 +6,7 @@
 Writes ``model.pt`` (weights, vocabularies, encoder settings, model config),
 ``config.json``, ``calibration.json`` (from the runs repo), ``label_bank.json``,
 the tokenizer files and the ``kniv_v7`` runtime package; ``--onnx`` also runs
-the ONNX export into ``<out>/onnx`` (with INT8 copies).
+the ONNX export into ``<out>/onnx`` (fp32).
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def assemble(run: str, out: Path, onnx: bool) -> None:
     shutil.copytree(REPO / "kniv_v7", pkg, ignore=shutil.ignore_patterns("__pycache__"))
     if onnx:
         from .onnx_v7 import export
-        if export(run, CKPT_DIR, out / "onnx", int8=True):
+        if export(run, CKPT_DIR, out / "onnx", int8=False):
             raise SystemExit("ONNX parity failed")
 
 

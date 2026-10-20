@@ -43,6 +43,7 @@ llm = [
 ]
 export = [
     "onnx>=1.16",
+    "onnxconverter-common>=1.16.0",
     "onnxscript>=0.1",
 ]
 

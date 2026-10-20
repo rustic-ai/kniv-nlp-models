@@ -46,16 +46,17 @@ class OnnxBackend:
     """The eight graphs in onnxruntime. ``int8``: the quantised encoder
     graphs (``plain``, ``label``, ``marker``) where present."""
 
-    def __init__(self, onnx_dir: Path, int8: bool = False, providers=None):
+    def __init__(self, onnx_dir: Path, int8: bool = False, providers=None, variant: str | None = None):
         import onnxruntime as ort
-        self.dir, self.int8 = Path(onnx_dir), int8
+        self.dir = Path(onnx_dir)
+        self.variant = variant or ("int8" if int8 else None)
         self.providers = providers or ["CPUExecutionProvider"]
         self._ort, self._sess = ort, {}
 
     def _session(self, name: str):
         if name not in self._sess:
-            path = self.dir / f"{name}-int8.onnx"
-            if not (self.int8 and path.exists()):
+            path = self.dir / f"{name}-{self.variant}.onnx"
+            if not (self.variant and path.exists()):
                 path = self.dir / f"{name}.onnx"
             self._sess[name] = self._ort.InferenceSession(str(path), providers=self.providers)
         return self._sess[name]
@@ -375,13 +376,14 @@ class Kniv:
     ``calibration.json``, ``label_bank.json``), or any ``backend`` with the
     same graphs."""
 
-    def __init__(self, path, backend=None, int8: bool = False, providers=None):
+    def __init__(self, path, backend=None, int8: bool = False, providers=None,
+                 variant: str | None = None):
         self.path = Path(path)
         self.meta = json.loads((self.path / "onnx" / "onnx_meta.json").read_text())
         self.labels = self.meta["labels"]
         self.tok = Tok(self.path / "tokenizer.json", self.meta["pad_token_id"],
                        self.meta["sep_token_id"])
-        self.backend = backend or OnnxBackend(self.path / "onnx", int8, providers)
+        self.backend = backend or OnnxBackend(self.path / "onnx", int8, providers, variant)
         cal_path = self.path / "calibration.json"
         self.cal = json.loads(cal_path.read_text()) if cal_path.exists() else {}
         bank_path = self.path / "label_bank.json"

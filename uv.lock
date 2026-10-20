@@ -1051,6 +1051,7 @@ eval = [
 ]
 export = [
     { name = "onnx" },
+    { name = "onnxconverter-common" },
     { name = "onnxscript" },
 ]
 hpo = [
@@ -1071,6 +1072,7 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.22" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "onnx", marker = "extra == 'export'", specifier = ">=1.16" },
+    { name = "onnxconverter-common", marker = "extra == 'export'", specifier = ">=1.16.0" },
     { name = "onnxruntime", specifier = ">=1.17" },
     { name = "onnxscript", marker = "extra == 'export'", specifier = ">=0.1" },
     { name = "openai", marker = "extra == 'corpus'", specifier = ">=1.0" },
@@ -1729,6 +1731,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d6/c2/61194cec0dbc5622273c0ebd592d37cc1dca0d7f1a744f02edd45ac905a3/onnx_ir-1.0.0.tar.gz", hash = "sha256:9e261f25fde8da9612ae5cb43b3b374d5ff469c04af0363cad588b2bb000b812", size = 163121, upload-time = "2026-08-11T14:49:46.895Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/91/cd/6d1637172eb59c7b18ac90ed089d1f599a11fe0e63b4db2d017f3bb38a32/onnx_ir-1.0.0-py3-none-any.whl", hash = "sha256:e578f0d608d3062866b48223616eb2d10a6d6d01f8b8faac596129034f483cc7", size = 185849, upload-time = "2026-08-11T14:49:45.524Z" },
+]
+
+[[package]]
+name = "onnxconverter-common"
+version = "1.16.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "onnx" },
+    { name = "packaging" },
+    { name = "protobuf" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/67/8dca1868a6e226f8d3f7d666cb6a48b79a60aad5267b16b24627cd8d9eb8/onnxconverter_common-1.16.0-py2.py3-none-any.whl", hash = "sha256:df39ee96f17fff119dff10dd245467651b60b9e8a96020eb93402239794852f7", size = 89511, upload-time = "2025-08-28T19:37:46.988Z" },
 ]
 
 [[package]]

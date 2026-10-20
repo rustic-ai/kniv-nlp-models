@@ -2,8 +2,8 @@
 
     uv run python -m v6.export.model_card --model ultrabert-380m --out release/ultrabert-380m
 
-Numbers are the test scorecard of release candidate 2 (``docs/v7-stage-b.md``),
-the LongMemEval probe, and the release's own ``onnx/int8_eval.json``.
+Numbers are the test scorecard of release candidate 2 (``docs/v7-stage-b.md``)
+and the LongMemEval probe.
 """
 from __future__ import annotations
 
@@ -98,7 +98,7 @@ path = snapshot_download("{org}/{repo}")
 sys.path.insert(0, path)
 from kniv_v7 import Kniv
 
-kniv = Kniv(path)                 # Kniv(path, int8=True) for the quantised encoders
+kniv = Kniv(path)
 out = kniv.analyse(
     turns=[("user", "I moved to Lisbon last year and started at a bank."),
            ("assistant", "How are you finding it?")],
@@ -133,8 +133,9 @@ Facts are per window; linking them across windows or documents is left to you.
 ### PyTorch
 
 `model.pt` holds the weights for the model code in [kniv-nlp-models]({github})
-(`v6/train/model.py`). With that repository installed, the same pipeline runs
-on the PyTorch graphs:
+(`v6/train/model.py`). From a clone of that repository (run at its root,
+dependencies from its `pyproject.toml`), the same pipeline runs on the
+PyTorch graphs:
 
 ```python
 from kniv_v7 import Kniv
@@ -195,9 +196,10 @@ FewRel's unseen relations are a fixed set removed from every training
 source, so the protocol is comparable in task and metric, not in which
 relations are unseen.
 
-**INT8** (`int8=True`, dynamic quantisation of the three encoder graphs), against fp32 on dev subsets:
-
-{int8_table}
+The ONNX graphs are fp32. Standard INT8 and FP16 conversions did not hold
+accuracy (dynamic INT8 cost up to 58 points on relations; see
+[the release notes]({github}/blob/main/docs/v7-release-plan.md)), so no
+compressed variant is provided yet.
 
 ### Agent memory (LongMemEval, oracle sessions, 150 questions)
 
@@ -259,18 +261,6 @@ Apache-2.0 for the weights and the runtime code. The base encoder
 """
 
 
-def int8_table(path: Path) -> str:
-    f = path / "onnx" / "int8_eval.json"
-    if not f.exists():
-        return "_not measured_"
-    r = json.loads(f.read_text())
-    names = {"pos": "UD dev POS", "las": "UD dev LAS", "rel_f1": "Re-DocRED dev, gold entities",
-             "span_f1": "CrossNER politics spans"}
-    rows = ["| | fp32 | INT8 |", "|---|---|---|"]
-    rows += [f"| {names[m]} | {r['fp32'][m]:.3f} | {r['int8'][m]:.3f} |" for m in names]
-    return "\n".join(rows)
-
-
 def write(model: str, out: Path) -> None:
     m = MODELS[model]
     s = m["scores"]
@@ -278,7 +268,7 @@ def write(model: str, out: Path) -> None:
                        params=m["params"], encoder_params=m["encoder_params"], other=m["other"],
                        org=ORG, repo=m["repo"], choose=m["choose"], github=GITHUB,
                        window=m["window"], base_licence=m["base_licence"], hn=m["hn"],
-                       int8_table=int8_table(out), lme0=s["lme"][0], lme1=s["lme"][1],
+                       lme0=s["lme"][0], lme1=s["lme"][1],
                        lme2=s["lme"][2], lme3=s["lme"][3],
                        **{k: v for k, v in s.items() if k != "lme"})
     (out / "README.md").write_text(text)

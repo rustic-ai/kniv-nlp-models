@@ -79,6 +79,7 @@ def main() -> int:
     ap.add_argument("--release", type=Path, required=True)
     ap.add_argument("--n", type=int, default=300)
     ap.add_argument("--docs", type=int, default=100)
+    ap.add_argument("--variants", default="int8", help="graph suffixes to compare with fp32")
     args = ap.parse_args()
     sys.path.insert(0, str(args.release))
     from kniv_v7 import Kniv
@@ -92,16 +93,17 @@ def main() -> int:
     cn = load_crossner("politics")[:args.n]
     types = sorted({t for it in cn for t, _, _ in it["spans"]})
     res = {}
-    for int8 in (False, True):
-        k = Kniv(args.release, int8=int8)
+    for v in ["fp32"] + args.variants.split(","):
+        k = Kniv(args.release, variant=None if v == "fp32" else v)
         r = {**ud(k, ud_items), **redocred(k, rd_items, rels), **crossner(k, cn, types)}
-        res["int8" if int8 else "fp32"] = {m: round(v, 4) for m, v in r.items()}
-        print(("int8" if int8 else "fp32"), res["int8" if int8 else "fp32"], flush=True)
-    drop = {m: round(res["fp32"][m] - res["int8"][m], 4) for m in res["fp32"]}
-    res["drop"] = drop
-    res["pass"] = all(d <= 0.01 for d in drop.values())
+        res[v] = {m: round(x, 4) for m, x in r.items()}
+        print(v, res[v], flush=True)
+    for v in args.variants.split(","):
+        res[f"drop_{v}"] = {m: round(res["fp32"][m] - res[v][m], 4) for m in res["fp32"]}
+        res[f"pass_{v}"] = all(d <= 0.01 for d in res[f"drop_{v}"].values())
     print(json.dumps(res, indent=1))
-    (args.release / "onnx" / "int8_eval.json").write_text(json.dumps(res, indent=1))
+    if args.n >= 300:
+        (args.release / "onnx" / "int8_eval.json").write_text(json.dumps(res, indent=1))
     return 0
 
 
