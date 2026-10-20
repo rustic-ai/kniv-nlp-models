@@ -508,7 +508,7 @@ def redocred_features(split: str, tok, max_subwords: int, vocab: Vocab,
         raise SystemExit(f"{REDOCRED_REL} missing; run python -m v6.train.data --prepare-redocred")
     stats = Counter() if stats is None else stats
     feats = []
-    for doc in json.loads(REDOCRED_REL.read_text())[split]:
+    for di, doc in enumerate(json.loads(REDOCRED_REL.read_text())[split]):
         spans = [tuple(x) for x in doc["sentence_spans"]]
         f = blank_window(doc["tokens"], spans, tok, max_subwords, vocab.size("cls"))
         W = f["_W"]
@@ -552,7 +552,10 @@ def redocred_features(split: str, tok, max_subwords: int, vocab: Vocab,
         f["ent"] = ent
         f.update(coref=None, _n_rel=vocab.size("relations"),
                  rel={"spans": ents, "types": np.asarray(types, dtype=np.int32),
-                      "triples": triples, "evidence": evidence})
+                      "triples": triples, "evidence": evidence,
+                      # the document and each kept entity's original index
+                      # (kd_teacher's margins are keyed by them)
+                      "doc": di, "ids": list(keep)})
         if markers:
             f["rm"] = marker_features(doc["tokens"], spans, ents, tok)
             stats["redocred_marker_mentions_past_limit"] += int(
@@ -812,6 +815,7 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
     cb, ch, cs, ce, cc, cok = [], [], [], [], [], []
     eb, et, me, ms, mx = [], [], [], [], []
     pb, ph, pt, plab, pev = [], [], [], [], []
+    kd_p, kd_r, kd_m, kd_scored = [], [], [], []    # relation distillation (kd_teacher)
     ap, ar, apol, amod, ahold, atime = [], [], [], [], [], []
     S_max = max(len(x["sent_whole"]) for x in items)
     n_rel = None
@@ -837,6 +841,12 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
             lab.setdefault((int(h), int(tl)), set()).add(int(k))
         ev = {(int(h), int(tl)): sents for h, tl, sents in r.get("evidence", [])}
         pidx = {}
+        base = len(pb)
+        if r.get("kd") is not None:
+            p_, r_, m_ = r["kd"]
+            kd_p += (np.asarray(p_) + base).tolist(); kd_r += np.asarray(r_).tolist()
+            kd_m += np.asarray(m_, dtype=np.float32).tolist()
+            kd_scored += (np.nonzero(r["kd_pairs"])[0] + base).tolist()
         for h in range(E):
             for tl in range(E):
                 if h == tl:
@@ -877,6 +887,16 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
         else:
             labels[i, 0] = 1.0
     out["pair_labels"] = labels
+    if kd_scored:
+        # Teacher margins over Re-DocRED's 96 relations (bank ids 0-95): the
+        # floor on every pair the teacher scored, its margin where above,
+        # NaN on pairs it did not score.
+        from .kd_teacher import FLOOR
+        kd = torch.full((len(plab), 96), float("nan"))
+        kd[torch.tensor(kd_scored, dtype=L)] = FLOOR
+        if kd_p:
+            kd[torch.tensor(kd_p, dtype=L), torch.tensor(kd_r, dtype=L)] = torch.tensor(kd_m)
+        out["kd_margin"] = kd
     if any(x.get("rel") is not None and "schema" in x["rel"] for x in items):
         # Per item: the label-bank ids it was annotated against (None: its
         # source's whole label set) and whether its labels are partial. The

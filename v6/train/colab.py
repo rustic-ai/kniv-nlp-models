@@ -240,7 +240,8 @@ def build_bundles() -> tuple[Path, Path, str]:
                          corpus / "label_bank.json", corpus / "kg_teacher.json",
                          corpus / "fewrel_rel.json", corpus / "fewnerd_spans.json",
                          corpus / "docred_distant_rel.json", corpus / "kg_holdout.json",
-                         corpus / "kg_pretrain.json")
+                         corpus / "kg_pretrain.json", corpus / "kd_distant.json",
+                         corpus / "kd_teacher.pkl")
              if p.exists()]
     # Keyed by every bundled side file's size and mtime: a name that ignores
     # one ships a stale copy of it (the Re-DocRED evidence was lost that way).
@@ -1047,8 +1048,9 @@ POST_JOBS = {
     "span": "python -m v6.train.span_eval --runs {ev} --describe --calibrate-on crossner_politics",
     "rb": "python -m v6.train.rel_breakdown --runs {ev}",
     "err": "python -m v6.train.error_analysis --run {ev} --part relations --out /content/err-{ev}.json",
+    "kd": "python -m v6.train.kd_teacher dump --run {ev} --upload",
 }
-POST_LINES = r"ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
+POST_LINES = r"margins above|ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
 
 POST_START = r'''
 import json, os, subprocess, sys

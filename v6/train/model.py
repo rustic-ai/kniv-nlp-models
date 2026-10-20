@@ -752,6 +752,27 @@ def kd_margin_loss(new: torch.Tensor, old: torch.Tensor, cols: torch.Tensor) -> 
     return F.smooth_l1_loss(nm, om.detach())
 
 
+def distil_loss(logits: torch.Tensor, teacher: torch.Tensor, cols: torch.Tensor) -> torch.Tensor:
+    """Relation distillation (``kd_teacher``): for each pair the teacher
+    scored and each of the batch's columns that is a Re-DocRED relation (bank
+    id < 96), the student's decision -- sigmoid of its margin over the
+    threshold -- pulled toward the teacher's. A cross-entropy on decisions
+    rather than a regression on margins: what matters is the side of the
+    threshold, and margins far below it carry nothing.
+
+    ``logits [P, K+1]`` (column 0 the threshold), ``teacher [P, 96]``
+    margins (NaN: not scored), ``cols [K]`` the columns' bank ids."""
+    sel = cols < teacher.size(1)
+    if not bool(sel.any()):
+        return logits.sum() * 0.0
+    m = logits[:, 1:][:, sel].float() - logits[:, :1].float()
+    t = teacher[:, cols[sel]].float()
+    ok = torch.isfinite(t)
+    if not bool(ok.any()):
+        return logits.sum() * 0.0
+    return F.binary_cross_entropy_with_logits(m[ok], torch.sigmoid(t[ok]))
+
+
 def atlop_loss(logits: torch.Tensor, labels: torch.Tensor,
                mask: torch.Tensor | None = None) -> torch.Tensor:
     """ATLOP's adaptive-threshold loss. ``labels[:, 0]`` marks no-relation
@@ -1532,9 +1553,9 @@ def _ce(logits: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, int]:
 
 
 PHASE2_HEADS = ("coref", "coref_span", "relation", "relation_evidence", "ent",
-                "ent_span", "relation_rank", "ent_span_rank", "fact_attr")
+                "ent_span", "relation_rank", "ent_span_rank", "fact_attr", "relation_distil")
 RELATION_HEADS = ("relation", "relation_evidence", "ent", "relation_kd", "ent_span",
-                  "relation_rank", "ent_span_rank", "fact_attr")
+                  "relation_rank", "ent_span_rank", "fact_attr", "relation_distil")
 # Fixed weights on top of the per-head loss scale: DREEAM weighs its evidence
 # term at 0.1 of the relation loss.
 # The label-ranking terms are off unless asked for (--head-weight relation_rank=0.5).
@@ -1618,6 +1639,12 @@ def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
                               len(o["relation"]))
     else:
         out["relation_kd"] = (_zero(o), 0)
+    if "kd_margin" in batch and len(o.get("relation", [])) and "rel_label_cols" in batch:
+        ok = torch.isfinite(batch["kd_margin"]).any(1)
+        out["relation_distil"] = (distil_loss(o["relation"], batch["kd_margin"],
+                                              batch["rel_label_cols"]), int(ok.sum()))
+    else:
+        out["relation_distil"] = (_zero(o), 0)
     if "fact_attr" in o:
         ok = o["fact_attr_ok"]
         tb = {k + "_ok": batch[k][ok] for k in ("attr_polarity", "attr_modality",

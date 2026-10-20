@@ -517,6 +517,12 @@ def main() -> int:
                          "toward the transplanted ATLOP head's, at this weight (relative "
                          "to the calibrated relation loss) decaying linearly to 0 over the "
                          "first half of training")
+    ap.add_argument("--distil", action="store_true",
+                    help="relation distillation from the averaged teacher (kd_teacher merge: "
+                         "data/v6-corpus/kd_teacher.pkl) on Re-DocRED train and its unseen "
+                         "DocRED-distant documents; weight with --head-weight relation_distil=W")
+    ap.add_argument("--distil-distant", type=int, default=1,
+                    help="with --distil: copies of the teacher's DocRED-distant documents")
     ap.add_argument("--label-holdout", action="store_true",
                     help="train without the label bank's held-out relations and report "
                          "zero-shot F1 on them (relation_gold_zs_f1); diagnostic runs")
@@ -717,6 +723,20 @@ def main() -> int:
                   if not args.probe else [])
         print("Re-DocRED: " + ", ".join(f"{k} {v:,}" for k, v in sorted(st.items()))
               + f"; train x{args.redocred_train}", flush=True)
+
+    if args.distil:
+        import pickle
+        from .kd_teacher import TEACHER, attach, distant_features
+        if not args.redocred_train:
+            raise SystemExit("--distil needs --redocred-train (the teacher scored Re-DocRED train)")
+        teacher = pickle.loads(TEACHER.read_bytes())
+        n_rd = attach(rd, teacher["redocred"])
+        preparing("featurising the teacher's distant documents")
+        dd = distant_features(tok, spec.max_subwords, vocab.size("cls"), markers=args.rel_markers)
+        n_dd = attach(dd, teacher["distant"])
+        train = train + dd * args.distil_distant
+        print(f"distillation from {'+'.join(teacher['runs'])}: Re-DocRED train {n_rd:,} documents, "
+              f"distant {n_dd:,} x{args.distil_distant}", flush=True)
 
     kg_data = dict(x.split("=") for x in args.kg_data.split(",") if x)
     if args.kg_teacher:
