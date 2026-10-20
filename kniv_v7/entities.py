@@ -1,29 +1,14 @@
-"""Entity clusters from NER spans plus coref chains.
+"""Entities from typed mention spans and coreference chains.
 
-Shared by the relation probe and the corpus builder, because the relation
-annotator does not find entities — it classifies relations over clusters we
-supply. Getting this wrong shows up as duplicate graph nodes rather than as
-an error, so the logic lives in one place.
-
-The merge is two-stage:
-
-1. A coref chain absorbs every NER span it overlaps.
-2. Exact normalised surface forms are merged for PER/ORG/LOC/MISC.
-
-Stage 2 is not redundant. Measured on 177 corpus windows, coref alone left
-**12.6% of entities as unmerged duplicates** of the same surface form —
-26.8% on conversation — so `George Orwell` became three entities and
-produced three identical `author` triples: three graph nodes where there
-should be one. Adding it drops duplicates to 0.5% and removed 293 triples,
-28% of the raw output.
-
-NUM and TIME are excluded from stage 2 by design: two occurrences of `1` or
-`Monday` are not the same entity.
+Mentions of one entity are merged in two stages: a coreference chain (in the
+mode chosen, ``coref``) absorbs the spans it overlaps, then exact normalised
+surface forms are merged for person, organisation, location and other names.
+Numbers and times are never merged by surface form: two occurrences of `1`
+or `Monday` are not the same entity.
 """
 from __future__ import annotations
 
-# OntoNotes 18 -> DocRED's six coarse types, which is what the relation
-# annotator was trained to condition on.
+# Fine NER types -> the six coarse types.
 TYPE_MAP = {
     "PERSON": "PER", "ORG": "ORG",
     "GPE": "LOC", "LOC": "LOC", "FAC": "LOC",
@@ -34,33 +19,9 @@ TYPE_MAP = {
     "WORK_OF_ART": "MISC", "LAW": "MISC", "LANGUAGE": "MISC",
 }
 MERGEABLE = {"PER", "ORG", "LOC", "MISC"}
-DOCRED_TYPES = {"LOC", "MISC", "NUM", "ORG", "PER", "TIME"}
+COARSE_TYPES = {"LOC", "MISC", "NUM", "ORG", "PER", "TIME"}
 
-# OntoNotes tags every bare count and rank -- "two", "12", "first" -- as
-# CARDINAL or ORDINAL. DocRED does not annotate those as entities at all, and
-# they are not relation arguments: across Re-DocRED train, NUM appears in 30 of
-# 85,932 gold relations (0.03%), and those few look like mistyped entities. So
-# ATLOP has effectively never seen a NUM argument and cannot predict one.
-#
-# They are not rare here. Share of all mentions, measured over the full corpus
-# (NER is complete for all 583,824 sentences):
-#
-#   domain          PER    ORG    LOC   TIME    NUM   MISC   bare CARDINAL/ORDINAL
-#   conversation   5.2%   8.8%  20.1%  27.6%  27.6%  10.7%   21.4%
-#   news          17.6%  16.5%  22.3%  17.3%  13.9%  12.5%   10.2%
-#   technical     10.9%  14.3%   2.8%  10.0%  31.5%  30.4%   28.4%
-#   encyclopedic  20.5%   8.5%  21.7%  15.9%  16.8%  16.5%   13.7%
-#   narrative     47.4%   3.3%  11.1%  13.7%  19.0%   5.5%   17.4%
-#   Re-DocRED     15.6%  13.5%  29.3%  19.3%   6.4%  15.9%
-#
-# Dropping them leaves NUM at roughly Re-DocRED's 6.4% -- the remaining MONEY,
-# PERCENT and QUANTITY are the DocRED-like members and stay. Pairs grow with
-# the square of the vertex count, so this is also most of the ATLOP cost.
-#
-# The inflation is worse per VERTEX than per mention, because MERGEABLE excludes
-# NUM: PER/ORG/LOC/MISC mentions collapse by string match while every bare
-# numeral stays its own vertex. On the conversation prefix that turns 27.6% of
-# mentions into 43.3% of vertices.
+# Counts and ordinals are not entities for relation extraction.
 DROP_TYPES = {"CARDINAL", "ORDINAL"}
 
 
@@ -112,19 +73,18 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
                    coref_chains: list[list[list[int]]] | None,
                    coref: str = "all", partial_names: bool = False, link=None,
                    link_merge=None):
-    """Return DocRED-format ``(sents, vertexSet)``, or ``(None, None)``.
+    """Return ``(sents, vertexSet)`` (entities as lists of mentions), or ``(None, None)``.
 
     ``coref``: how coreference chains group the entity mentions -- ``all``
     (every chain, split by type), ``compatible`` (within a chain, only
     mentions whose names are compatible, ``names_compatible``), ``none``.
-    Measured on Re-DocRED (gold_eval ``redocred_oracle``), chains fused two
-    gold entities in 3-8% of predicted entities. ``partial_names``: also merge
+    ``partial_names``: also merge
     an entity into the one other entity whose name contains it or is its
     acronym (several candidates: ambiguous, left alone). ``link``: a function
     from the typed mention spans ``[(type, start, end_exclusive)]`` to groups
-    of their indices (``entity_link.Linker``); it replaces both the chains and
+    of their indices; it replaces both the chains and
     the name rules. ``link_merge``: a function from the typed spans and the
-    rules' groups to coarser groups (``entity_link.Linker.merge``, the hybrid).
+    rules' groups to coarser groups.
 
     ``None`` when fewer than two entities survive — a relation needs a pair,
     and a window with one entity is not evidence of anything.
@@ -137,8 +97,8 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
         for ty, a, b in bio_spans(tags):
             if ty in DROP_TYPES:
                 continue
-            # DocRED types (from the entity-mention head) pass through as is.
-            spans.append((ty if ty in DOCRED_TYPES else TYPE_MAP.get(ty, "MISC"),
+            # Coarse types (from the entity head) pass through as is.
+            spans.append((ty if ty in COARSE_TYPES else TYPE_MAP.get(ty, "MISC"),
                           s + a, s + b))
     if len(spans) < 2:
         return None, None

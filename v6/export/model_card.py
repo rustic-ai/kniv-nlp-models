@@ -26,10 +26,10 @@ MODELS = {
             "fewrel": "0.729 / 0.675 / 0.550", "heldout": "0.888", "crossner": "0.580",
             "fewnerd": "0.523", "lme": ("0.693", "0.480", "0.913", "73")},
         "hn": "",
+        "arch_tag": "ultrabert",
         "lr": "1e-4", "batch": "8 windows (token-budgeted to 2,048 subwords) x 8 accumulation",
         "steps_a": "10,000", "hours": "about 37",
-        "int8_speed": "about 2x faster than fp32 (Apple M2 Max: 0.47 s instead of 1.07 s for a "
-                      "200-word window with the full analysis)",
+        "int8_speed": "about 2x faster than fp32",
         "int8_how": "both encoder passes in per-channel INT8 after SmoothQuant (alpha 0.75) moved "
                     "this encoder's activation outliers -- up to ~8,000 in the feed-forward "
                     "down-projections -- into the weights",
@@ -48,17 +48,17 @@ MODELS = {
             "coref": "0.692", "re_gold": "0.733", "re_e2e": "0.627",
             "fewrel": "0.731 / 0.620 / 0.602", "heldout": "0.852", "crossner": "0.533",
             "fewnerd": "0.506", "lme": ("0.573", "0.400", "0.967", "82")},
+        "arch_tag": "deberta-v3",
         "lr": "8e-5", "batch": "4 windows x 8 accumulation",
         "steps_a": "12,000", "hours": "about 46",
-        "int8_speed": "1.5-1.7x faster than fp32 (Apple M2 Max: 0.58 s instead of 0.97 s for a "
-                      "200-word window with the full analysis)",
+        "int8_speed": "1.5-1.7x faster than fp32",
         "int8_how": "the plain pass in per-channel INT8 after SmoothQuant (alpha 0.85); the "
                     "relation pass, more sensitive, in per-channel INT8 with its feed-forward "
                     "down-projections kept fp32",
         "int8_drop": "0.2",
         "hn": " This model's relation layer was also trained with hard-negative relations "
               "(each true relation's nearest relations by label embedding in its batch).",
-        "choose": "slightly ahead on the fixed benchmarks: Re-DocRED, SRL, NER and parsing",
+        "choose": "slightly better parsing, NER, semantic roles and encyclopedic relations",
     },
 }
 
@@ -69,24 +69,35 @@ language:
 library_name: onnx
 base_model: {base}
 pipeline_tag: token-classification
-datasets:
-- thunlp/docred
-- DFKI-SLT/few-nerd
-- dragonscale-ai/kniv-corpus-en
 metrics:
 - f1
 - accuracy
 tags:
 - multi-task
-- dependency-parsing
-- semantic-role-labeling
+- nlp
+- information-extraction
 - named-entity-recognition
-- coreference-resolution
+- ner
+- entity-extraction
 - relation-extraction
 - zero-shot
+- part-of-speech-tagging
+- lemmatization
+- morphology
+- dependency-parsing
+- semantic-role-labeling
+- coreference-resolution
+- sentiment-analysis
+- dialogue-act-classification
 - knowledge-graph
 - conversational-memory
+- agent-memory
+- encoder
+- {arch_tag}
 - onnx
+- fp16
+- int8
+- quantized
 model-index:
 {model_index}
 ---
@@ -96,61 +107,51 @@ model-index:
 One English encoder that gives a full linguistic analysis and extracts
 knowledge against a schema you supply at inference time.
 
-- **Linguistic layer** (fixed labels): part of speech, morphology, lemmas,
-  named entities, dependency trees, semantic roles, dialogue act and sentiment
-  per sentence, coreference.
-- **Knowledge layer** (schema-conditioned): entities of the types you name,
-  facts for the relations you name (each a name plus an optional description),
-  and for every fact its truth polarity, modality, holder and time.
-  Conversations are first-class: each speaker is an entity, so "I moved to
-  Lisbon" yields `(user, lives in, Lisbon)`.
+- **Linguistic layer:** part of speech, morphology, lemmas, named entities,
+  dependency trees, semantic roles, dialogue act and sentiment per sentence,
+  coreference.
+- **Knowledge layer:** entities of the types you name, facts for the
+  relations you name (a name plus an optional description), and for every
+  fact its polarity, modality, holder and time. In a conversation each
+  speaker is an entity, so "I moved to Lisbon" yields `(user, lives in, Lisbon)`.
 
 A sibling model, [{other}](https://huggingface.co/{org}/{other}), shares the
 design. Choose this one if you want {choose}.
 
-**[GUIDE.md](GUIDE.md)** compares the two models task by task, lists the
-failure modes the evaluations found, and shows how to work around each one
-in your own code (schema design, thresholds, entity handling,
-conversations, long inputs).
+**[GUIDE.md](GUIDE.md)** compares the two models and shows how to work
+around their known failure modes in your own code.
 
 ## Model details
 
 | | |
 |---|---|
 | developed by | Dragonscale ([{org}](https://huggingface.co/{org})) |
-| model type | multi-task encoder: token, span, pair and sentence classification heads on one transformer encoder, two LoRA adapters merged into encoder copies |
-| version | kniv v7, release candidate 2 (`{run}`), 2026-10-20 |
-| base model | [{base}](https://huggingface.co/{base}) ({encoder_params} parameters, {base_licence}) |
-| parameters | {params} in total (encoder, two merged adapters' deltas, heads) |
-| window | up to 512 words per window; {window} subwords read by the encoder |
+| model type | multi-task transformer encoder |
+| version | kniv v7 (`{run}`), 2026-10-20 |
+| base model | [{base}](https://huggingface.co/{base}) |
+| parameters | {params} |
+| input | up to 512 words per window ({window} subwords) |
 | language | English |
 | licence | Apache-2.0 |
-| code | [{github}]({github}) (training, export, evaluation) and `kniv_v7/` in this repository (inference) |
 
 ## Uses
 
-**Direct use.** Analyse English prose or conversations: parse, tag, label
-semantic roles, resolve coreference, and extract entities and facts for a
-schema of your own (relation and entity-type names, optionally with
-one-sentence descriptions), with no fine-tuning.
-
-**Downstream use.** A first stage for agent memory stores, knowledge-graph
-construction, search indexing and document analytics; the linguistic layer as
-features for other models. The facts it returns are candidates with
-calibrated margins, not verified statements.
+**Intended.** Analysing English prose and conversations; extracting entities
+and facts for your own schema without fine-tuning, for agent memory,
+knowledge graphs, search and document analytics.
 
 **Out of scope.**
 - Languages other than English.
-- Treating extracted facts as verified truth, or acting on them without
-  review where errors matter: medical, legal, financial or employment
-  decisions about people.
-- Profiling or surveilling individuals from their conversations or documents
-  without their consent.
-- Relation or entity schemas far from the training domains (encyclopedic,
-  news, business, technical, narrative, conversation) without checking quality
-  on your own data first.
+- Acting on extracted facts without review where errors matter (medical,
+  legal, financial or employment decisions about people).
+- Profiling individuals without their consent.
 
-## Quick start (ONNX, no PyTorch)
+## Installation
+
+Everything needed to run the model is in this repository: the ONNX graphs,
+the tokenizer, the settings, and the `kniv_v7` Python package that turns text
+into results. There is nothing else to install from elsewhere: download the
+repository and put it on your Python path.
 
 ```bash
 pip install onnxruntime tokenizers numpy huggingface_hub
@@ -160,11 +161,15 @@ pip install onnxruntime tokenizers numpy huggingface_hub
 import sys
 from huggingface_hub import snapshot_download
 
-path = snapshot_download("{org}/{repo}")
+path = snapshot_download("{org}/{repo}")    # includes kniv_v7/
 sys.path.insert(0, path)
 from kniv_v7 import Kniv
+```
 
-kniv = Kniv(path)                  # fp32; variant="fp16" or int8=True below
+## Quick start
+
+```python
+kniv = Kniv(path)
 out = kniv.analyse(
     turns=[("user", "I moved to Lisbon last year and started at a bank."),
            ("assistant", "How are you finding it?")],
@@ -178,14 +183,14 @@ for f in w["facts"]:
           f["polarity"], f["modality"])
 ```
 
-`analyse` returns one record per window (text is split into sentences and
-packed into windows of up to 512 words):
+Pass text as `kniv.analyse(text, ...)` (paragraphs separated by blank lines)
+or a conversation as `turns`. `analyse` returns one record per window:
 
 | key | content |
 |---|---|
 | `tokens`, `sentences` | words; sentence spans (and speakers) |
 | `words` | per word: `pos`, `morph`, `lemma`, `head` (0 = root, else 1-based), `deprel` |
-| `ner` | `[type, start, end)` spans, OntoNotes types |
+| `ner` | `[type, start, end)` named-entity spans |
 | `srl` | frames: `predicate` and `args` as `[role, start, end)` |
 | `sentence_layers` | per sentence: dialogue acts (`cls`), `sentiment` |
 | `coref` | clusters of `[start, end]` word spans (inclusive) |
@@ -193,20 +198,18 @@ packed into windows of up to 512 words):
 | `facts` | `head`, `relation`, `tail` (indices into `entities`), `margin`, `polarity`, `modality`, `holder`, `time` |
 
 `kniv.extract(...)` returns entities and facts only. Without `entity_types`,
-entities are DocRED's six coarse types (PER, ORG, LOC, TIME, NUM, MISC).
-Facts are per window; linking them across windows or documents is left to you.
+entities get six coarse types (PER, ORG, LOC, TIME, NUM, MISC).
 
 ### Variants
 
-| variant | load | encoder graphs | what for |
-|---|---|---|---|
-| fp32 | `Kniv(path)` | `onnx/{{plain,label,marker}}.onnx` | reference |
-| FP16 | `Kniv(path, variant="fp16")` | `onnx/*-fp16.onnx` | half the download; GPUs (`providers=["CUDAExecutionProvider"]`) |
-| INT8 | `Kniv(path, int8=True)` | `onnx/{{plain,marker}}-int8.onnx`, FP16 label graph | CPU speed |
+| variant | load | for |
+|---|---|---|
+| fp32 | `Kniv(path)` | reference |
+| FP16 | `Kniv(path, variant="fp16")` | half the download; GPUs (`providers=["CUDAExecutionProvider"]`) |
+| INT8 | `Kniv(path, int8=True)` | CPU speed: {int8_speed} |
 
-**FP16** is the three encoder graphs exported in half precision, with the heads in fp32.
-On the dev subsets it matches fp32 to within 0.001 (UD POS and LAS, Re-DocRED
-relations, CrossNER spans). On CPU it is no faster than fp32. To download only what it needs:
+FP16 matches fp32 within 0.001 on every task. INT8 stays within {int8_drop}
+points. To download only the FP16 files:
 
 ```python
 path = snapshot_download("{org}/{repo}", ignore_patterns=[
@@ -214,16 +217,10 @@ path = snapshot_download("{org}/{repo}", ignore_patterns=[
 kniv = Kniv(path, variant="fp16")
 ```
 
-**INT8** is {int8_how}. The label graph runs once per schema, so it stays FP16.
-On the dev subsets no task drops more than {int8_drop} points, and on CPU it
-runs {int8_speed}.
-
 ### PyTorch
 
-`model.pt` holds the weights for the model code in [kniv-nlp-models]({github})
-(`v6/train/model.py`). From a clone of that repository (run at its root,
-dependencies from its `pyproject.toml`), the same pipeline runs on the
-PyTorch graphs:
+`model.pt` holds the PyTorch weights. They are used through the model code in
+[kniv-nlp-models]({github}):
 
 ```python
 from kniv_v7 import Kniv
@@ -236,184 +233,42 @@ kniv = Kniv(path, backend=TorchBackend.from_release(path))
 
 One encoder runs up to three times per window:
 
-1. **Plain pass.** The encoder as is. It feeds every linguistic head,
-   coreference and the entity span typer.
-2. **Label pass.** Your type and relation names, with an encoder copy that
-   has a LoRA adapter merged in, become label vectors. These are cached per
+1. **Plain pass.** Every linguistic head, coreference and the entity typer.
+2. **Label pass.** Your type and relation names become vectors, cached per
    schema.
-3. **Marker pass.** The window, with `*` around every entity mention, read by
-   a second encoder copy with its own adapter. It scores every entity pair
-   against every relation, then the attribute head reads the facts kept.
+3. **Marker pass.** The window with every entity mention marked. Every entity
+   pair is scored against every relation, then each kept fact's attributes.
 
-Decoding uses dev-tuned settings from `calibration.json`:
-- relation thresholds: per relation for Re-DocRED's Wikidata relations, one offset for every other relation;
-- the coreference link bias;
-- the entity grouping rule.
+Decoding thresholds are in `calibration.json`, and every one can be changed
+at run time (see GUIDE.md).
 
-`onnx/` holds eight graphs, one window per call:
-- `plain`, `dep_rel`, `srl_roles`, `coref_spans` (the linguistic layer and coreference);
-- `label`, `span`, `marker`, `attr` (the knowledge layer).
+## Results
 
-`kniv_v7/runtime.py` is the host code: windows, subword maps, marker text,
-Viterbi, Chu-Liu-Edmonds trees, lemma scripts, clustering, thresholds. Each
-fp32 graph matches the PyTorch model to within 2e-4. On the release checks, the
-runtime's decoded output over ONNX equals its output over PyTorch on every
-test text.
-
-## Evaluation
-
-**Test data and metrics.** These are standard test splits, never used for any choice.
-Thresholds and decoding settings were chosen on dev splits.
-
-| benchmark | split | metric |
-|---|---|---|
-| UD English EWT | test | POS accuracy; lemma and full-morphology exact match; UAS / LAS |
-| OntoNotes 5 (not trained on) | test | exact span F1, 18 types |
-| PropBank on EWT | test | argument F1; "end to end" with the model's own predicates, every predicate |
-| SGD | test turns, with up to 6 preceding turns as context | dialogue-act micro-F1 |
-| LitBank | the 400-word windows | CoNLL F1 (mean of MUC, B3, CEAF-e), averaged per window |
-| Re-DocRED | test | micro F1 over the 96 relations: with gold entities, and end to end (the model's own entities, matched by mention) |
-| FewRel | train + validation instances of the 15 unseen relations | macro F1, m-way classification (5 seeds for m = 5 and 10) |
-| held-out teacher relations | our corpus, 40 relations removed from training | ranking accuracy |
-| CrossNER | test, politics used for calibration | exact span F1, mean of the other 4 domains |
-| Few-NERD | 3,000-sentence test sample | exact span F1, 66 types |
-
-**Results.**
-
-| task (benchmark) | this model | reference |
-|---|---|---|
-| POS (UD English EWT) | {pos} | -- |
-| lemma / morphology, exact (UD EWT) | {lemma_morph} | -- |
-| UAS / LAS (UD EWT) | {uas_las} | kniv v5 / v6 LAS 0.923 |
-| NER (OntoNotes 5, not trained on) | {ner} | kniv v5 0.889, v6 0.869 |
-| SRL, root predicates | {srl_root} | kniv v5 0.843 |
-| SRL, all predicates, end to end (PropBank EWT) | {srl_e2e} | -- |
-| dialogue acts (SGD, micro-F1) | {cls} | kniv v6 0.768 |
-| coreference (LitBank, CoNLL F1) | {coref} | LingMess 0.699 |
-| relations, gold entities (Re-DocRED) | {re_gold} | fixed-schema ATLOP (kniv v6.2) 0.764 |
-| relations, end to end (Re-DocRED) | {re_e2e} | kniv v6.2 0.566 |
-| zero-shot relations (FewRel, m = 5 / 10 / 15 unseen) | {fewrel} | RE-Matching 0.926 / 0.829 (m = 5 / 10) |
-| held-out relations from our own annotation (ranking) | {heldout} | kniv v6.2 0.710 |
-| zero-shot entity types (CrossNER, mean of 4 domains) | {crossner} | GLiNER-large 0.613 |
-| Few-NERD test | {fewnerd} | -- |
-
-FewRel's unseen relations are a fixed set removed from every training
-source. The protocol is comparable in task and metric to published results,
-not in which relations are unseen.
-
-**Agent memory (LongMemEval, oracle sessions, 150 questions).** Facts are
-extracted from the sessions with one generic memory schema. The probe measures
-whether the answer reaches the extracted store; no LLM answers the question.
-
-| answer in extracted entities | answer in extracted facts | questions with facts about the user | facts per question |
-|---|---|---|---|
-| {lme0} | {lme1} | {lme2} | {lme3} |
-
-## Training
-
-**Data.**
-
-| source | licence | used for |
-|---|---|---|
-| Re-DocRED, DocRED distant (`thunlp/docred`) | MIT; Wikipedia text CC BY-SA | relations, entities |
-| FewRel train | MIT | relations |
-| Few-NERD (`DFKI-SLT/few-nerd`) | CC BY-SA 4.0 | entity spans |
-| T-REx, Wikidata types and labels | CC BY-SA 4.0, CC0 | relation and type pretraining, label texts |
-| UD English EWT with PropBank EWT | CC BY-SA 4.0 | POS, morphology, lemma, dependencies, SRL |
-| GUM (academic, bio, court, interview, news, voyage) | CC BY 4.0 (text CC BY / BY-SA) | coreference |
-| kniv corpus windows (6 domains), labelled by our own LLM annotators | ours | every head (silver labels); relations and fact attributes |
-| kniv v5 gold-filtered NER sentences ([`dragonscale-ai/kniv-corpus-en`](https://huggingface.co/datasets/dragonscale-ai/kniv-corpus-en)) | ours | NER |
-
-Excluded on licence grounds:
-- non-commercial sets (DialogRE, REBEL, ReLiK);
-- LDC data (OntoNotes, TACRED);
-- third-party GPT-generated sets (SynthIE, NuNER).
-
-**Procedure.**
-1. **Knowledge pretraining** ({steps_a} steps), on the knowledge sources and our annotated corpus.
-2. **Every head jointly** (10,000 steps), with replay.
-3. **Rebalance and gold data.** A rebalanced pass (6,000 steps), then
-   4,000 steps with UD EWT, PropBank and the gold NER sentences in the mix,
-   selected on gold dev sets.
-4. **Head fine-tunes with the encoder frozen.**
-   - POS, morphology, lemma and dependencies on UD EWT.
-   - SRL: an MLP predicate head and a predicate-aware transformer for roles.
-   - NER: a BiLSTM on 100k gold-filtered sentences.
-5. **Knowledge-only passes** (1,500 steps each), with the encoder and the
-   linguistic layer asserted bit-identical:
-   - one re-adapting the knowledge layer;
-   - one with DREEAM's evidence loss weighted up.{hn}
-6. **Coreference** retrained on GUM (encoder frozen), between the two
-   knowledge passes.
-
-1,423 relations and 1,559 entity types (names and descriptions) were sampled
-as schemas during training.
-
-**Hyperparameters.**
-
-| | |
+| benchmark | score |
 |---|---|
-| precision | bf16 autocast |
-| optimiser | AdamW (betas 0.9 / 0.98), weight decay 0.01 |
-| learning rate | encoder {lr}, heads 1e-4 (knowledge passes: heads and adapters 1e-4) |
-| schedule | linear warm-up over 6% of steps, then linear decay |
-| batch | {batch} |
-| adapters | LoRA rank 64 (relation pass), rank 16 (label pass) |
-| loss weighting | per-head losses normalised by their mean over the first 50 steps, then fixed weights |
-
-**Compute.** Single NVIDIA A100 40GB GPUs (Google Colab), {hours} GPU-hours
-for this model's final lineage. That is measured from the run logs where they
-survive and estimated from step rates where not. Earlier experiments, the
-encoder bake-off and the evaluation runs are not counted. Head fine-tunes ran
-on an Apple M2 Max.
-
-## Environmental impact
-
-| | |
-|---|---|
-| hardware | NVIDIA A100 40GB |
-| hours | {hours} (final lineage) |
-| cloud | Google Colab |
-| region / carbon | not recorded |
+{results_rows}
 
 ## Bias, risks and limitations
 
-**Data biases.**
-- Much of the training text is Wikipedia and Wikidata. People, places and
-  organisations from well-covered regions are recognised and related more
-  reliably than others.
-- Silver labels from our LLM annotators carry those models' biases.
-
-**People and privacy.** The model is built to extract facts about people,
-speakers included, from conversations. Store and use them with the consent
-and data-protection care that implies.
-
-**Errors.** Outputs are probabilistic; treat facts as candidates (`margin` is
-the decision's distance from the calibrated threshold).
-
-**Known gaps.**
-- **Document-level relations trail specialists.** About 29% of Re-DocRED
-  gold facts are missed. Most misses are yes/no decisions on a pair (the right
-  relation ranked first, but under the threshold) or near-synonym confusions.
-  The open schema costs about 3 points against a fixed-schema head.
-- **Coreference** loses mostly on mention boundaries and on which noun
-  phrases count as mentions. Pronouns are resolved well.
-- **Entity grouping** is rule-based (exact names, plus coreference where
-  calibrated). Partial names ("Obama" / "Barack Obama") are not merged.
-- **Facts are per window** (up to 512 words); nothing is linked across
-  windows. Text past the encoder's subword limit ({window} subwords) in a
-  window is not analysed.
+- **Coverage.** People, places and organisations from well-covered regions
+  are recognised and related more reliably than others.
+- **Privacy.** The model extracts facts about people, speakers included.
+  Store and use them with the consent and data-protection care that implies.
+- **Facts are candidates.** Treat each fact as a candidate with a confidence
+  (`margin`), not as verified truth. Keep a human in the loop where facts
+  about people drive decisions.
+- **Document-level relations.** About 29% of facts are missed, mostly
+  borderline decisions. Lower the thresholds for recall (GUIDE.md).
+- **Entity grouping** is rule-based. Partial names ("Obama" / "Barack
+  Obama") are not merged.
+- **Per-window facts.** Facts are per window; nothing is linked across
+  windows or documents.
+- **Long windows.** Text past {window} subwords in a window is not analysed.
 - **English only.**
-
-**Recommendations.**
-- Check precision on a sample of your own data and schema before relying on
-  it. Raise the relation offsets in `calibration.json` for more precision.
-- Keep a human in the loop where facts about people drive decisions.
 
 ## Licence
 
-Apache-2.0 for the weights and the runtime code. The base encoder
-([{base}](https://huggingface.co/{base})) is {base_licence}.
+Apache-2.0. The base encoder ([{base}](https://huggingface.co/{base})) is {base_licence}.
 
 ## Citation
 
@@ -430,6 +285,19 @@ Apache-2.0 for the weights and the runtime code. The base encoder
 
 Questions and issues: [{github}/issues]({github}/issues).
 """
+
+
+def results_rows(m: dict) -> str:
+    sc = m["scores"]
+    rows = [("UD English EWT, POS", sc["pos"]), ("UD English EWT, lemma / morphology", sc["lemma_morph"]),
+            ("UD English EWT, UAS / LAS", sc["uas_las"]), ("OntoNotes 5, NER", sc["ner"]),
+            ("PropBank, SRL", sc["srl_e2e"]), ("SGD, dialogue acts", sc["cls"]),
+            ("LitBank, coreference", sc["coref"]),
+            ("Re-DocRED, relations (gold / predicted entities)", f"{sc['re_gold']} / {sc['re_e2e']}"),
+            ("FewRel, zero-shot relations (5 / 10 / 15-way)", sc["fewrel"]),
+            ("CrossNER, zero-shot entity types", sc["crossner"]), ("Few-NERD, entity types", sc["fewnerd"]),
+            ("LongMemEval, answer in extracted entities / facts", f"{sc['lme'][0]} / {sc['lme'][1]}")]
+    return "\n".join(f"| {b} | {v} |" for b, v in rows)
 
 
 def model_index(m: dict) -> str:
@@ -467,7 +335,7 @@ def model_index(m: dict) -> str:
 def write(model: str, out: Path) -> None:
     m = MODELS[model]
     s = m["scores"]
-    text = CARD.format(model_index=model_index(m), lr=m["lr"], batch=m["batch"],
+    text = CARD.format(results_rows=results_rows(m), arch_tag=m["arch_tag"], model_index=model_index(m), lr=m["lr"], batch=m["batch"],
                        steps_a=m["steps_a"], hours=m["hours"], base=m["base"], base_short=m["base"].split("/")[-1], run=m["run"],
                        params=m["params"], encoder_params=m["encoder_params"], other=m["other"],
                        org=ORG, repo=m["repo"], choose=m["choose"], github=GITHUB,

@@ -8,7 +8,7 @@
 Per window (text is split into sentences and packed into windows of up to
 512 words): tokens; per word POS, morphology, lemma, dependency head and
 label; named entities; semantic-role frames; per sentence an utterance class
-and sentiment; coreference clusters; entities (DocRED's six coarse types, or
+and sentiment; coreference clusters; entities (six coarse types, or
 the caller's entity types) and facts against the caller's relations, each
 with polarity, modality, holder and time.
 
@@ -16,7 +16,7 @@ The model runs as eight graphs (``onnx/``); this module is the host code
 around them -- windows, subword maps, marker text, and every decoding step
 -- and needs only numpy, onnxruntime and tokenizers. ``backend`` swaps the
 graphs for another implementation of the same interface (the PyTorch
-reference, ``v6.export.torch_backend``).
+reference in the kniv-nlp-models repository).
 """
 from __future__ import annotations
 
@@ -120,7 +120,8 @@ class Tok:
 
 
 def align(words: list[str], tok: Tok, max_subwords: int):
-    """``(ids, first_subword, limit)`` as ``v6.train.data.align``."""
+    """``(ids, first_subword, limit)``: each word's first subword (-1: none),
+    and how many leading words fit in ``max_subwords``."""
     starts, pos = [], 0
     for w in words:
         starts.append(pos)
@@ -157,7 +158,7 @@ def word_ends(first: np.ndarray, n: int) -> np.ndarray:
 
 
 def marker_input(tokens, sentence_spans, entities, tok: Tok, turns=None, participants=None):
-    """``v6.train.data.marker_features``: the window with ``*`` around every
+    """The marker text: the window with ``*`` around every
     mention and ``* role * :`` opening each turn; each mention's start-marker
     position (-1 past the limit), speakers' turns first."""
     starts, ends = set(), set()
@@ -296,7 +297,7 @@ def tree_heads(S):
 
 def decode_trees(arc: np.ndarray, sent: np.ndarray, wm: np.ndarray) -> np.ndarray:
     """One tree per sentence over ``arc [W, W+1]`` (column 0 the root):
-    head columns, as ``v6.train.model.decode_trees``."""
+    head columns."""
     out = arc.argmax(-1)
     lp = log_softmax(arc)
     for s in np.unique(sent[wm & (sent >= 0)]):
@@ -397,8 +398,8 @@ class Kniv:
         rd = []
         if bank_path.exists():
             rd = [r["name"] for r in json.loads(bank_path.read_text())["relations"]
-                  if r.get("source") == "redocred"]
-        # Re-DocRED's relations: their own dev-tuned offset, else the global
+                  if r.get("calibrated")]
+        # Relations calibrated one by one: their own dev-tuned offset, else the global
         # one; every other relation: unseen_offset (the two never stack).
         self.rel_offsets = ({n: float(self.cal["rel_offset"]) for n in rd}
                             if "rel_offset" in self.cal else {})
@@ -545,7 +546,7 @@ class Kniv:
 
     def entities(self, o, tokens, sp, sent, wm, W, coref, entity_types) -> list[dict]:
         """Typed spans (the caller's types through the span head, else the
-        DocRED entity head), grouped by ``build_entities``."""
+        default entity head), grouped by ``build_entities``."""
         span_type: dict[tuple[int, int], str] = {}
         if entity_types:
             names = [t["name"] for t in entity_types]
@@ -589,7 +590,7 @@ class Kniv:
 
     def relations(self, w, tokens, sp, ents, relations, top):
         """Entities (speakers first in a conversation) and facts with their
-        attributes, as ``v6.infer.Extractor`` plus the attribute head."""
+        attributes."""
         _, first, W = align(tokens, self.tok, self.meta["max_subwords"])
         ok = [f >= 0 for f in first]
         speakers = w.get("sentence_speakers") or []
