@@ -41,6 +41,10 @@ llm = [
     "trl>=0.9",
     "bitsandbytes>=0.43",
 ]
+export = [
+    "onnx>=1.16",
+    "onnxscript>=0.1",
+]
 
 [build-system]
 requires = ["hatchling"]
