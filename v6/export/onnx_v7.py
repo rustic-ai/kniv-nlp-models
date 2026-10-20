@@ -110,6 +110,23 @@ def inputs_for(g: dict, model, tok, spec, vocab, w: dict, rels: list[dict]) -> d
             "marker": marker, "attr": attr}
 
 
+def coref_diff(sa, ca, sb, cb) -> float:
+    """Max score difference over the candidates both sides kept, per word;
+    infinite if a word's chosen antecedent (or none) differs."""
+    sa, ca = np.asarray(sa)[0], np.asarray(ca)[0]
+    sb, cb = torch.as_tensor(sb).numpy()[0], torch.as_tensor(cb).numpy()[0]
+    worst = 0.0
+    for w in range(len(sa)):
+        da = {int(c): float(x) for c, x in zip(ca[w], sa[w, 1:]) if x > NEG / 2}
+        db = {int(c): float(x) for c, x in zip(cb[w], sb[w, 1:]) if x > NEG / 2}
+        for c in da.keys() & db.keys():
+            worst = max(worst, abs(da[c] - db[c]))
+        pick = lambda d: max(d, key=d.get) if d and max(d.values()) > 0 else None
+        if pick(da) != pick(db):
+            return float("inf")
+    return worst
+
+
 def export(run: str, local: Path | None, out: Path, int8: bool) -> int:
     import onnxruntime as ort
     torch.backends.mha.set_fastpath_enabled(False)
@@ -136,13 +153,15 @@ def export(run: str, local: Path | None, out: Path, int8: bool) -> int:
             with torch.no_grad():
                 ref = g[name](*inp[name])
             ref = ref if isinstance(ref, tuple) else (ref,)
-            feed = {k: v.numpy() for k, v in zip(ins, inp[name])}
+            want = {i.name for i in sess[name].get_inputs()}   # an unused input is dropped
+            feed = {k: v.numpy() for k, v in zip(ins, inp[name]) if k in want}
             got = sess[name].run(None, feed)
             for o, a, r in zip(outs, got, ref):
-                if o == "coref_cand":
-                    k = min(COREF_K, r.size(1))
-                    valid = ref[12][..., 1:k + 1] > NEG / 2      # ties among masked ones are arbitrary
-                    d = float((torch.from_numpy(a)[..., :k] != r[..., :k])[valid].any()) * 1e9
+                if o in ("coref_scores", "coref_cand"):
+                    # Near-tied candidates may rank in either order: compare
+                    # each word's candidate -> score map, and its choice.
+                    d = coref_diff(got[outs.index("coref_scores")], got[outs.index("coref_cand")],
+                                   ref[outs.index("coref_scores")], ref[outs.index("coref_cand")])
                 else:
                     d = diff(torch.from_numpy(np.asarray(a)), r)
                 worst[f"{name}.{o}"] = max(worst.get(f"{name}.{o}", 0.0), d)
@@ -151,7 +170,9 @@ def export(run: str, local: Path | None, out: Path, int8: bool) -> int:
         print(f"{'FAIL' if k in bad else 'ok  '} {k:28s} max |diff| {v:.2e}")
     meta = {"run": run, "encoder": spec.hf_id, "max_subwords": spec.max_subwords,
             "word_pool": model.word_pool, "coref_k": COREF_K, "opset": OPSET,
-            "graphs": {k: {"inputs": v[0], "outputs": v[1]} for k, v in SPEC.items()},
+            "graphs": {k: {"inputs": [i.name for i in sess[k].get_inputs()], "outputs": v[1]}
+                       for k, v in SPEC.items()},
+            "pad_token_id": tok.pad_token_id, "sep_token_id": tok.sep_token_id,
             "labels": vocab.labels, "parity_max_abs_diff": worst}
     (out / "onnx_meta.json").write_text(json.dumps(meta, indent=1))
     if int8 and not bad:
