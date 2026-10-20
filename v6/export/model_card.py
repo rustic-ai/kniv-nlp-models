@@ -26,8 +26,12 @@ MODELS = {
             "fewrel": "0.729 / 0.675 / 0.550", "heldout": "0.888", "crossner": "0.580",
             "fewnerd": "0.523", "lme": ("0.693", "0.480", "0.913", "73")},
         "hn": "",
-        "int8_speed": "1.7-1.9x faster than fp32 (Apple M2 Max: 0.57 s instead of 1.07 s for a "
+        "int8_speed": "about 2x faster than fp32 (Apple M2 Max: 0.47 s instead of 1.07 s for a "
                       "200-word window with the full analysis)",
+        "int8_how": "both encoder passes in per-channel INT8 after SmoothQuant (alpha 0.75) moved "
+                    "this encoder's activation outliers -- up to ~8,000 in the feed-forward "
+                    "down-projections -- into the weights",
+        "int8_drop": "0.7",
         "choose": "the better zero-shot model (new relation and entity types), the better "
                   "memory extractor, with longer windows (1,024 subwords) and about 50M fewer "
                   "parameters",
@@ -42,8 +46,12 @@ MODELS = {
             "coref": "0.692", "re_gold": "0.733", "re_e2e": "0.627",
             "fewrel": "0.731 / 0.620 / 0.602", "heldout": "0.852", "crossner": "0.533",
             "fewnerd": "0.506", "lme": ("0.573", "0.400", "0.967", "82")},
-        "int8_speed": "1.4-1.6x faster than fp32 (Apple M2 Max: 0.62 s instead of 0.97 s for a "
+        "int8_speed": "1.5-1.7x faster than fp32 (Apple M2 Max: 0.58 s instead of 0.97 s for a "
                       "200-word window with the full analysis)",
+        "int8_how": "the plain pass in per-channel INT8 after SmoothQuant (alpha 0.85); the "
+                    "relation pass, more sensitive, in per-channel INT8 with its feed-forward "
+                    "down-projections kept fp32",
+        "int8_drop": "0.2",
         "hn": " This model's relation layer was also trained with hard-negative relations "
               "(each true relation's nearest relations by label embedding in its batch).",
         "choose": "slightly ahead on the fixed benchmarks: Re-DocRED, SRL, NER and parsing",
@@ -213,12 +221,10 @@ path = snapshot_download("{org}/{repo}", ignore_patterns=[
 kniv = Kniv(path, variant="fp16")
 ```
 
-**INT8, for CPU speed.** `Kniv(path, int8=True)` uses `onnx/plain-int8.onnx`
-and `onnx/marker-int8.onnx` (per-channel INT8 weights, the feed-forward
-down-projections kept fp32: this encoder's activation outliers live there)
-and the FP16 label graph. On the dev subsets no task drops more than 0.3 points
-(UD POS and LAS, Re-DocRED relations, CrossNER spans), and on CPU it runs
-{int8_speed}.
+**INT8, for CPU speed.** `Kniv(path, int8=True)`: {int8_how}; the label
+graph (run once per schema) is FP16. On the dev subsets no task drops more
+than {int8_drop} points (UD POS and LAS, Re-DocRED relations, CrossNER
+spans), and on CPU it runs {int8_speed}.
 
 ### Agent memory (LongMemEval, oracle sessions, 150 questions)
 
@@ -286,7 +292,7 @@ def write(model: str, out: Path) -> None:
     text = CARD.format(base=m["base"], base_short=m["base"].split("/")[-1], run=m["run"],
                        params=m["params"], encoder_params=m["encoder_params"], other=m["other"],
                        org=ORG, repo=m["repo"], choose=m["choose"], github=GITHUB,
-                       window=m["window"], base_licence=m["base_licence"], hn=m["hn"], int8_speed=m["int8_speed"],
+                       window=m["window"], base_licence=m["base_licence"], hn=m["hn"], int8_speed=m["int8_speed"], int8_how=m["int8_how"], int8_drop=m["int8_drop"],
                        lme0=s["lme"][0], lme1=s["lme"][1],
                        lme2=s["lme"][2], lme3=s["lme"][3],
                        **{k: v for k, v in s.items() if k != "lme"})
