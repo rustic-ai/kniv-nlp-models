@@ -216,7 +216,7 @@ kniv = Kniv(path, variant="fp16")
 **INT8, for CPU speed.** `Kniv(path, int8=True)` uses `onnx/plain-int8.onnx`
 and `onnx/marker-int8.onnx` (per-channel INT8 weights, the feed-forward
 down-projections kept fp32: this encoder's activation outliers live there)
-and the FP16 label graph. On the dev subsets it stays within 0.3 of fp32
+and the FP16 label graph. On the dev subsets no task drops more than 0.3 points
 (UD POS and LAS, Re-DocRED relations, CrossNER spans), and on CPU it runs
 {int8_speed}.
 
