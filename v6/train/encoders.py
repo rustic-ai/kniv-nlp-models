@@ -88,6 +88,8 @@ ENCODERS: dict[str, EncoderSpec] = {s.name: s for s in [
                 max_subwords=1024, encoder_lr=8e-5, grad_checkpointing=False),
     EncoderSpec("deberta-v3-small", "microsoft/deberta-v3-small",
                 max_subwords=512, encoder_lr=1e-4, grad_checkpointing=False),
+    EncoderSpec("deberta-v3-base", "microsoft/deberta-v3-base",
+                max_subwords=512, encoder_lr=1e-4, grad_checkpointing=False),
     EncoderSpec("deberta-v3-xsmall-s", "microsoft/deberta-v3-xsmall",
                 max_subwords=512, encoder_lr=1e-4, grad_checkpointing=False),
     EncoderSpec("ultrabert-150m-s", "dmis-lab/UltraBERT-150M",
