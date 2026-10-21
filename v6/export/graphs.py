@@ -120,7 +120,7 @@ class Plain(nn.Module):
             # The packed BiLSTM, batch 1: run to the last real word, zeros
             # after it (what pad_packed_sequence gives).
             h = m.ner.proj(ner_in)
-            n = (wm.long() * torch.arange(1, wm.size(1) + 1)).max().clamp(min=1)
+            n = (wm.long() * torch.arange(1, wm.size(1) + 1, device=wm.device)).max().clamp(min=1)
             r, _ = m.ner.rnn(h[:, :n])
             r = torch.cat([r, torch.zeros_like(h[:, n:])], 1)
             ner = m.ner.out(r)
@@ -155,11 +155,11 @@ class Plain(nn.Module):
         last = attention_mask.sum(1, keepdim=True) - 1
         f = torch.where(word_mask, first, last.expand(-1, W))
         nxt = torch.cat([f[:, 1:], last], 1)                                # [1,W]
-        i = torch.arange(W)
+        i = torch.arange(W, device=h.device)
         later = i.view(W, 1) <= i.view(1, W)                                # j >= i
         big = torch.full_like(nxt, 2 ** 30)
         nxt = torch.where(later.unsqueeze(0), nxt.unsqueeze(1), big.unsqueeze(1)).amin(-1)
-        t = torch.arange(T).view(1, 1, T)
+        t = torch.arange(T, device=h.device).view(1, 1, T)
         inside = (t >= f.unsqueeze(-1)) & (t < nxt.unsqueeze(-1)) & word_mask.unsqueeze(-1)
         sc = c.attn(h).float().squeeze(-1).unsqueeze(1)
         att = sc.masked_fill(~inside, NEG).softmax(-1)
@@ -173,18 +173,18 @@ class Plain(nn.Module):
         c = self.m.coref
         _, W, D = a.shape
         coarse = (c.coarse(a) @ a.transpose(1, 2)) / D ** 0.5
-        i = torch.arange(W)
+        i = torch.arange(W, device=a.device)
         ok = (i.view(1, W, 1) > i.view(1, 1, W)) & wm.unsqueeze(1) & wm.unsqueeze(2)
         coarse = coarse.float().masked_fill(~ok, NEG)
-        coarse = torch.cat([coarse, torch.full((1, W, COREF_K), NEG)], -1)
+        coarse = torch.cat([coarse, torch.full((1, W, COREF_K), NEG, device=a.device)], -1)
         top, cand = coarse.topk(COREF_K, dim=-1)
-        ap = torch.cat([a, torch.zeros(1, COREF_K, D, dtype=a.dtype)], 1)
+        ap = torch.cat([a, torch.zeros(1, COREF_K, D, dtype=a.dtype, device=a.device)], 1)
         aj = ap[0][cand[0]].unsqueeze(0)                                   # [1,W,K,D]
         ai = a.unsqueeze(2).expand_as(aj)
         dist = c.dist(_dist_bucket(i.view(1, W, 1) - cand)).to(a.dtype)
         fine = c.fine(torch.cat([ai, aj, ai * aj, dist], -1)).squeeze(-1).float()
         s = torch.where(top > NEG / 2, top + fine, torch.full_like(top, NEG))
-        return torch.cat([torch.zeros(1, W, 1), s], -1), cand
+        return torch.cat([torch.zeros(1, W, 1, device=a.device), s], -1), cand
 
 
 class DepRel(nn.Module):
@@ -212,11 +212,11 @@ class SrlRoles(nn.Module):
         """``SrlContextHead.forward`` through ``encoder_layers``."""
         hd = self.head
         words = words * mask.unsqueeze(-1)
-        pos = torch.arange(words.size(1)).unsqueeze(0)
+        pos = torch.arange(words.size(1), device=words.device).unsqueeze(0)
         x = hd.proj(words) + hd.is_pred((pos == pred.unsqueeze(1)).long()) \
             + hd.rel((pos - pred.unsqueeze(1)).clamp(-hd.max_rel, hd.max_rel) + hd.max_rel)
         h = encoder_layers(hd.enc, x, ~mask)
-        hp = h[torch.arange(h.size(0)), pred].unsqueeze(1).expand_as(h)
+        hp = h[torch.arange(h.size(0), device=h.device), pred].unsqueeze(1).expand_as(h)
         return hd.out(torch.cat([h, hp], -1))
 
 
@@ -233,7 +233,7 @@ class CorefSpans(nn.Module):
         over the mentions instead of expanded to a traced count."""
         c, a = self.c, coref_words
         W = a.size(1)
-        off = torch.arange(-c.r, c.r + 1)
+        off = torch.arange(-c.r, c.r + 1, device=a.device)
         pos = heads.unsqueeze(1) + off
         inb = (pos >= 0) & (pos < W)
         posc = pos.clamp(0, W - 1)
@@ -346,7 +346,7 @@ class Attr(nn.Module):
         self.attr = model.attr
 
     def forward(self, pair, labels, ent):
-        same = torch.ones(pair.size(0), ent.size(0), dtype=torch.bool)
+        same = torch.ones(pair.size(0), ent.size(0), dtype=torch.bool, device=pair.device)
         o = self.attr.score(pair, labels, ent, same)
         return o["polarity"], o["modality"], o["holder"], o["time"]
 
