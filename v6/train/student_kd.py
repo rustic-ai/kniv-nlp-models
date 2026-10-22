@@ -19,6 +19,7 @@ the first steps, weighted by ``--head-weight``):
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import pickle
 from collections import defaultdict
@@ -28,7 +29,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .data import IGNORE
+from .data import FEATURES, IGNORE, USED_CACHES, file_digest
 from .student_targets import FLOOR
 
 TEACHERS = ("ultrabert-380m-v7b8ev", "deberta-v3-large-v7b8ev")
@@ -210,6 +211,71 @@ def build(windows_path: Path, target_paths: dict[str, list[Path]], tok, spec, vo
                 out.append(f)
         if limit and len(out) >= limit:
             break
+    return out
+
+
+def _sha256(path: Path) -> str:
+    """Content hash of a target shard, remembered beside it -- the same value
+    the hub reports for the uploaded file, so a cache keyed on it is found
+    whether the targets were read locally or never downloaded."""
+    st = path.stat()
+    side = path.with_name(path.name + ".sha256")
+    if side.exists():
+        rec = json.loads(side.read_text())
+        if rec.get("size") == st.st_size and rec.get("mtime_ns") == st.st_mtime_ns:
+            return rec["sha256"]
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 24), b""):
+            h.update(block)
+    side.write_text(json.dumps({"size": st.st_size, "mtime_ns": st.st_mtime_ns,
+                                "sha256": h.hexdigest()}))
+    return h.hexdigest()
+
+
+def student_features(st_dir: Path, tok, spec, vocab, bank, markers: bool = True,
+                     limit: int | None = None) -> list[dict]:
+    """``build``, cached in the corpus feature directory (and listed in
+    ``USED_CACHES``, so ``--hub-data`` ships it). Targets come from
+    ``st_dir/<teacher>/shard-*.pkl`` when present, else from the runs repo;
+    the key uses the hub's checksums then, so a VM that has the cache never
+    downloads the targets."""
+    from .student_targets import WINDOWS
+    local = {t: sorted((st_dir / t).glob("shard-*.pkl")) for t in TEACHERS}
+    if all(local.values()):
+        digests = {t: [(p.name, _sha256(p)) for p in ps] for t, ps in local.items()}
+    else:
+        from huggingface_hub import HfApi
+        from .gold_eval import HF_REPO
+        digests = {}
+        for t in TEACHERS:
+            files = [f for f in HfApi().list_repo_tree(HF_REPO, path_in_repo=f"{t}/student-targets")
+                     if f.path.endswith(".pkl")]
+            digests[t] = sorted((Path(f.path).name, f.lfs.sha256) for f in files)
+    h = hashlib.sha256(json.dumps([spec.hf_id, spec.max_subwords, markers, limit,
+                                   vocab.to_json()["labels"], digests, WEIGHTS, FLOOR, "student-v1"]
+                                  ).encode())
+    h.update(json.dumps([[r["id"], r["name"]] for r in bank["relations"]]
+                        + [[t["id"], t["name"]] for t in bank["entity_types"]]).encode())
+    h.update(file_digest(WINDOWS).encode())
+    path = FEATURES / f"{spec.name}-student-{h.hexdigest()[:16]}.pkl"
+    USED_CACHES.append(path)
+    if path.exists():
+        with path.open("rb") as fh:
+            return pickle.load(fh)
+    if not all(local.values()):
+        from huggingface_hub import snapshot_download
+        from .gold_eval import HF_REPO
+        hub = st_dir.parent / "hub"
+        snapshot_download(HF_REPO, allow_patterns=[f"{t}/student-targets/*" for t in TEACHERS],
+                          local_dir=str(hub))
+        local = {t: sorted((hub / t / "student-targets").glob("shard-*.pkl")) for t in TEACHERS}
+    out = build(WINDOWS, local, tok, spec, vocab, bank, markers=markers, limit=limit)
+    FEATURES.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("wb") as fh:
+        pickle.dump(out, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp.rename(path)
     return out
 
 

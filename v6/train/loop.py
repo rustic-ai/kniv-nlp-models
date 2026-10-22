@@ -759,27 +759,15 @@ def main() -> int:
     label_kd = None
     if args.student_targets:
         from ..label_bank import load as load_bank
-        from .student_kd import TEACHERS, build
-        from .student_targets import WINDOWS
-        st_dir = Path(args.student_targets)
-        if not all((st_dir / t).exists() for t in TEACHERS):
-            from huggingface_hub import snapshot_download
-            from .gold_eval import HF_REPO
-            snapshot_download(HF_REPO, allow_patterns=[f"{t}/student-targets/*" for t in TEACHERS],
-                              local_dir=str(st_dir.parent / "hub"))
-            st_dir = st_dir.parent / "hub"
-            paths = {t: sorted((st_dir / t / "student-targets").glob("shard-*.pkl")) for t in TEACHERS}
-        else:
-            paths = {t: sorted((st_dir / t).glob("shard-*.pkl")) for t in TEACHERS}
+        from .student_kd import student_features
         preparing("featurising the student windows")
-        sfeats = build(WINDOWS, paths, tok, spec, vocab, load_bank(), markers=args.rel_markers,
-                       limit=args.student_limit)
+        sfeats = student_features(Path(args.student_targets), tok, spec, vocab, load_bank(),
+                                  markers=args.rel_markers, limit=args.student_limit)
         train = train + sfeats * args.student_weight
         if args.kd_labels:
             from .student_kd import LabelDistiller
             label_kd = LabelDistiller(tok, args.kd_labels, args.seed)
-        print(f"student windows: {len(sfeats):,} x{args.student_weight} from "
-              f"{', '.join(f'{t} {len(p)} shards' for t, p in paths.items())}", flush=True)
+        print(f"student windows: {len(sfeats):,} x{args.student_weight}", flush=True)
 
     kg_data = dict(x.split("=") for x in args.kg_data.split(",") if x)
     if args.kg_teacher:
