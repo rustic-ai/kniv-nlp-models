@@ -241,8 +241,54 @@ def main() -> int:
     d.add_argument("--shard", default="0/1")
     d.add_argument("--limit", type=int)
     d.add_argument("--upload", action="store_true")
+    lb = sub.add_parser("labels")
+    lb.add_argument("--runs", default="ultrabert-380m-v7b8ev,deberta-v3-large-v7b8ev")
+    lb.add_argument("--local", type=Path)
+    lb.add_argument("--device")
     args = ap.parse_args()
-    return dump(args)
+    return dump(args) if args.cmd == "dump" else dump_labels(args)
+
+
+
+# ── label vectors, for label distillation (student_kd.LabelDistiller) ──
+LABEL_TEXTS = DATA_DIR / "v6-corpus" / "student_label_emb.pkl"
+
+
+def label_texts(bank: dict) -> list[str]:
+    """Every relation and entity type of the bank as the label pass reads
+    them: name with description, name alone, and up to two aliases."""
+    from .kdata import label_text, type_text
+    out = []
+    for r in bank["relations"]:
+        out += [label_text(r, "name_desc"), label_text(r, "name")]
+        for a in (r.get("aliases") or [])[:2]:
+            out.append(label_text({**r, "name": a}, "name_desc"))
+    for t in bank["entity_types"]:
+        out += [type_text(t), type_text({"name": t["name"]})]
+    return list(dict.fromkeys(out))
+
+
+def dump_labels(args) -> int:
+    """Both teachers' label vectors for every bank text, L2-normalised."""
+    import torch
+    from ..label_bank import load as load_bank
+    from .gold_eval import HF_REPO, load_run
+    texts = label_texts(load_bank())
+    out = {"texts": texts}
+    for run in args.runs.split(","):
+        model, tok, *_ = load_run(run, HF_REPO, torch.device(args.device or "cpu"), args.local)
+        vecs = []
+        with torch.no_grad():
+            for i in range(0, len(texts), 64):
+                enc = tok(texts[i:i + 64], padding=True, truncation=True, max_length=48, return_tensors="pt")
+                e = model.label_embeddings(enc["input_ids"].to(model.encoder.device),
+                                           enc["attention_mask"].to(model.encoder.device)).float()
+                vecs.append(torch.nn.functional.normalize(e, dim=-1).cpu().numpy().astype(np.float16))
+        out[run] = np.concatenate(vecs)
+        print(f"{run}: {len(texts):,} label vectors", flush=True)
+    LABEL_TEXTS.write_bytes(pickle.dumps(out, protocol=5))
+    print(f"wrote {LABEL_TEXTS} ({LABEL_TEXTS.stat().st_size >> 20} MB)", flush=True)
+    return 0
 
 
 if __name__ == "__main__":
