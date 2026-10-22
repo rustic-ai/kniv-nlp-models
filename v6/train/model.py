@@ -985,7 +985,7 @@ class V6Model(nn.Module):
                  legacy_rank: int | None = None, trust_remote_code: bool = False,
                  word_pool: str = "first", attr_head: bool = False,
                  srl_pred_hidden: int = 0, srl_ctx: int = 0, linker: int = 0,
-                 ner_lstm: int = 0):
+                 ner_lstm: int = 0, rel_xattn_layers: int = 2):
         super().__init__()
         # Word vectors: the first subword (v6), or the mean of all of a word's
         # subwords -- for tokenizers that split words often, with little in
@@ -1083,7 +1083,8 @@ class V6Model(nn.Module):
             # ATLOP over a marker pass -- with a fixed relation inventory, or
             # with relations as label texts -- or the shared-pass head.
             if rel_head == "zs":
-                self.relation = ZeroShotRelationHead(H, label_dim=label_dim, p=p)
+                self.relation = ZeroShotRelationHead(H, label_dim=label_dim, p=p,
+                                                     layers=rel_xattn_layers)
                 self.label_enc = LabelEncoder(H, label_dim, pool="attn")
             elif rel_head == "label":
                 self.relation = LabelRelationHead(H, label_dim=label_dim)

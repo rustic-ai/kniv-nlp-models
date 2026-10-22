@@ -243,7 +243,8 @@ def build_bundles() -> tuple[Path, Path, str]:
                          corpus / "fewrel_rel.json", corpus / "fewnerd_spans.json",
                          corpus / "docred_distant_rel.json", corpus / "kg_holdout.json",
                          corpus / "kg_pretrain.json", corpus / "kd_distant.json",
-                         corpus / "kd_teacher.pkl", corpus / "student_windows.jsonl")
+                         corpus / "kd_teacher.pkl", corpus / "student_windows.jsonl",
+                         corpus / "student_label_emb.pkl")
              if p.exists()]
     # Keyed by every bundled side file's size and mtime: a name that ignores
     # one ships a stale copy of it (the Re-DocRED evidence was lost that way).

@@ -527,6 +527,15 @@ def main() -> int:
     ap.add_argument("--student-weight", type=int, default=1,
                     help="with --student-targets: copies of the student windows in the mix")
     ap.add_argument("--student-limit", type=int, help="with --student-targets: at most this many windows")
+    ap.add_argument("--rel-xattn-layers", type=int, default=2,
+                    help="label-to-document attention layers in the zero-shot relation head "
+                         "(added layers start as the identity)")
+    ap.add_argument("--kd-rank", action="store_true",
+                    help="with --student-targets: also distil the teachers' ranking of the schema's "
+                         "relations per pair and types per span (zero-shot)")
+    ap.add_argument("--kd-labels", type=int, default=0, metavar="N",
+                    help="with --student-targets: label-vector distillation over N bank texts per "
+                         "micro-batch (student_targets labels)")
     ap.add_argument("--distil-distant", type=int, default=1,
                     help="with --distil: copies of the teacher's DocRED-distant documents")
     ap.add_argument("--label-holdout", action="store_true",
@@ -747,6 +756,7 @@ def main() -> int:
         print(f"distillation from {'+'.join(teacher['runs'])}: Re-DocRED train {n_rd:,} documents, "
               f"distant {n_dd:,} x{args.distil_distant}", flush=True)
 
+    label_kd = None
     if args.student_targets:
         from ..label_bank import load as load_bank
         from .student_kd import TEACHERS, build
@@ -765,6 +775,9 @@ def main() -> int:
         sfeats = build(WINDOWS, paths, tok, spec, vocab, load_bank(), markers=args.rel_markers,
                        limit=args.student_limit)
         train = train + sfeats * args.student_weight
+        if args.kd_labels:
+            from .student_kd import LabelDistiller
+            label_kd = LabelDistiller(tok, args.kd_labels, args.seed)
         print(f"student windows: {len(sfeats):,} x{args.student_weight} from "
               f"{', '.join(f'{t} {len(p)} shards' for t, p in paths.items())}", flush=True)
 
@@ -830,7 +843,7 @@ def main() -> int:
                     trust_remote_code=spec.trust_remote_code,
                     word_pool=args.word_pool, attr_head=args.attr_head,
                     srl_pred_hidden=args.srl_pred_hidden, srl_ctx=args.srl_ctx,
-                    ner_lstm=args.ner_lstm).to(device)
+                    ner_lstm=args.ner_lstm, rel_xattn_layers=args.rel_xattn_layers).to(device)
     init_relation = args.init_relation or "drop"
     if init_relation == "transplant" and args.rel_head != "label":
         raise SystemExit("--init-relation transplant needs --rel-head label")
@@ -1079,6 +1092,7 @@ def main() -> int:
                                  "legacy_rank": args.legacy_rank,
                                  "srl_pred_hidden": args.srl_pred_hidden,
                                  "srl_ctx": args.srl_ctx, "ner_lstm": args.ner_lstm,
+                                 "rel_xattn_layers": args.rel_xattn_layers,
                                  "word_pool": args.word_pool,
                                  "attr_head": args.attr_head,
                                  "kg_holdout": hold_ids,
@@ -1136,7 +1150,9 @@ def main() -> int:
                         L = losses(o, b)
                         if args.student_targets:
                             from .student_kd import student_losses
-                            L.update(student_losses(o, b))
+                            L.update(student_losses(o, b, rank=args.kd_rank))
+                            if label_kd is not None:
+                                L["kd_label"] = label_kd.loss(model, device)
                     except torch.OutOfMemoryError:
                         # One oversized batch must not end a run that fits
                         # otherwise: drop this step (like a non-finite one),

@@ -35,7 +35,11 @@ TEACHERS = ("ultrabert-380m-v7b8ev", "deberta-v3-large-v7b8ev")
 WEIGHTS = {"pos": .5, "morph": .5, "lemma": .5, "arc": .5, "deprel": .5, "srl": .5, "rel": .5,
            "ner": .75, "ent": .75, "cls": .75, "sentiment": .75, "coref": .75, "span": .75}
 KD_HEADS = ("kd_pos", "kd_morph", "kd_lemma", "kd_ner", "kd_ent", "kd_arc", "kd_deprel",
-            "kd_srl_pred", "kd_srl", "kd_cls", "kd_sentiment", "kd_coref", "kd_span", "kd_rel")
+            "kd_srl_pred", "kd_srl", "kd_cls", "kd_sentiment", "kd_coref", "kd_span", "kd_rel",
+            "kd_rel_rank", "kd_span_rank", "kd_label")
+# Ranking distillation reads rows where the teachers see a plausible answer:
+# a row whose best teacher margin is below this says "none", not an order.
+RANK_MIN = -1.0
 SIZES = {"pos": "pos", "morph": "morph", "lemma": "lemma", "ner": "ner", "deprel": "dep"}
 
 
@@ -349,7 +353,54 @@ def _decision(margins, teacher):
     return F.binary_cross_entropy_with_logits(margins[ok].float(), torch.sigmoid(teacher[ok].float())), int(ok.sum())
 
 
-def student_losses(o: dict, b: dict) -> dict:
+def _ranking(margins, teacher, T: float = 1.0):
+    """Listwise distillation: per row (an entity pair, or a span) whose best
+    teacher margin is above ``RANK_MIN``, the student's distribution over the
+    row's schema columns pulled toward the teachers' (KL). Zero-shot is a
+    ranking among the listed labels; the decision loss teaches only each
+    label's yes/no."""
+    ok = torch.isfinite(teacher)
+    rows = ok.any(1) & (torch.where(ok, teacher, torch.full_like(teacher, -1e4)).amax(1) > RANK_MIN)
+    if not bool(rows.any()):
+        return margins.sum() * 0.0, 0
+    t = teacher[rows].float()
+    m = ok[rows]
+    s = margins[rows].float()
+    p = torch.softmax(torch.where(m, t / T, torch.full_like(t, -1e4)), -1)
+    lp = torch.log_softmax(torch.where(m, s / T, torch.full_like(s, -1e4)), -1)
+    return -(p * lp).sum(-1).mean() + (p * torch.log(p.clamp(min=1e-12))).sum(-1).mean(), int(rows.sum())
+
+
+class LabelDistiller:
+    """Label-vector distillation: the student's label pass over a sample of
+    the bank's relation and type texts must reproduce the teachers' cosine
+    similarity structure among them (relational distillation: no projection
+    between the vector spaces, and both teachers mix by ``WEIGHTS["rel"]``)."""
+
+    def __init__(self, tok, n: int = 128, seed: int = 0):
+        from .student_targets import LABEL_TEXTS
+        d = pickle.loads(Path(LABEL_TEXTS).read_bytes())
+        self.texts = d["texts"]
+        self.ta, self.tb = (torch.from_numpy(d[t].astype(np.float32)) for t in TEACHERS)
+        self.tok, self.n = tok, n
+        self.rng = np.random.default_rng(seed)
+        self._ids = {}
+
+    def loss(self, model, device):
+        idx = self.rng.choice(len(self.texts), size=min(self.n, len(self.texts)), replace=False)
+        enc = self.tok([self.texts[i] for i in idx], padding=True, truncation=True, max_length=48,
+                       return_tensors="pt")
+        e = model.label_embeddings(enc["input_ids"].to(device), enc["attention_mask"].to(device)).float()
+        e = F.normalize(e, dim=-1)
+        w = WEIGHTS["rel"]
+        sa, sb = self.ta[idx].to(device), self.tb[idx].to(device)
+        target = w * (sa @ sa.T) + (1 - w) * (sb @ sb.T)
+        iu = torch.triu_indices(len(idx), len(idx), 1, device=device)
+        sim = e @ e.T
+        return F.mse_loss(sim[iu[0], iu[1]], target[iu[0], iu[1]]), len(idx)
+
+
+def student_losses(o: dict, b: dict, rank: bool = False) -> dict:
     out = {}
     if "kd_pos" not in b:
         return {h: (o["pos"].sum() * 0.0, 0) for h in KD_HEADS}
@@ -394,4 +445,10 @@ def student_losses(o: dict, b: dict) -> dict:
         out["kd_rel"] = _decision(o["relation"][:, 1:] - o["relation"][:, :1], b["kd_rel"])
     else:
         out["kd_rel"] = (o["pos"].sum() * 0.0, 0)
+    zero = (o["pos"].sum() * 0.0, 0)
+    out["kd_rel_rank"] = (_ranking(o["relation"][:, 1:] - o["relation"][:, :1], b["kd_rel"])
+                          if rank and "relation" in o and "kd_rel" in b and len(o["relation"]) else zero)
+    out["kd_span_rank"] = (_ranking(o["span"][:, 1:] - o["span"][:, :1], b["kd_span"])
+                           if rank and "span" in o and "kd_span" in b and len(o["span"]) else zero)
+    out["kd_label"] = zero          # filled by the loop (LabelDistiller), once per micro-batch
     return out

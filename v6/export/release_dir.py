@@ -24,7 +24,7 @@ REPO = Path(__file__).resolve().parents[2]
 # model_from_checkpoint's construction arguments
 CONSTRUCT = {"srl_mode", "phase2", "p2_context", "ent_head", "rel_adapter", "rel_markers", "rel_head",
              "label_plain", "legacy_relation", "span_head", "label_adapter", "legacy_rank", "word_pool",
-             "attr_head", "srl_pred_hidden", "srl_ctx", "linker", "ner_lstm"}
+             "attr_head", "srl_pred_hidden", "srl_ctx", "linker", "ner_lstm", "rel_xattn_layers"}
 ENCODER_KEYS = {"name", "hf_id", "max_subwords", "attn_implementation", "trust_remote_code"}
 
 
