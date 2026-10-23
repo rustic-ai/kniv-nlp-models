@@ -71,6 +71,18 @@ def coref(model, tok, spec, vocab, device) -> dict:
                 # predicted mention overlaps it.
                 if any(a <= m[1] and m[0] <= b for a, b in p_of):
                     c[f"missed_overlap_{k}"] += 1
+                    continue
+                # Word-level coreference has no separate mention detection: a
+                # mention exists only once linked. A chain's first mention needs
+                # a later one to link to it; a later one failed to link back.
+                prev = [x for x in gold[gi] if x[0] < m[0]]
+                if not prev:
+                    c[f"missed_first_{k}"] += 1
+                else:
+                    d = m[0] - max(prev)[0]
+                    band = "near" if d < 50 else "mid" if d < 200 else "far"
+                    c[f"missed_later_{band}_{k}"] += 1
+                    c[f"missed_later_antecedent_found_{k}"] += int(max(prev) in p_of)
                 continue
             mates = [x for x in pred[p_of[m]] if x != m]
             own = [x for x in mates if g_of.get(x) == gi]

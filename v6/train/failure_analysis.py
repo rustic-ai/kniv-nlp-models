@@ -103,8 +103,11 @@ def coref(model, tok, spec, vocab, device) -> dict:
         g = max(c.get(f"gold_{k}", 0), 1)
         print(f"FA coref {k}: gold {c.get(f'gold_{k}', 0)}, correct {c.get(f'correct_{k}', 0) / g:.3f}, "
               f"wrong link {c.get(f'wrong_{k}', 0) / g:.3f}, unlinked {c.get(f'unlinked_{k}', 0) / g:.3f}, "
-              f"missed {c.get(f'missed_{k}', 0) / g:.3f} (boundary {c.get(f'missed_overlap_{k}', 0) / g:.3f})",
-              flush=True)
+              f"missed {c.get(f'missed_{k}', 0) / g:.3f} (boundary {c.get(f'missed_overlap_{k}', 0) / g:.3f}, "
+              f"chain's first {c.get(f'missed_first_{k}', 0) / g:.3f}, later mention not linked back: near "
+              f"{c.get(f'missed_later_near_{k}', 0) / g:.3f} / mid {c.get(f'missed_later_mid_{k}', 0) / g:.3f} / "
+              f"far {c.get(f'missed_later_far_{k}', 0) / g:.3f}; its antecedent itself found "
+              f"{c.get(f'missed_later_antecedent_found_{k}', 0)})", flush=True)
     print(f"FA coref entities: split {c.get('split_entities', 0) / max(c.get('gold_entities', 1), 1):.3f} "
           f"of gold, fused {c.get('fused_entities', 0) / max(c.get('pred_entities', 1), 1):.3f} of predicted",
           flush=True)
@@ -176,8 +179,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--runs", required=True)
     ap.add_argument("--parts", default="relations,coref,spans")
+    ap.add_argument("--coref-biases", help="comma-separated link biases to sweep ('' = only the deployed one)")
     ap.add_argument("--device")
     args = ap.parse_args()
+    global COREF_BIASES
+    if args.coref_biases is not None:
+        COREF_BIASES = tuple(float(x) for x in args.coref_biases.split(",") if x)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else
                                           "mps" if torch.backends.mps.is_available() else "cpu"))
     parts = args.parts.split(",")
@@ -188,12 +195,13 @@ def main() -> int:
         cal = apply_calibration(model, run, vocab)
         print(f"FA === {run}: calibration {json.dumps({k: v for k, v in cal.items() if k != 'rel_offsets'})}",
               flush=True)
-        res = {}
+        path = RUNS_DIR / "failure" / f"{run}.json"
+        res = json.loads(path.read_text()) if path.exists() else {}   # parts not rerun are kept
         with torch.no_grad():
             for p in parts:
                 res[p] = {"relations": relations, "coref": coref, "spans": spans}[p](
                     model, tok, spec, vocab, device)
-                (RUNS_DIR / "failure" / f"{run}.json").write_text(json.dumps(res, indent=1, default=str))
+                path.write_text(json.dumps(res, indent=1, default=str))
         del model
     return 0
 

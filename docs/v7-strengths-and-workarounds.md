@@ -48,7 +48,7 @@ Every decoding setting is an attribute of the `Kniv` object, loaded from
 | `kniv.top` | 4 | at most this many facts per entity pair | lower it (1 = only the best relation per pair) |
 | `kniv.coref_bias` | 2.0 / 1.5 | bias against linking a mention to an antecedent | raise it |
 | `kniv.entity_coref` | `"none"` | whether coreference merges entities for relation extraction: `"none"`, `"compatible"` (only name-compatible links) or `"all"` | keep `"none"` |
-| `kniv.span_offset` | 0 | typed spans (`entity_types` given) are kept when their margin > offset | raise it |
+| `kniv.span_offset` | -2.0 / -2.5 | typed spans (`entity_types` given) are kept when their margin > offset; the default suits new entity types, types close to common ones (people, places, organisations) do better near -0.5 | raise it |
 | `kniv.ent_o_bias` | 0 | default entity head (no `entity_types`): bias toward "not an entity" | raise it |
 
 ```python

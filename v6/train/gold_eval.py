@@ -506,9 +506,12 @@ def schema_embeddings(model, tok, device, cols: list[int] | None = None):
 
 @torch.no_grad()
 def run_phase2(model, feats: list[dict], tok, device, batch: int = 4,
-               cols: list[int] | None = None, coref_bias: float | None = None) -> list[dict]:
+               cols: list[int] | None = None, coref_bias: float | None = None,
+               keep_pairs: bool = False) -> list[dict]:
     """Per window: predicted coref clusters (inclusive word spans), relation
-    logits per ordered entity pair, and NER log-probabilities."""
+    logits per ordered entity pair, and NER log-probabilities. ``keep_pairs``:
+    also the relation head's pair vectors and the encoder vectors they are
+    built from (``pair``, ``pair_in``: head, tail, context), for probes."""
     order = sorted(range(len(feats)), key=lambda i: len(feats[i]["input_ids"]))
     out: list[dict | None] = [None] * len(feats)
     label_emb = (schema_embeddings(model, tok, device, cols) if model.rel_kind in ("label", "zs")
@@ -558,6 +561,11 @@ def run_phase2(model, feats: list[dict], tok, device, batch: int = 4,
                               if "ent" in o else None),
                       "link_words": (o["link_words"][j, :W].float().cpu()
                                      if "link_words" in o else None)}
+            if keep_pairs and "relation" in o:
+                sel = torch.as_tensor(pair_b == j, device=device)
+                out[i]["pair"] = model.relation._pair[sel].half().cpu().numpy()
+                out[i]["pair_in"] = np.concatenate([x[sel].half().cpu().numpy()
+                                                    for x in model.relation._pair_in], 1)
     return out
 
 
@@ -635,16 +643,17 @@ REL_OFFSETS = (-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
 MIN_DEV_FACTS = 20
 
 
-def relation_pass(model, tok, spec, vocab, device, split: str = "dev"):
+def relation_pass(model, tok, spec, vocab, device, split: str = "dev", keep_pairs: bool = False,
+                  limit: int | None = None):
     """Re-DocRED ``split`` with gold entities through the model: ``(items,
     feats, outs)``, for ``fit_offsets`` and the error analyses."""
     from ..gold.redocred import load_rel_items
-    items = load_rel_items(split)
+    items = load_rel_items(split, limit=limit)
     feats = [phase2_window(it.tokens, [tuple(x) for x in it.layers["sentence_spans"]], tok,
                            spec, vocab, [[(a, e + 1) for a, e in en["mentions"]]
                                          for en in it.entities],
                            markers=model.rel_markers) for it in items]
-    return items, feats, run_phase2(model, feats, tok, device, batch=1)
+    return items, feats, run_phase2(model, feats, tok, device, batch=1, keep_pairs=keep_pairs)
 
 
 def calibrate_offsets(model, tok, spec, vocab, device):

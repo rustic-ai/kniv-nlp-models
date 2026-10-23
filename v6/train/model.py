@@ -433,6 +433,7 @@ class MarkerRelationHead(nn.Module):
                 onehot = F.one_hot(ts_.clamp(min=0), S).float() * (ts_ >= 0).unsqueeze(-1)
                 sent_att[sel] = (ht @ onehot).to(sent_att.dtype)
         self._ent = ent                                  # [E,H], read by the fact attribute head
+        self._pair_in = (hs, ts, rs)                     # [P,H] each: what the pair vector is built from (probes)
         zs = torch.tanh(self.head_extractor(torch.cat([hs, rs], -1)))
         zo = torch.tanh(self.tail_extractor(torch.cat([ts, rs], -1)))
         if getattr(self, "_parts", False):
