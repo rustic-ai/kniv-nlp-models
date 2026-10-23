@@ -635,6 +635,18 @@ REL_OFFSETS = (-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
 MIN_DEV_FACTS = 20
 
 
+def relation_pass(model, tok, spec, vocab, device, split: str = "dev"):
+    """Re-DocRED ``split`` with gold entities through the model: ``(items,
+    feats, outs)``, for ``fit_offsets`` and the error analyses."""
+    from ..gold.redocred import load_rel_items
+    items = load_rel_items(split)
+    feats = [phase2_window(it.tokens, [tuple(x) for x in it.layers["sentence_spans"]], tok,
+                           spec, vocab, [[(a, e + 1) for a, e in en["mentions"]]
+                                         for en in it.entities],
+                           markers=model.rel_markers) for it in items]
+    return items, feats, run_phase2(model, feats, tok, device, batch=1)
+
+
 def calibrate_offsets(model, tok, spec, vocab, device):
     """Threshold offsets chosen on **Re-DocRED dev**, for test: the global one
     that maximises triple-F1 (ATLOP's threshold class is learned on the
@@ -643,15 +655,12 @@ def calibrate_offsets(model, tok, spec, vocab, device):
     ascent on the same micro-F1 from it (relations with fewer than
     ``MIN_DEV_FACTS`` dev facts keep the global one). Returns
     ``(global, per_relation [K])``."""
-    from ..gold.redocred import load_rel_items
-    items = load_rel_items("dev")
-    names = vocab.labels["relations"]
+    return fit_offsets(*relation_pass(model, tok, spec, vocab, device, "dev"), vocab.labels["relations"])
+
+
+def fit_offsets(items, feats, outs, names) -> tuple[float, np.ndarray]:
+    """``calibrate_offsets`` on a pass already made (any split)."""
     K = len(names)
-    feats = [phase2_window(it.tokens, [tuple(x) for x in it.layers["sentence_spans"]], tok,
-                           spec, vocab, [[(a, e + 1) for a, e in en["mentions"]]
-                                         for en in it.entities],
-                           markers=model.rel_markers) for it in items]
-    outs = run_phase2(model, feats, tok, device, batch=1)
     # Per relation, every candidate (pair in its top 4): margin over the
     # threshold class and whether it is gold. What an offset predicts for
     # one relation does not depend on the others' offsets.
@@ -1092,6 +1101,31 @@ def report(results: dict, out: Path, source: str) -> str:
     return text
 
 
+def apply_calibration(model, run: str, vocab, repo: str = HF_REPO, local: bool = False,
+                      entity_coref: str | None = None) -> dict:
+    """The run's ``calibration.json`` (from the hub) set on the model, as
+    deployed; returns it."""
+    cal = {}
+    if not local:
+        from huggingface_hub import hf_hub_download
+        try:
+            cal = json.loads(Path(hf_hub_download(repo, f"{run}/calibration.json",
+                                                  local_dir=str(CKPT_DIR))).read_text())
+        except Exception:
+            cal = {}
+    model.entity_coref = entity_coref or cal.get("entity_coref", "all")
+    model.link_threshold = float(cal.get("link_threshold", 0.5))
+    model.link_mode = cal.get("link_mode", "")
+    model.coref_filter = cal.get("coref_filter", "none")
+    model.coref_link_bias = float(cal.get("coref_link_bias", 0.0))
+    model.ent_o_bias = float(cal.get("ent_o_bias", 0.0))
+    model.rel_top = int(cal.get("rel_top", 4))
+    ro = cal.get("rel_offsets")
+    model.rel_offsets = (np.array([ro.get(r, cal.get("rel_offset", 0.0))
+                                   for r in vocab.labels["relations"]]) if ro else None)
+    return cal
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--runs", default=",".join(RUNS))
@@ -1120,24 +1154,8 @@ def main() -> int:
     for run in args.runs.split(","):
         t0 = time.time()
         model, tok, spec, vocab, best = load_run(run, args.repo, device, args.local)
-        cal = {}
-        if not args.local:
-            from huggingface_hub import hf_hub_download
-            try:
-                cal = json.loads(Path(hf_hub_download(args.repo, f"{run}/calibration.json",
-                                                      local_dir=str(CKPT_DIR))).read_text())
-            except Exception:
-                cal = {}
-        model.entity_coref = args.entity_coref or cal.get("entity_coref", "all")
-        model.link_threshold = float(cal.get("link_threshold", 0.5))
-        model.link_mode = cal.get("link_mode", "")
-        model.coref_filter = cal.get("coref_filter", "none")
-        model.coref_link_bias = float(cal.get("coref_link_bias", 0.0))
-        model.ent_o_bias = float(cal.get("ent_o_bias", 0.0))
-        model.rel_top = int(cal.get("rel_top", 4))
-        ro = cal.get("rel_offsets")
-        model.rel_offsets = (np.array([ro.get(r, cal.get("rel_offset", 0.0))
-                                       for r in vocab.labels["relations"]]) if ro else None)
+        cal = apply_calibration(model, run, vocab, args.repo, local=bool(args.local),
+                                entity_coref=args.entity_coref)
         if model.entity_coref != "all":
             print(f"{run}: entities grouped with coref={model.entity_coref}", flush=True)
         if hasattr(model, "zs_offset"):

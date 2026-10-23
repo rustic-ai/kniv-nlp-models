@@ -29,7 +29,7 @@ import numpy as np
 import torch
 
 from .gold_eval import (HF_REPO, _pairs, _sentences, calibrate_offsets, load_run, phase2_window,
-                        run_phase2)
+                        relation_pass, run_phase2)
 
 PRONOUNS = {"i", "me", "my", "mine", "myself", "you", "your", "yours", "yourself", "he", "him",
             "his", "himself", "she", "her", "hers", "herself", "it", "its", "itself", "we", "us",
@@ -105,15 +105,13 @@ def coref(model, tok, spec, vocab, device) -> dict:
             "windows": len(items)}
 
 
-def relations(model, tok, spec, vocab, device) -> dict:
-    from ..gold.redocred import load_rel_items
-    items = load_rel_items("test")
+def relations(model, tok, spec, vocab, device, data=None, offset=None) -> dict:
+    """``data``: a test ``relation_pass`` already made; ``offset``: per-relation
+    offsets to score at (default: chosen on dev, as deployed)."""
     names = vocab.labels["relations"]
-    _, offset = calibrate_offsets(model, tok, spec, vocab, device)   # per relation, as deployed
-    feats = [phase2_window(it.tokens, [tuple(x) for x in it.layers["sentence_spans"]], tok, spec,
-                           vocab, [[(a, e + 1) for a, e in en["mentions"]] for en in it.entities],
-                           markers=model.rel_markers) for it in items]
-    outs = run_phase2(model, feats, tok, device, batch=1)
+    if offset is None:
+        _, offset = calibrate_offsets(model, tok, spec, vocab, device)   # per relation, as deployed
+    items, feats, outs = data or relation_pass(model, tok, spec, vocab, device, "test")
     c = Counter()
     by = defaultdict(Counter)
     confusions, per_rel = Counter(), defaultdict(Counter)
