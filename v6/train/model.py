@@ -579,6 +579,7 @@ class SpanTypeHead(nn.Module):
         rep = torch.cat([w[b, s], w[b, e - 1], mean,
                          self.width((n - 1).clamp(max=self.width.num_embeddings - 1)).float()], -1)
         x = self.span(rep.to(words.dtype)).float()                     # [N, dim]
+        self._x, self._rep = x, rep                                    # span vectors, for probes
         q = self.type_proj(type_emb.to(self.type_proj.weight.dtype)).float()   # [K, dim]
         bias = self.type_bias(type_emb.to(self.type_bias.weight.dtype)).float().squeeze(-1)
         return torch.cat([x @ self.th.float().unsqueeze(1), x @ q.T + bias], 1)

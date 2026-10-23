@@ -3,6 +3,15 @@ encoder? Probes trained on a model's frozen vectors, against its own head.
 
     uv run python -m v6.train.probes --runs ultrabert-380m-v7b8ev --parts relations
 
+**Entity types** (gold spans, so boundaries are out of the question). Per
+gold span: the span head's **span vector** and the **encoder vector** it is
+built from (first word, last word, mean, width). The head's typing accuracy
+(its best type among the set's, threshold ignored) against a linear and an
+MLP classifier on each -- on Few-NERD trained on Few-NERD train (the head's
+data), on each CrossNER domain by 5-fold cross-validation on its test set (a
+diagnostic upper bound: what the frozen vectors separate when told the
+types; the head is zero-shot there).
+
 **Relations** (Re-DocRED, gold entities). Vectors per ordered entity pair
 from the frozen model: the relation head's **pair vector** (what its final
 scoring reads) and the **encoder vectors** it is built from (head entity,
@@ -35,6 +44,9 @@ from .gold_eval import HF_REPO, _pairs, apply_calibration, load_run, relation_pa
 
 NEG_KEEP = 0.15          # share of unrelated training pairs kept (all related ones are)
 THRESHOLDS = np.round(np.arange(-4.0, 4.01, 0.25), 2)
+# Probes train on the CPU: the MLP probes (LayerNorm) collapse to one class on MPS.
+PROBE_DEVICE = torch.device("cpu")
+RUN = ""                 # the run being probed (cache file names)
 
 
 def _collect(items, feats, outs, idx, rng=None):
@@ -152,11 +164,17 @@ def relations(model, tok, spec, vocab, device, train_docs: int | None) -> dict:
     t0 = time.time()
     data = {}
     for split in ("train", "dev", "test"):
-        items, feats, outs = relation_pass(model, tok, spec, vocab, device, split, keep_pairs=True,
-                                           limit=train_docs if split == "train" else None)
-        data[split] = _collect(items, feats, outs, idx,
-                               np.random.default_rng(0) if split == "train" else None)
-        del items, feats, outs
+        cache = RUNS_DIR / "probes" / f"{RUN}-relations-{split}{'-' + str(train_docs) if train_docs and split == 'train' else ''}.npz"
+        if cache.exists():
+            z = np.load(cache)
+            data[split] = (z["X1"], z["X2"], z["L"], z["Y"])
+        else:
+            items, feats, outs = relation_pass(model, tok, spec, vocab, device, split, keep_pairs=True,
+                                               limit=train_docs if split == "train" else None)
+            data[split] = _collect(items, feats, outs, idx,
+                                   np.random.default_rng(0) if split == "train" else None)
+            del items, feats, outs
+            np.savez(cache, X1=data[split][0], X2=data[split][1], L=data[split][2], Y=data[split][3])
         X1, X2, L, Y = data[split]
         print(f"PR relations {split}: {len(Y):,} pairs ({int(Y.any(1).sum()):,} related), pair vector "
               f"{X1.shape[1]}, encoder vectors {X2.shape[1]} [{time.time() - t0:.0f}s]", flush=True)
@@ -166,10 +184,112 @@ def relations(model, tok, spec, vocab, device, train_docs: int | None) -> dict:
     for feat, j in (("pair_vector", 0), ("encoder_vectors", 1)):
         for kind, hidden in (("linear", None), ("mlp", 1024)):
             r = train_probe(data["train"][j], data["train"][3], data["dev"][j], data["dev"][3],
-                            data["test"][j], data["test"][3], hidden, device)
+                            data["test"][j], data["test"][3], hidden, PROBE_DEVICE)
             res[f"{kind}_{feat}"] = r
             print(f"PR relations {kind} on {feat}: {json.dumps({k: round(v, 4) for k, v in r.items()})} "
                   f"[{time.time() - t0:.0f}s]", flush=True)
+    return res
+
+
+@torch.no_grad()
+def span_vectors(model, tok, spec, vocab, device, items: list[dict], labels: list[str]):
+    """Per gold span (up to the head's width): span vector, encoder vector,
+    the head's best type and the gold type (indices into ``labels``)."""
+    from . import span_eval as SE
+    from .data import blank_window, collate
+    from .kdata import TypeCollator, span_targets
+    bank = {"entity_types": [{"id": i, "name": n, "description": f"a {n}"} for i, n in enumerate(labels)]}
+    coll = TypeCollator(tok, bank, train=False)
+    lid = {n: i for i, n in enumerate(labels)}
+    X, R, H, G = [], [], [], []
+    for k in range(0, len(items), 16):
+        chunk = items[k:k + 16]
+        feats = []
+        for it in chunk:
+            f = blank_window(it["tokens"], [(0, len(it["tokens"]))], tok, spec.max_subwords, vocab.size("cls"))
+            f.update(coref=None, rel=None,
+                     ents=span_targets([(lid[t], s, e) for t, s, e in it["spans"] if t in lid],
+                                       f["_W"], f["word_ok"], list(range(len(labels))), False))
+            feats.append(f)
+        b = coll(collate(feats, tok.pad_token_id))
+        b = {n: v.to(device) for n, v in b.items() if hasattr(v, "to")}
+        o = model(b, relation_only=True)
+        where = {(int(bb), int(s), int(e)): n for n, (bb, s, e) in enumerate(zip(
+            b["span_batch"].tolist(), b["span_start"].tolist(), b["span_end"].tolist()))}
+        col = {int(c): j for j, c in enumerate(b["type_label_cols"].tolist())}
+        lg = o["span"].float()
+        for j, it in enumerate(chunk):
+            for t, s, e in it["spans"]:
+                n = where.get((j, s, e))
+                if n is None or t not in lid:
+                    continue
+                X.append(model.span._x[n].half().cpu().numpy())
+                R.append(model.span._rep[n].half().cpu().numpy())
+                H.append(int(lg[n, 1:].argmax()))      # columns in type_label_cols order
+                G.append(col[lid[t]])
+    return np.stack(X), np.stack(R), np.array(H), np.array(G)
+
+
+def _classifier(Xtr, ytr, Xte, yte, K, hidden, device, epochs: int = 30, seed: int = 0) -> float:
+    torch.manual_seed(seed)
+    mu = Xtr.astype(np.float32).mean(0); sd = Xtr.astype(np.float32).std(0) + 1e-4
+    norm = lambda X: torch.from_numpy((X.astype(np.float32) - mu) / sd).to(device)
+    net = _Probe(Xtr.shape[1], K - 1, hidden).to(device)
+    opt = torch.optim.AdamW(net.parameters(), lr=1e-3 if hidden else 3e-3, weight_decay=0.05)
+    xt, yt = norm(Xtr), torch.from_numpy(ytr).to(device)
+    for _ in range(epochs):
+        net.train()
+        perm = torch.randperm(len(xt), device=device)
+        for k in range(0, len(perm), 512):
+            i = perm[k:k + 512]
+            loss = nn.functional.cross_entropy(net(xt[i]), yt[i])
+            opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
+    net.eval()
+    with torch.no_grad():
+        return float((net(norm(Xte)).argmax(1).cpu().numpy() == yte).mean())
+
+
+def spans(model, tok, spec, vocab, device, train_docs: int | None) -> dict:
+    from . import span_eval as SE
+    from ..gold import fewnerd
+    res = {}
+    t0 = time.time()
+    test = SE.load_fewnerd(3000)
+    labels = sorted({t for it in test for t, _, _ in it["spans"]})
+    rows = fewnerd.load("train")
+    rng = np.random.default_rng(3)
+    pick = rng.choice(len(rows), size=min(train_docs or 20000, len(rows)), replace=False)
+    fix = {"GPE": "geopolitical entity", "education": "educational institution",
+           "government or governmentagency": "government or government agency"}
+    name = lambda c: fix.get(fewnerd.type_text(c)[0], fewnerd.type_text(c)[0])
+    train = [{"tokens": rows[i]["tokens"], "spans": [(name(c), s, e) for c, s, e in rows[i]["spans"]]}
+             for i in pick]
+    Xtr, Rtr, _, Gtr = span_vectors(model, tok, spec, vocab, device, train, labels)
+    Xte, Rte, Hte, Gte = span_vectors(model, tok, spec, vocab, device, test, labels)
+    K = len(labels) + 1
+    r = {"spans_train": int(len(Gtr)), "spans_test": int(len(Gte)), "head": float((Hte == Gte).mean())}
+    for feat, (a, b) in (("span_vector", (Xtr, Xte)), ("encoder_vector", (Rtr, Rte))):
+        for kind, hidden in (("linear", None), ("mlp", 1024)):
+            r[f"{kind}_{feat}"] = _classifier(a, Gtr, b, Gte, K, hidden, PROBE_DEVICE)
+    res["fewnerd"] = r
+    print(f"PR spans fewnerd: {json.dumps({k: round(v, 4) if isinstance(v, float) else v for k, v in r.items()})} "
+          f"[{time.time() - t0:.0f}s]", flush=True)
+    for d in SE.DOMAINS:
+        items = SE.load_crossner(d)
+        labels = sorted({t for it in items for t, _, _ in it["spans"]})
+        X, R, Hd, G = span_vectors(model, tok, spec, vocab, device, items, labels)
+        K = len(labels) + 1
+        folds = np.random.default_rng(5).integers(0, 5, len(G))
+        r = {"spans": int(len(G)), "types": len(labels), "head": float((Hd == G).mean())}
+        for feat, A in (("span_vector", X), ("encoder_vector", R)):
+            for kind, hidden in (("linear", None), ("mlp", 512)):
+                acc = [_classifier(A[folds != k], G[folds != k], A[folds == k], G[folds == k], K, hidden,
+                                   PROBE_DEVICE)
+                       * (folds == k).sum() for k in range(5)]
+                r[f"{kind}_{feat}_cv"] = float(sum(acc) / len(G))
+        res[f"crossner_{d}"] = r
+        print(f"PR spans crossner_{d}: {json.dumps({k: round(v, 4) if isinstance(v, float) else v for k, v in r.items()})} "
+              f"[{time.time() - t0:.0f}s]", flush=True)
     return res
 
 
@@ -187,10 +307,12 @@ def main() -> int:
         model, tok, spec, vocab, _ = load_run(run, HF_REPO, device)
         model.eval()
         apply_calibration(model, run, vocab)
+        global RUN
+        RUN = run
         path = RUNS_DIR / "probes" / f"{run}.json"
         res = json.loads(path.read_text()) if path.exists() else {}
         for p in args.parts.split(","):
-            res[p] = {"relations": relations}[p](model, tok, spec, vocab, device, args.train_docs)
+            res[p] = {"relations": relations, "spans": spans}[p](model, tok, spec, vocab, device, args.train_docs)
             path.write_text(json.dumps(res, indent=1))
         del model
     return 0
