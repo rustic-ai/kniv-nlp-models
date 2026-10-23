@@ -47,12 +47,14 @@ def push(manifest: str, repo: str = REPO) -> None:
     print(f"pushed to {repo}")
 
 
-def pull(manifest: str, repo: str = REPO, dest: Path = CORPUS) -> None:
+def pull(manifest: str, repo: str = REPO, dest: Path = CORPUS, match: str | None = None) -> None:
+    """``match``: only the caches whose name contains it (no side files)."""
     from huggingface_hub import hf_hub_download
     dest.mkdir(parents=True, exist_ok=True)
     p = hf_hub_download(repo, "features/" + manifest, repo_type="dataset", local_dir=str(dest))
     man = json.loads(Path(p).read_text())
-    files = SIDE + ["features/" + c for c in man["caches"]]
+    files = ([] if match else SIDE) + ["features/" + c for c in man["caches"]
+                                       if not match or match in c]
     for f in files:
         try:
             hf_hub_download(repo, f, repo_type="dataset", local_dir=str(dest))
@@ -69,8 +71,12 @@ def main() -> int:
     ap.add_argument("cmd", choices=["push", "pull"])
     ap.add_argument("--manifest", required=True, help="features/manifest-<run>.json file name")
     ap.add_argument("--repo", default=REPO)
+    ap.add_argument("--match", help="pull: only the caches whose name contains this")
     a = ap.parse_args()
-    (push if a.cmd == "push" else pull)(a.manifest, a.repo)
+    if a.cmd == "push":
+        push(a.manifest, a.repo)
+    else:
+        pull(a.manifest, a.repo, match=a.match)
     return 0
 
 

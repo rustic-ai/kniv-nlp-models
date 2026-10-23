@@ -1057,6 +1057,9 @@ POST_JOBS = {
     "err": "python -m v6.train.error_analysis --run {ev} --part relations --out /content/err-{ev}.json",
     "kd": "python -m v6.train.kd_teacher dump --run {ev} --upload",
     "st": "python -m v6.train.student_targets dump --run {ev} --release release/{ev} --shard {bench} --upload",
+    # the teacher-corpus caches from the run's hubdata manifest, then the head fine-tune
+    "attr": "python -m v6.train.hubdata pull --manifest manifest-{ev}.json --match knowledge-teacher"
+            " && python -m v6.train.attr_finetune --run {ev}",
 }
 POST_LINES = r"margins above|ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
 
