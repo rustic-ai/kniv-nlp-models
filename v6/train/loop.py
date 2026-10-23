@@ -630,6 +630,9 @@ def main() -> int:
     ap.add_argument("--word-pool", choices=["first", "mean"], default="first",
                     help="word vectors: the first subword, or the mean of a word's subwords "
                          "(for tokenizers that split words often)")
+    ap.add_argument("--kd-attr-neg", type=int, default=1,
+                    help="student windows holding a fact both teachers call negated, this many "
+                         "times (the attribute head sees few negations otherwise)")
     ap.add_argument("--prepare-only", action="store_true",
                     help="build every feature cache this run needs, list them in "
                          "features/manifest-<run>.json, and exit before training")
@@ -764,6 +767,11 @@ def main() -> int:
         sfeats = student_features(Path(args.student_targets), tok, spec, vocab, load_bank(),
                                   markers=args.rel_markers, limit=args.student_limit)
         train = train + sfeats * args.student_weight
+        if args.kd_attr_neg > 1:
+            from .student_kd import has_negation
+            neg = [f for f in sfeats if has_negation(f)]
+            train = train + neg * (args.kd_attr_neg - 1)
+            print(f"student windows with a negated fact: {len(neg):,} x{args.kd_attr_neg}", flush=True)
         if args.kd_labels:
             from .student_kd import LabelDistiller
             label_kd = LabelDistiller(tok, args.kd_labels, args.seed)

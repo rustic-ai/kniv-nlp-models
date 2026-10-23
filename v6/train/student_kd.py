@@ -29,6 +29,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from ..schemas import MODALITIES, POLARITIES
 from .data import FEATURES, IGNORE, USED_CACHES, file_digest
 from .student_targets import FLOOR
 
@@ -190,8 +191,53 @@ def window_features(w: dict, tA: dict, tB: dict, tok, spec, vocab, rel_id: dict,
                         acc[(pos[int(h)], pos[int(tl)], cols[r])][k_] = float(m)
             kd["rel"] = {key: WEIGHTS["rel"] * a + (1 - WEIGHTS["rel"]) * b for key, (a, b) in acc.items()}
             kd["rel_n"] = len(spans)
+            f["rel"]["attrs"] = _attr_targets(tA, tB, pos, cols, kd["rel"])
     f["kd"] = kd
     return f
+
+
+def _attr_targets(tA: dict, tB: dict, pos: dict, cols: list, rel: dict) -> list[dict]:
+    """Fact attributes from both teachers, as the hard labels the attribute
+    head trains on (the mixed distributions' argmax, under its class
+    weights): for every fact the mixture accepts (margin > 0) that a teacher
+    described, on the student's entity positions. A holder or time the
+    student does not see (an entity it dropped) leaves the fact out."""
+    acc: dict = {}
+    for t in (tA, tB):
+        a = t.get("attr")
+        if not a:
+            continue
+        ptr = a["pointer_ids"]
+        for i in range(len(a["r"])):
+            h, tl, r = int(a["h"][i]), int(a["t"][i]), int(a["r"][i])
+            if h not in pos or tl not in pos or cols[r] is None:
+                continue
+            key = (pos[h], pos[tl], cols[r])
+            if rel.get(key, FLOOR) <= 0:
+                continue
+            d = acc.setdefault(key, {k: np.zeros(a[k].shape[1], np.float32)
+                                     for k in ("polarity", "modality")} | {"holder": {}, "time": {}})
+            for k in ("polarity", "modality"):
+                d[k] += a[k][i].astype(np.float32)
+            for k in ("holder", "time"):            # pointer columns -> entity ids (-99: none)
+                for c, p in enumerate(a[k][i].astype(np.float32)):
+                    d[k][int(ptr[c])] = d[k].get(int(ptr[c]), 0.0) + float(p)
+    out = []
+    for (h, tl, r), d in acc.items():
+        x = {"h": h, "t": tl, "r": r, "polarity": POLARITIES[int(d["polarity"].argmax())],
+             "modality": MODALITIES[int(d["modality"].argmax())]}
+        for k in ("holder", "time"):
+            e = max(d[k], key=d[k].get)
+            if e != -99 and e not in pos:
+                break
+            x[k] = None if e == -99 else pos[e]
+        else:
+            out.append(x)
+    return out
+
+
+def has_negation(f: dict) -> bool:
+    return any(a["polarity"] == "negative" for a in ((f.get("rel") or {}).get("attrs") or []))
 
 
 def build(windows_path: Path, target_paths: dict[str, list[Path]], tok, spec, vocab, bank,
@@ -253,7 +299,7 @@ def student_features(st_dir: Path, tok, spec, vocab, bank, markers: bool = True,
                      if f.path.endswith(".pkl")]
             digests[t] = sorted((Path(f.path).name, f.lfs.sha256) for f in files)
     h = hashlib.sha256(json.dumps([spec.hf_id, spec.max_subwords, markers, limit,
-                                   vocab.to_json()["labels"], digests, WEIGHTS, FLOOR, "student-v1"]
+                                   vocab.to_json()["labels"], digests, WEIGHTS, FLOOR, "student-v2"]
                                   ).encode())
     h.update(json.dumps([[r["id"], r["name"]] for r in bank["relations"]]
                         + [[t["id"], t["name"]] for t in bank["entity_types"]]).encode())
