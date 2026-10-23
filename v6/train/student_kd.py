@@ -35,7 +35,8 @@ from .student_targets import FLOOR
 
 TEACHERS = ("ultrabert-380m-v7b8ev", "deberta-v3-large-v7b8ev")
 WEIGHTS = {"pos": .5, "morph": .5, "lemma": .5, "arc": .5, "deprel": .5, "srl": .5, "rel": .5,
-           "ner": .75, "ent": .75, "cls": .75, "sentiment": .75, "coref": .75, "span": .75}
+           "ner": .75, "ent": .75, "cls": .75, "sentiment": .75, "coref": .75, "span": .75,
+           "attr": .75}
 KD_HEADS = ("kd_pos", "kd_morph", "kd_lemma", "kd_ner", "kd_ent", "kd_arc", "kd_deprel",
             "kd_srl_pred", "kd_srl", "kd_cls", "kd_sentiment", "kd_coref", "kd_span", "kd_rel",
             "kd_rel_rank", "kd_span_rank", "kd_label")
@@ -198,12 +199,12 @@ def window_features(w: dict, tA: dict, tB: dict, tok, spec, vocab, rel_id: dict,
 
 def _attr_targets(tA: dict, tB: dict, pos: dict, cols: list, rel: dict) -> list[dict]:
     """Fact attributes from both teachers, as the hard labels the attribute
-    head trains on (the mixed distributions' argmax, under its class
+    head trains on (the distributions mixed at ``WEIGHTS["attr"]``, argmax, under its class
     weights): for every fact the mixture accepts (margin > 0) that a teacher
     described, on the student's entity positions. A holder or time the
     student does not see (an entity it dropped) leaves the fact out."""
     acc: dict = {}
-    for t in (tA, tB):
+    for t, w in ((tA, WEIGHTS["attr"]), (tB, 1 - WEIGHTS["attr"])):
         a = t.get("attr")
         if not a:
             continue
@@ -218,10 +219,10 @@ def _attr_targets(tA: dict, tB: dict, pos: dict, cols: list, rel: dict) -> list[
             d = acc.setdefault(key, {k: np.zeros(a[k].shape[1], np.float32)
                                      for k in ("polarity", "modality")} | {"holder": {}, "time": {}})
             for k in ("polarity", "modality"):
-                d[k] += a[k][i].astype(np.float32)
+                d[k] += w * a[k][i].astype(np.float32)
             for k in ("holder", "time"):            # pointer columns -> entity ids (-99: none)
                 for c, p in enumerate(a[k][i].astype(np.float32)):
-                    d[k][int(ptr[c])] = d[k].get(int(ptr[c]), 0.0) + float(p)
+                    d[k][int(ptr[c])] = d[k].get(int(ptr[c]), 0.0) + w * float(p)
     out = []
     for (h, tl, r), d in acc.items():
         x = {"h": h, "t": tl, "r": r, "polarity": POLARITIES[int(d["polarity"].argmax())],
