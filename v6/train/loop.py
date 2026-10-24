@@ -601,6 +601,13 @@ def main() -> int:
                     help="read label texts through their own rank-R adapter (v6.2 zero-shot head)")
     ap.add_argument("--legacy-rank", type=int, default=16,
                     help="the --legacy-relation run's adapter rank")
+    ap.add_argument("--span-match", choices=["dot", "mlp"], default="dot",
+                    help="span head: span and type scored by a dot product, or by an MLP over both "
+                         "(with the dot product as a residual)")
+    ap.add_argument("--type-hier", type=float, default=0.0,
+                    help="share of Few-NERD training items whose type schema also lists the coarse "
+                         "parents (person beside politician): the specific type stays the answer, "
+                         "and a dropped specific type falls back to its parent")
     ap.add_argument("--span-head", action="store_true",
                     help="train the schema-conditioned entity span head")
     ap.add_argument("--kg-teacher", type=int, default=0, metavar="N",
@@ -834,7 +841,7 @@ def main() -> int:
                     rel_markers=args.rel_markers, rel_head=args.rel_head,
                     label_plain=args.label_pass == "plain",
                     legacy_relation=bool(args.legacy_relation),
-                    span_head=args.span_head, label_adapter=args.label_adapter,
+                    span_head=args.span_head, label_adapter=args.label_adapter, span_match=args.span_match,
                     legacy_rank=args.legacy_rank,
                     trust_remote_code=spec.trust_remote_code,
                     word_pool=args.word_pool, attr_head=args.attr_head,
@@ -881,7 +888,8 @@ def main() -> int:
     if args.rel_head in ("label", "zs"):
         if args.span_head:
             from .kdata import TypeCollator
-            label_coll = Chain(TypeCollator(tok, bank, train=True, seed=args.seed), label_coll)
+            label_coll = Chain(TypeCollator(tok, bank, train=True, seed=args.seed, hier=args.type_hier),
+                               label_coll)
             label_coll_dev = Chain(TypeCollator(tok, bank, train=False), label_coll_dev)
         if hold_ids and not args.probe:
             from .kdata import knowledge_features
@@ -1084,7 +1092,7 @@ def main() -> int:
                                  "label_plain": args.label_pass == "plain",
                                  "legacy_relation": bool(args.legacy_relation),
                                  "span_head": args.span_head,
-                                 "label_adapter": args.label_adapter,
+                                 "label_adapter": args.label_adapter, "span_match": args.span_match,
                                  "legacy_rank": args.legacy_rank,
                                  "srl_pred_hidden": args.srl_pred_hidden,
                                  "srl_ctx": args.srl_ctx, "ner_lstm": args.ner_lstm,

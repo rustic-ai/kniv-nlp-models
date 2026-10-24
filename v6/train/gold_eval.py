@@ -97,7 +97,7 @@ def model_from_checkpoint(ck: dict, device) -> tuple:
                     label_plain=cfg.get("label_plain", False),
                     legacy_relation=cfg.get("legacy_relation", False),
                     span_head=cfg.get("span_head", False),
-                    label_adapter=cfg.get("label_adapter", 0),
+                    label_adapter=cfg.get("label_adapter", 0), span_match=cfg.get("span_match", "dot"),
                     legacy_rank=cfg.get("legacy_rank"),
                     attn_implementation=spec.attn_implementation,
                     trust_remote_code=spec.trust_remote_code,

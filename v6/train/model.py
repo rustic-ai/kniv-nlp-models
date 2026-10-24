@@ -554,8 +554,9 @@ class SpanTypeHead(nn.Module):
     mask) trains it and a type is predicted where it beats the threshold."""
 
     def __init__(self, H: int, label_dim: int = 1024, dim: int = 768,
-                 max_width: int = 12, p: float = 0.1):
+                 max_width: int = 12, p: float = 0.1, match: str = "dot"):
         super().__init__()
+        self.match = match
         self.width = nn.Embedding(max_width, 64)
         self.span = nn.Sequential(nn.Linear(3 * H + 64, dim), nn.GELU(), nn.Dropout(p),
                                   nn.Linear(dim, dim))
@@ -564,6 +565,28 @@ class SpanTypeHead(nn.Module):
         self.type_bias = nn.Linear(label_dim, 1)
         nn.init.zeros_(self.type_bias.weight)
         nn.init.zeros_(self.type_bias.bias)
+        if match == "mlp":
+            # A span and a type meet in an MLP rather than a dot product: the
+            # failure analysis's frozen-vector heads typed CrossNER's gold spans
+            # 2-4 points better this way once trained on many type names. The
+            # dot product stays in as a residual, so the head starts from it.
+            self.m_span, self.m_type = nn.Linear(dim, 256), nn.Linear(dim, 256)
+            self.m_px, self.m_pq = nn.Linear(dim, 128, bias=False), nn.Linear(dim, 128, bias=False)
+            self.m_prod = nn.Linear(128, 256, bias=False)
+            self.m_out = nn.Linear(256, 1)
+            nn.init.zeros_(self.m_out.weight)
+            nn.init.zeros_(self.m_out.bias)
+
+    def _mlp_scores(self, x: torch.Tensor, q: torch.Tensor, chunk: int = 2048) -> torch.Tensor:
+        """``x [N, dim]`` spans, ``q [K, dim]`` types -> ``[N, K]``, spans in
+        chunks so ``N x K x 256`` stays small."""
+        a, b = self.m_span(x), self.m_type(q)                          # [N,256], [K,256]
+        px, pq = self.m_px(x), self.m_pq(q)                            # [N,128], [K,128]
+        out = []
+        for k in range(0, len(x), chunk):
+            h = a[k:k + chunk, None] + b[None] + self.m_prod(px[k:k + chunk, None] * pq[None])
+            out.append(self.m_out(F.gelu(h)).squeeze(-1))
+        return torch.cat(out)
 
     def forward(self, words: torch.Tensor, batch: dict, type_emb: torch.Tensor) -> torch.Tensor:
         """``words [B, W, H]`` (one vector per word), the batch's candidate
@@ -582,7 +605,10 @@ class SpanTypeHead(nn.Module):
         self._x, self._rep = x, rep                                    # span vectors, for probes
         q = self.type_proj(type_emb.to(self.type_proj.weight.dtype)).float()   # [K, dim]
         bias = self.type_bias(type_emb.to(self.type_bias.weight.dtype)).float().squeeze(-1)
-        return torch.cat([x @ self.th.float().unsqueeze(1), x @ q.T + bias], 1)
+        s = x @ q.T + bias
+        if self.match == "mlp":
+            s = s + self._mlp_scores(x.to(self.m_span.weight.dtype), q.to(self.m_span.weight.dtype)).float()
+        return torch.cat([x @ self.th.float().unsqueeze(1), s], 1)
 
 
 class LabelXBlock(nn.Module):
@@ -983,7 +1009,7 @@ class V6Model(nn.Module):
                  rel_adapter: int = 0, rel_markers: bool = False,
                  rel_head: str = "bilinear", label_dim: int = 1024,
                  label_plain: bool = True, legacy_relation: bool = False,
-                 span_head: bool = False, label_adapter: int = 0,
+                 span_head: bool = False, label_adapter: int = 0, span_match: str = "dot",
                  legacy_rank: int | None = None, trust_remote_code: bool = False,
                  word_pool: str = "first", attr_head: bool = False,
                  srl_pred_hidden: int = 0, srl_ctx: int = 0, linker: int = 0,
@@ -1122,7 +1148,7 @@ class V6Model(nn.Module):
             if rel_head not in ("label", "zs"):
                 raise ValueError("span_head needs the label encoder (a label relation head)")
             self.mix["ent_span"] = ScalarMix(L)
-            self.span = SpanTypeHead(H, label_dim, p=p)
+            self.span = SpanTypeHead(H, label_dim, p=p, match=span_match)
         # Fact attributes (v7): polarity, modality, holder, time.
         self.attr = None
         if attr_head:

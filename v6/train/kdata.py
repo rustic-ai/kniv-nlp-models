@@ -270,9 +270,22 @@ class TypeCollator:
     probability ``unlabelled_keep``."""
 
     def __init__(self, tok, bank: dict, train: bool, seed: int = 17, max_width: int = 12,
-                 max_neg: int = 128, max_types: int = 48, unlabelled_keep: float = 0.5):
+                 max_neg: int = 128, max_types: int = 48, unlabelled_keep: float = 0.5,
+                 hier: float = 0.0):
         self.tok, self.train = tok, train
         self.types = bank["entity_types"]
+        # Type hierarchy (training, ``hier`` > 0): each Few-NERD fine type's
+        # coarse parent in the bank, from its description ("a politician, a
+        # kind of person"); parents the bank lacks are left out.
+        self.hier = hier if train else 0.0
+        by_name = {t["name"]: t["id"] for t in self.types}
+        self.parent = {}
+        for t in self.types:
+            d = t.get("description") or ""
+            if t.get("source") == "fewnerd" and ", a kind of " in d:
+                par = by_name.get(d.split(", a kind of ", 1)[1].rstrip("."))
+                if par is not None and par != t["id"]:
+                    self.parent[t["id"]] = par
         self.rng = np.random.default_rng(seed)
         self.max_width, self.max_neg, self.max_types = max_width, max_neg, max_types
         self.unlabelled_keep = unlabelled_keep
@@ -288,6 +301,19 @@ class TypeCollator:
             self._tok_cache[text] = self.tok(text, truncation=True,
                                              max_length=LABEL_MAX_SUBWORDS)["input_ids"]
         return self._tok_cache[text]
+
+    def _with_parents(self, x: dict | None) -> dict | None:
+        """A Few-NERD item's schema with the coarse parents of its types added
+        (share ``hier`` of items): the specific type stays a span's answer and
+        its parent a negative; a quarter of the specific types leave the
+        schema, and their spans fall back to the parent."""
+        if x is None or not x["schema"] or self.rng.random() >= self.hier \
+                or not any(t in self.parent for t in x["schema"]):
+            return x
+        drop = {t for t in x["schema"] if t in self.parent and self.rng.random() < 0.25}
+        schema = sorted((set(x["schema"]) - drop) | {self.parent[t] for t in x["schema"] if t in self.parent})
+        spans = [(s, e, self.parent[t] if t in drop else t) for s, e, t in x["spans"].tolist()]
+        return {**x, "schema": schema, "spans": np.asarray(spans, dtype=np.int32).reshape(-1, 3)}
 
     def candidates(self, sent_of_word: np.ndarray, word_ok: np.ndarray) -> list[tuple[int, int]]:
         out = []
@@ -308,6 +334,8 @@ class TypeCollator:
             return batch
         sow = batch["sent_of_word"].numpy()
         wok = batch["word_mask"].numpy()
+        if self.hier:
+            items = [self._with_parents(x) for x in items]
         pool = sorted({t for x in items if x is not None for t in x["schema"]})
         cols = np.asarray(pool, dtype=np.int64)
         if self.train and len(cols) > self.max_types:
