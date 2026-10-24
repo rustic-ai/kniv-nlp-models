@@ -40,7 +40,7 @@ import torch
 import torch.nn as nn
 
 from ..config import RUNS_DIR
-from .gold_eval import HF_REPO, _pairs, apply_calibration, load_run, relation_pass
+from .gold_eval import HF_REPO, _pairs, apply_calibration, load_run, phase2_window, run_phase2
 
 NEG_KEEP = 0.15          # share of unrelated training pairs kept (all related ones are)
 THRESHOLDS = np.round(np.arange(-4.0, 4.01, 0.25), 2)
@@ -171,11 +171,24 @@ def relations(model, tok, spec, vocab, device, train_docs: int | None) -> dict:
             continue
         # One split at a time, written and freed before the next: the vectors of
         # all three held together with a pass's activations run MPS out of memory.
-        items, feats, outs = relation_pass(model, tok, spec, vocab, device, split, keep_pairs=True,
-                                           limit=train_docs if split == "train" else None)
-        X1, X2, L, Y = _collect(items, feats, outs, idx,
-                                np.random.default_rng(0) if split == "train" else None)
-        del items, feats, outs
+        # 300 documents at a time: the pass keeps every pair's vectors, which for
+        # all of a split's documents outgrow memory before they are subsampled.
+        from ..gold.redocred import load_rel_items
+        docs = load_rel_items(split, limit=train_docs if split == "train" else None)
+        rng = np.random.default_rng(0) if split == "train" else None
+        parts = []
+        for k in range(0, len(docs), 300):
+            items = docs[k:k + 300]
+            feats = [phase2_window(it.tokens, [tuple(x) for x in it.layers["sentence_spans"]], tok, spec,
+                                   vocab, [[(a, e + 1) for a, e in en["mentions"]] for en in it.entities],
+                                   markers=model.rel_markers) for it in items]
+            outs = run_phase2(model, feats, tok, device, batch=1, keep_pairs=True)
+            parts.append(_collect(items, feats, outs, idx, rng))
+            del feats, outs
+            if device.type == "mps":
+                torch.mps.empty_cache()
+        X1, X2, L, Y = (np.concatenate([p[j] for p in parts]) for j in range(4))
+        del parts
         np.savez(cache, X1=X1, X2=X2, L=L, Y=Y)
         del X1, X2, L, Y
         if device.type == "mps":
