@@ -89,13 +89,14 @@ def f1(gold: list[set], pred: list[set]) -> dict:
 
 @torch.no_grad()
 def kniv_predict(model, tok, spec, vocab, device, items: list[dict], labels: list[str],
-                 batch: int = 16, offset: float = 0.0) -> list[set]:
+                 batch: int = 16, offset: float = 0.0, describe=None) -> list[set]:
+    """``describe``: type name -> description (default: ``--describe``'s)."""
     from .data import blank_window, collate
     from .kdata import TypeCollator, decode_spans, span_targets
     # kniv's span head trained on "entity type: <name>. <description>"; a
     # description built from the name alone keeps that shape without giving
     # it anything GLiNER is not given (--describe).
-    desc = (lambda n: f"a {n}") if DESCRIBE else (lambda n: "")
+    desc = describe or ((lambda n: f"a {n}") if DESCRIBE else (lambda n: ""))
     bank = {"entity_types": [{"id": i, "name": n, "description": desc(n)} for i, n in enumerate(labels)]}
     coll = TypeCollator(tok, bank, train=False)
     lid = {n: i for i, n in enumerate(labels)}

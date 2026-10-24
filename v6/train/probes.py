@@ -163,18 +163,26 @@ def relations(model, tok, spec, vocab, device, train_docs: int | None) -> dict:
     idx = {r: k for k, r in enumerate(names)}
     t0 = time.time()
     data = {}
+    caches = {}
     for split in ("train", "dev", "test"):
         cache = RUNS_DIR / "probes" / f"{RUN}-relations-{split}{'-' + str(train_docs) if train_docs and split == 'train' else ''}.npz"
+        caches[split] = cache
         if cache.exists():
-            z = np.load(cache)
-            data[split] = (z["X1"], z["X2"], z["L"], z["Y"])
-        else:
-            items, feats, outs = relation_pass(model, tok, spec, vocab, device, split, keep_pairs=True,
-                                               limit=train_docs if split == "train" else None)
-            data[split] = _collect(items, feats, outs, idx,
-                                   np.random.default_rng(0) if split == "train" else None)
-            del items, feats, outs
-            np.savez(cache, X1=data[split][0], X2=data[split][1], L=data[split][2], Y=data[split][3])
+            continue
+        # One split at a time, written and freed before the next: the vectors of
+        # all three held together with a pass's activations run MPS out of memory.
+        items, feats, outs = relation_pass(model, tok, spec, vocab, device, split, keep_pairs=True,
+                                           limit=train_docs if split == "train" else None)
+        X1, X2, L, Y = _collect(items, feats, outs, idx,
+                                np.random.default_rng(0) if split == "train" else None)
+        del items, feats, outs
+        np.savez(cache, X1=X1, X2=X2, L=L, Y=Y)
+        del X1, X2, L, Y
+        if device.type == "mps":
+            torch.mps.empty_cache()
+    for split, cache in caches.items():
+        z = np.load(cache)
+        data[split] = (z["X1"], z["X2"], z["L"], z["Y"])
         X1, X2, L, Y = data[split]
         print(f"PR relations {split}: {len(Y):,} pairs ({int(Y.any(1).sum()):,} related), pair vector "
               f"{X1.shape[1]}, encoder vectors {X2.shape[1]} [{time.time() - t0:.0f}s]", flush=True)
@@ -192,13 +200,16 @@ def relations(model, tok, spec, vocab, device, train_docs: int | None) -> dict:
 
 
 @torch.no_grad()
-def span_vectors(model, tok, spec, vocab, device, items: list[dict], labels: list[str]):
+def span_vectors(model, tok, spec, vocab, device, items: list[dict], labels: list[str], describe=None,
+                 keys: list | None = None):
+    """``keys``: filled with ``(item index, span index)`` of every span returned."""
     """Per gold span (up to the head's width): span vector, encoder vector,
     the head's best type and the gold type (indices into ``labels``)."""
     from . import span_eval as SE
     from .data import blank_window, collate
     from .kdata import TypeCollator, span_targets
-    bank = {"entity_types": [{"id": i, "name": n, "description": f"a {n}"} for i, n in enumerate(labels)]}
+    desc = describe or (lambda n: f"a {n}")
+    bank = {"entity_types": [{"id": i, "name": n, "description": desc(n)} for i, n in enumerate(labels)]}
     coll = TypeCollator(tok, bank, train=False)
     lid = {n: i for i, n in enumerate(labels)}
     X, R, H, G = [], [], [], []
@@ -216,17 +227,19 @@ def span_vectors(model, tok, spec, vocab, device, items: list[dict], labels: lis
         o = model(b, relation_only=True)
         where = {(int(bb), int(s), int(e)): n for n, (bb, s, e) in enumerate(zip(
             b["span_batch"].tolist(), b["span_start"].tolist(), b["span_end"].tolist()))}
-        col = {int(c): j for j, c in enumerate(b["type_label_cols"].tolist())}
+        cols = b["type_label_cols"].tolist()           # column -> bank id (= index into labels)
         lg = o["span"].float()
         for j, it in enumerate(chunk):
-            for t, s, e in it["spans"]:
+            for q, (t, s, e) in enumerate(it["spans"]):
                 n = where.get((j, s, e))
                 if n is None or t not in lid:
                     continue
+                if keys is not None:
+                    keys.append((k + j, q))
                 X.append(model.span._x[n].half().cpu().numpy())
                 R.append(model.span._rep[n].half().cpu().numpy())
-                H.append(int(lg[n, 1:].argmax()))      # columns in type_label_cols order
-                G.append(col[lid[t]])
+                H.append(int(cols[int(lg[n, 1:].argmax())]))   # indices into labels
+                G.append(lid[t])
     return np.stack(X), np.stack(R), np.array(H), np.array(G)
 
 
