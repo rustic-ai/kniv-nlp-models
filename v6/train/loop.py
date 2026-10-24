@@ -604,6 +604,9 @@ def main() -> int:
     ap.add_argument("--span-match", choices=["dot", "mlp"], default="dot",
                     help="span head: span and type scored by a dot product, or by an MLP over both "
                          "(with the dot product as a residual)")
+    ap.add_argument("--kg-spans-only", default="",
+                    help="comma-separated --kg-data sources used for their typed spans only "
+                         "(relation labels dropped), e.g. trex")
     ap.add_argument("--type-hier", type=float, default=0.0,
                     help="share of Few-NERD training items whose type schema also lists the coarse "
                          "parents (person beside politician): the specific type stays the answer, "
@@ -802,6 +805,11 @@ def main() -> int:
                                        stats=st, progress=preparing)
             if src == "teacher" and over:
                 feats = [f for f in feats for _ in range(over.get(f.get("_domain"), 1))]
+            if src in args.kg_spans_only.split(","):
+                # Typed spans only: the source's relation labels (distant, for
+                # T-REx) left out, so it widens the span head's types without
+                # pulling the relation head toward them.
+                feats = [{k: v for k, v in f.items() if k != "rm"} | {"rel": None} for f in feats]
             w = float(n)
             if w < 1:                      # a fixed random fraction of the source
                 rng = np.random.default_rng([args.seed, len(src)])
