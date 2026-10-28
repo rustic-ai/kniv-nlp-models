@@ -555,6 +555,9 @@ def main() -> int:
                     default="all",
                     help="phase2: train only the phase-2 heads and their layer mixes; "
                          "everything else stays exactly as --init left it")
+    ap.add_argument("--freeze", metavar="PREFIX,...",
+                    help="parameters under these prefixes stay frozen whatever the scope "
+                         "(e.g. span.,mix.ent_span. keeps the span head as --init left it)")
     ap.add_argument("--relation-data", choices=["all", "redocred"], default="all",
                     help="redocred: train on Re-DocRED documents alone, without the "
                          "corpus windows and their teacher relation labels "
@@ -995,6 +998,11 @@ def main() -> int:
             prm.requires_grad = n.startswith(trainable)
         heads = RELATION_HEADS
         model.rel_lora.sticky = True
+    if args.freeze:
+        keep = tuple(x for x in args.freeze.split(",") if x)
+        for n, prm in model.named_parameters():
+            if n.startswith(keep):
+                prm.requires_grad = False
     frozen_digest = _frozen_digest(model) if args.assert_frozen else None
     if frozen_digest is not None:
         n_frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
@@ -1185,6 +1193,8 @@ def main() -> int:
                             0.0, 1.0 - rs.p.step / max(total / 2, 1))
                     loss = sum(scale.get(h, 1.0) * weight.get(h, 1.0) * l
                                for h, (l, _) in L.items()) / spec.grad_accum
+                    if not loss.requires_grad:
+                        continue               # only frozen heads had targets (--freeze)
                     try:
                         loss.backward()
                     except torch.OutOfMemoryError:
