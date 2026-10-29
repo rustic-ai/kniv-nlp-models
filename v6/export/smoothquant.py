@@ -32,7 +32,8 @@ from torch import nn
 
 from .int8_search import record, two_d_weights
 
-DOWN = {"ultrabert": r"mlp\.down_proj$", "deberta": r"layer\.\d+\.output\.dense$"}
+DOWN = {"ultrabert": r"mlp\.down_proj$", "deberta": r"layer\.\d+\.output\.dense$",
+        "modernbert": r"mlp\.Wo$"}                  # ModernBERT and Ettin
 
 
 class SmoothLinear(nn.Module):
@@ -101,7 +102,7 @@ def main() -> int:
     torch.backends.mha.set_fastpath_enabled(False)
     model, *_ = load_run(args.run, HF_REPO, torch.device("cpu"), Path("data/v6-eval/checkpoints"))
     tb = TorchBackend(model)
-    pattern = DOWN["ultrabert" if "ultrabert" in args.run else "deberta"]
+    pattern = DOWN[next((k for k in ("ultrabert", "deberta") if k in args.run), "modernbert")]
     inputs = record(args.release, tb)
     d = args.release / "onnx"
     for g in args.graphs.split(","):
