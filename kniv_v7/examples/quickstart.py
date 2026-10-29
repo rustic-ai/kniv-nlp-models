@@ -12,13 +12,12 @@ from kniv_v7 import Kniv  # noqa: E402
 
 kniv = Kniv(root)
 relations = [{"name": "lives in", "description": "the place where the head resides"},
-             {"name": "employer", "description": "the organization the head works for"},
-             {"name": "sibling", "description": "the head and tail share a parent"}]
+             {"name": "employer", "description": "the organization the head works for"}]
 
 out = kniv.extract(turns=[("user", "I moved to Lisbon last year and started at a bank."),
-                          ("assistant", "Nice! Do you have family there?"),
-                          ("user", "No, my sister Ana still lives in Porto.")],
-                   relations=relations)
+                          ("assistant", "Congratulations on the move!")],
+                   relations=relations,
+                   entity_types=[{"name": "location"}, {"name": "organization"}, {"name": "person"}])
 for w in out:
     ents = w["entities"]
     for f in w["facts"]:

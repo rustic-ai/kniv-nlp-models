@@ -172,7 +172,7 @@ from kniv_v7 import Kniv
 kniv = Kniv(path)
 out = kniv.analyse(
     turns=[("user", "I moved to Lisbon last year and started at a bank."),
-           ("assistant", "How are you finding it?")],
+           ("assistant", "Congratulations on the move!")],
     relations=[{{"name": "lives in", "description": "the place where the head resides"}},
                {{"name": "employer", "description": "the organization the head works for"}}],
     entity_types=[{{"name": "location"}}, {{"name": "organization"}}, {{"name": "person"}}])
