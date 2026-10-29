@@ -1050,6 +1050,11 @@ SGD_REVISION = "a8029ad8c12e13cdbfefc2f649e245fa135bc98a"
 POST_JOBS = {
     "srlft": "python -m v6.train.srl_finetune --run {run} --out-run {run}-srlft --data full",
     "hft": "python -m v6.train.head_finetune --run {run}-srlft --out-run {run}-ft",
+    # the v7 teachers' heads: predicate-aware SRL roles + MLP predicates, then a BiLSTM NER
+    # (eval-run = the base name of the outputs: {ev}-srlc, {ev}-hft)
+    "srlc": "python -m v6.train.srl_finetune --run {run} --out-run {ev}-srlc --pred-hidden 512 --role-ctx 384",
+    "hftl": "python -m v6.train.head_finetune --run {ev}-srlc --out-run {ev}-hft --stages tag,ner,dep"
+            " --ner-lstm 256 --ner-source gold --ner-train 100000",
     "gold": "python -m v6.train.gold_eval --runs {ev} --benchmarks {bench}",
     "zs": "python -m v6.train.zs_protocol --runs {ev}",
     "span": "python -m v6.train.span_eval --runs {ev} --describe --calibrate-on crossner_politics",
