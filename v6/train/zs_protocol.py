@@ -61,9 +61,14 @@ def evaluate(model, tok, spec, vocab, device, splits: dict, items: list[dict]) -
                 lg = o["relation"]
                 pred.append(cols[int(lg[0][1:].argmax())] if len(lg) else -1)
                 gold.append(items[i]["rel"])
-            runs.append(macro(gold, pred, cols))
+            r = macro(gold, pred, cols)
+            for o in ("train", "val"):           # accuracy by the relations' FewRel split
+                k = [j for j, i in enumerate(its) if items[i].get("origin") == o]
+                if k:
+                    r[f"acc_{o}"] = float(np.mean([pred[j] == gold[j] for j in k]))
+            runs.append(r)
         out[name] = {k: (float(np.mean([r[k] for r in runs])), float(np.std([r[k] for r in runs])))
-                     for k in ("p", "r", "f1", "acc")}
+                     for k in ("p", "r", "f1", "acc", "acc_train", "acc_val") if all(k in r for r in runs)}
         out[name]["seeds"] = len(seeds)
     return out
 
@@ -83,12 +88,14 @@ def main() -> int:
     code = {r["code"]: r["id"] for r in unseen}
     per: dict[int, int] = {}
     items = []
-    for x in fewrel.load("train") + fewrel.load("val"):
-        rid = code.get(x["code"])
-        if rid is None or per.get(rid, 0) >= args.per_relation:
-            continue
-        per[rid] = per.get(rid, 0) + 1
-        items.append({"tokens": x["tokens"], "head": x["head"], "tail": x["tail"], "rel": rid})
+    for origin in ("train", "val"):
+        for x in fewrel.load(origin):
+            rid = code.get(x["code"])
+            if rid is None or per.get(rid, 0) >= args.per_relation:
+                continue
+            per[rid] = per.get(rid, 0) + 1
+            items.append({"tokens": x["tokens"], "head": x["head"], "tail": x["tail"], "rel": rid,
+                          "origin": origin})
     ids = sorted(code.values())
     rng = np.random.default_rng(13)
     sizes = [m for m in (5, 10) if m < len(ids)]
@@ -107,6 +114,7 @@ def main() -> int:
         for name, r in results[run].items():
             print(f"  {run} {name} ({r['seeds']} seeds): macro F1 {r['f1'][0]:.4f} +- {r['f1'][1]:.4f}"
                   f" (P {r['p'][0]:.4f}, R {r['r'][0]:.4f}); accuracy {r['acc'][0]:.4f}"
+                  f"{''.join(f'; accuracy on FewRel-{o} relations {r[k][0]:.4f}' for o, k in (('train', 'acc_train'), ('val', 'acc_val')) if k in r)}"
                   f"  [{time.time() - t0:.0f}s]", flush=True)
         del model
     out = RUNS_DIR / "zs-protocol" / time.strftime("%Y%m%d-%H%M%S")
