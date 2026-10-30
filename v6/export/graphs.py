@@ -82,8 +82,30 @@ def encoder_layers(enc: nn.TransformerEncoder, x, pad):
     return enc.norm(x) if enc.norm is not None else x
 
 
+def _modernbert_masks(enc, mask):
+    """ModernBERT's (and Ettin's) additive masks, built here: under tracing,
+    transformers' mask builder reads the traced sequence length as a
+    tensor and fails. Keys at padding are masked; sliding layers also mask
+    ``|q - k| > config.sliding_window``, as ``sliding_window_bidirectional_mask_function``."""
+    T = mask.shape[1]
+    key = mask[:, None, None, :].bool()                               # [B,1,1,T]
+    pos = torch.arange(T, device=mask.device)
+    near = (pos[:, None] - pos[None, :]).abs() <= enc.config.sliding_window
+    dt = next(enc.parameters()).dtype                                  # fp16 in the FP16 export
+    low = torch.finfo(dt).min
+    zero = torch.zeros((), dtype=dt, device=mask.device)
+    full = torch.where(key, zero, low).expand(-1, 1, T, T)
+    sliding = torch.where(key & near[None, None], zero, low)
+    return {"full_attention": full, "sliding_attention": sliding}
+
+
+def _mask(enc, mask):
+    """The attention mask ``enc`` is called with in a traced graph."""
+    return _modernbert_masks(enc, mask) if enc.config.model_type == "modernbert" else mask
+
+
 def _layers(enc, ids, mask):
-    out = enc(input_ids=ids, attention_mask=mask, output_hidden_states=True)
+    out = enc(input_ids=ids, attention_mask=_mask(enc, mask), output_hidden_states=True)
     H = enc.config.hidden_size                    # a constant: traced shapes would not be
     return tuple(F.layer_norm(h, (H,)) for h in out.hidden_states)
 
@@ -259,7 +281,7 @@ class Label(nn.Module):
         self.label_enc = model.label_enc
 
     def forward(self, label_ids, label_mask):
-        out = self.enc(input_ids=label_ids, attention_mask=label_mask)
+        out = self.enc(input_ids=label_ids, attention_mask=_mask(self.enc, label_mask))
         return self.label_enc(out.last_hidden_state, label_mask)
 
 
@@ -296,7 +318,7 @@ class Marker(nn.Module):
     def forward(self, rm_input_ids, rm_attention_mask, men_pos, men_ent, ent_ids, pair_h, pair_t,
                 label_emb):
         r = self.r
-        out = self.enc(input_ids=rm_input_ids, attention_mask=rm_attention_mask,
+        out = self.enc(input_ids=rm_input_ids, attention_mask=_mask(self.enc, rm_attention_mask),
                        output_attentions=True)
         raw, att = out.last_hidden_state, out.attentions[-1]
         seq, att = raw[0].float(), att[0].float()                          # [T,H], [heads,T,T]
