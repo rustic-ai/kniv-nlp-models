@@ -517,27 +517,35 @@ class LabelDistiller:
 
 def student_losses(o: dict, b: dict, rank: bool = False) -> dict:
     out = {}
+    # A knowledge-only scope (--train-scope relation) runs no linguistic heads:
+    # their terms are zero then.
+    zero = (next(v for v in o.values() if torch.is_tensor(v)).sum() * 0.0, 0)
     if "kd_pos" not in b:
-        return {h: (o["pos"].sum() * 0.0, 0) for h in KD_HEADS}
+        return {h: zero for h in KD_HEADS}
     wm = b["word_mask"]
-    for h in ("pos", "morph", "lemma", "ner"):
+    if "pos" not in o:
+        for h in ("kd_pos", "kd_morph", "kd_lemma", "kd_ner", "kd_ent", "kd_arc", "kd_deprel",
+                  "kd_srl_pred", "kd_srl", "kd_cls", "kd_sentiment"):
+            out[h] = zero
+    for h in (("pos", "morph", "lemma", "ner") if "pos" in o else ()):
         out[f"kd_{h}"] = _soft_ce(o[h], b[f"kd_{h}"], wm)
-    out["kd_ent"] = (_soft_ce(o["ent"], b["kd_ent"], wm) if "ent" in o and o["ent"] is not None
-                     else (o["pos"].sum() * 0.0, 0))
-    out["kd_arc"] = _soft_ce(o["arc"], b["kd_arc"], wm)
-    out["kd_deprel"] = _soft_ce(o["rel"], b["kd_deprel"], wm & b["kd_deprel_mask"])
-    sp = torch.stack([1 - b["kd_srl_pred"], b["kd_srl_pred"]], -1)
-    out["kd_srl_pred"] = _soft_ce(o["srl_pred"], sp, wm & b["kd_srl_pred_mask"])
-    if len(o["srl_role"]) and len(b["kd_srl"]) == len(o["srl_role"]):
-        out["kd_srl"] = _soft_ce(o["srl_role"], b["kd_srl"], b["kd_srl"].sum(-1) > 0)
-    else:
-        out["kd_srl"] = (o["pos"].sum() * 0.0, 0)
-    m = b["kd_sent_mask"]
-    if bool(m.any()):
-        out["kd_cls"] = (F.binary_cross_entropy_with_logits(o["cls"][m].float(), b["kd_cls"][m]), int(m.sum()))
-    else:
-        out["kd_cls"] = (o["pos"].sum() * 0.0, 0)
-    out["kd_sentiment"] = _soft_ce(o["sentiment"], b["kd_sentiment"], m)
+    if "pos" in o:
+        out["kd_ent"] = (_soft_ce(o["ent"], b["kd_ent"], wm) if "ent" in o and o["ent"] is not None
+                         else zero)
+        out["kd_arc"] = _soft_ce(o["arc"], b["kd_arc"], wm)
+        out["kd_deprel"] = _soft_ce(o["rel"], b["kd_deprel"], wm & b["kd_deprel_mask"])
+        sp = torch.stack([1 - b["kd_srl_pred"], b["kd_srl_pred"]], -1)
+        out["kd_srl_pred"] = _soft_ce(o["srl_pred"], sp, wm & b["kd_srl_pred_mask"])
+        if len(o["srl_role"]) and len(b["kd_srl"]) == len(o["srl_role"]):
+            out["kd_srl"] = _soft_ce(o["srl_role"], b["kd_srl"], b["kd_srl"].sum(-1) > 0)
+        else:
+            out["kd_srl"] = zero
+        m = b["kd_sent_mask"]
+        if bool(m.any()):
+            out["kd_cls"] = (F.binary_cross_entropy_with_logits(o["cls"][m].float(), b["kd_cls"][m]), int(m.sum()))
+        else:
+            out["kd_cls"] = zero
+        out["kd_sentiment"] = _soft_ce(o["sentiment"], b["kd_sentiment"], m)
     if "coref_scores" in o:
         lp = F.log_softmax(o["coref_scores"].float(), -1)                     # [B,W,k+1]
         cand = torch.cat([torch.full_like(o["coref_cand"][..., :1], -1), o["coref_cand"]], -1)
@@ -549,18 +557,17 @@ def student_losses(o: dict, b: dict, rank: bool = False) -> dict:
         z = p.sum(-1)
         msk = wm & (z > 0)
         out["kd_coref"] = ((-(p * lp_t).sum(-1) / z.clamp(min=1e-9))[msk].mean(), int(msk.sum())) \
-            if bool(msk.any()) else (o["pos"].sum() * 0.0, 0)
+            if bool(msk.any()) else zero
     else:
-        out["kd_coref"] = (o["pos"].sum() * 0.0, 0)
+        out["kd_coref"] = zero
     if "span" in o and "kd_span" in b and len(o["span"]):
         out["kd_span"] = _decision(o["span"][:, 1:] - o["span"][:, :1], b["kd_span"])
     else:
-        out["kd_span"] = (o["pos"].sum() * 0.0, 0)
+        out["kd_span"] = zero
     if "relation" in o and "kd_rel" in b and len(o["relation"]):
         out["kd_rel"] = _decision(o["relation"][:, 1:] - o["relation"][:, :1], b["kd_rel"])
     else:
-        out["kd_rel"] = (o["pos"].sum() * 0.0, 0)
-    zero = (o["pos"].sum() * 0.0, 0)
+        out["kd_rel"] = zero
     out["kd_rel_rank"] = (_ranking(o["relation"][:, 1:] - o["relation"][:, :1], b["kd_rel"])
                           if rank and "relation" in o and "kd_rel" in b and len(o["relation"]) else zero)
     out["kd_span_rank"] = (_ranking(o["span"][:, 1:] - o["span"][:, :1], b["kd_span"])
