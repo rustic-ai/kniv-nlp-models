@@ -37,6 +37,9 @@ import numpy as np
 from ..config import DATA_DIR
 
 WINDOWS = DATA_DIR / "v6-corpus" / "student_windows.jsonl"
+# Type-variety windows (``types``): a sample of the student windows, each with
+# its own entity types plus random bank types, for span targets only.
+TYPE_WINDOWS = DATA_DIR / "v6-corpus" / "student_windows_types.jsonl"
 OUT = DATA_DIR / "v6-eval" / "student-targets"
 FLOOR = -6.0
 TOPK = {"pos": 3, "morph": 5, "lemma": 5, "ner": 5, "ent": 5, "arc": 8, "deprel": 5}
@@ -207,7 +210,7 @@ def dump(args) -> int:
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     k = Kniv(rel_dir, backend=TorchBackend.load(args.run, local=args.local, device=dev))
     d = Dumper(k)
-    lines = WINDOWS.read_text().splitlines()
+    lines = Path(args.windows).read_text().splitlines()
     i, n = (int(x) for x in args.shard.split("/"))
     lines = lines[i::n][:args.limit] if args.limit else lines[i::n]
     out, t0 = {}, time.time()
@@ -216,7 +219,7 @@ def dump(args) -> int:
         out[w["id"]] = d.window(w)
         if c % 2000 == 0:
             print(f"  {c:,}/{len(lines):,} [{time.time() - t0:.0f}s]", flush=True)
-    path = OUT / args.run / f"shard-{i}-of-{n}.pkl"
+    path = OUT.parent / args.name / args.run / f"shard-{i}-of-{n}.pkl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(pickle.dumps(out, protocol=5))
     print(f"wrote {path}: {len(out):,} windows, {path.stat().st_size >> 20} MB [{time.time() - t0:.0f}s]",
@@ -225,7 +228,7 @@ def dump(args) -> int:
         from huggingface_hub import HfApi
         from .gold_eval import HF_REPO
         HfApi().upload_file(path_or_fileobj=str(path),
-                            path_in_repo=f"{args.run}/student-targets/{path.name}", repo_id=HF_REPO,
+                            path_in_repo=f"{args.run}/{args.name}/{path.name}", repo_id=HF_REPO,
                             commit_message=f"{args.run}: student targets {path.name}")
         print("uploaded", flush=True)
     return 0
@@ -241,13 +244,44 @@ def main() -> int:
     d.add_argument("--shard", default="0/1")
     d.add_argument("--limit", type=int)
     d.add_argument("--upload", action="store_true")
+    d.add_argument("--windows", default=str(WINDOWS), help="windows file (default the student windows)")
+    d.add_argument("--name", default="student-targets",
+                   help="output and hub directory name (student-targets-types for TYPE_WINDOWS)")
+    ty = sub.add_parser("types", help="write TYPE_WINDOWS from the student windows")
+    ty.add_argument("--windows", type=int, default=30000)
+    ty.add_argument("--k", type=int, default=24, help="entity types per window")
+    ty.add_argument("--seed", type=int, default=13)
     lb = sub.add_parser("labels")
     lb.add_argument("--runs", default="ultrabert-380m-v7b8ev,deberta-v3-large-v7b8ev")
     lb.add_argument("--local", type=Path)
     lb.add_argument("--device")
     args = ap.parse_args()
-    return dump(args) if args.cmd == "dump" else dump_labels(args)
+    return {"dump": dump, "labels": dump_labels, "types": type_windows}[args.cmd](args)
 
+
+
+def type_windows(args) -> int:
+    """A sample of the student windows for type-variety span targets: each
+    keeps its own entity types and gets random bank types up to ``k`` (the
+    teachers then score every candidate span against all of them); entities
+    and relations dropped, so a dump of these runs the plain pass and the span
+    head only."""
+    from ..label_bank import load as load_bank
+    rng = np.random.default_rng(args.seed)
+    names = [t["name"] for t in load_bank()["entity_types"]]
+    rows = [json.loads(line) for line in WINDOWS.read_text().splitlines()]
+    pick = sorted(rng.choice(len(rows), min(args.windows, len(rows)), replace=False))
+    with TYPE_WINDOWS.open("w") as fh:
+        for i in pick:
+            r = rows[i]
+            own = list(dict.fromkeys(r.get("types") or []))[:args.k]
+            rest = [n for n in rng.permutation(names).tolist() if n not in own][:args.k - len(own)]
+            fh.write(json.dumps({"id": r["id"], "source": r.get("source"), "domain": r.get("domain", ""),
+                                 "tokens": r["tokens"], "sentence_spans": r["sentence_spans"],
+                                 "speakers": r.get("speakers"), "types": own + rest}) + "\n")
+    print(f"wrote {TYPE_WINDOWS}: {len(pick):,} windows, {args.k} types each, "
+          f"from a bank of {len(names):,}", flush=True)
+    return 0
 
 
 # ── label vectors, for label distillation (student_kd.LabelDistiller) ──

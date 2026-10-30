@@ -524,6 +524,10 @@ def main() -> int:
     ap.add_argument("--student-targets",
                     help="distil from both v7 teachers (student_kd): directory with "
                          "<teacher>/shard-*.pkl (fetched from the runs repo when missing)")
+    ap.add_argument("--student-windows", help="with --student-targets: a windows file other than "
+                    "the student windows (student_targets TYPE_WINDOWS)")
+    ap.add_argument("--student-targets-name", default="student-targets",
+                    help="with --student-targets: the targets' directory name in the runs repo")
     ap.add_argument("--student-weight", type=int, default=1,
                     help="with --student-targets: copies of the student windows in the mix")
     ap.add_argument("--student-limit", type=int, help="with --student-targets: at most this many windows")
@@ -778,7 +782,8 @@ def main() -> int:
         from .student_kd import student_features
         preparing("featurising the student windows")
         sfeats = student_features(Path(args.student_targets), tok, spec, vocab, load_bank(),
-                                  markers=args.rel_markers, limit=args.student_limit)
+                                  markers=args.rel_markers, limit=args.student_limit,
+                                  windows=args.student_windows, name=args.student_targets_name)
         train = train + sfeats * args.student_weight
         if args.kd_attr_neg > 1:
             from .student_kd import has_negation

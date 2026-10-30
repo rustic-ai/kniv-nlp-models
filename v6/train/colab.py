@@ -244,6 +244,7 @@ def build_bundles() -> tuple[Path, Path, str]:
                          corpus / "docred_distant_rel.json", corpus / "kg_holdout.json",
                          corpus / "kg_pretrain.json", corpus / "kd_distant.json",
                          corpus / "kd_teacher.pkl", corpus / "student_windows.jsonl",
+                         corpus / "student_windows_types.jsonl",
                          corpus / "student_label_emb.pkl")
              if p.exists()]
     # Keyed by every bundled side file's size and mtime: a name that ignores
@@ -1062,6 +1063,9 @@ POST_JOBS = {
     "err": "python -m v6.train.error_analysis --run {ev} --part relations --out /content/err-{ev}.json",
     "kd": "python -m v6.train.kd_teacher dump --run {ev} --upload",
     "st": "python -m v6.train.student_targets dump --run {ev} --release release/{ev} --shard {bench} --upload",
+    # type-variety span targets (student_targets types)
+    "stt": "python -m v6.train.student_targets dump --run {ev} --release release/{ev} --shard {bench}"
+           " --windows data/v6-corpus/student_windows_types.jsonl --name student-targets-types --upload",
     # the teacher-corpus caches from the run's hubdata manifest, then the head fine-tune
     "attr": "python -m v6.train.hubdata pull --manifest manifest-{ev}.json --match knowledge-teacher"
             " && python -m v6.train.attr_finetune --run {ev}",

@@ -281,13 +281,15 @@ def _sha256(path: Path) -> str:
 
 
 def student_features(st_dir: Path, tok, spec, vocab, bank, markers: bool = True,
-                     limit: int | None = None) -> list[dict]:
+                     limit: int | None = None, windows: Path | None = None,
+                     name: str = "student-targets") -> list[dict]:
     """``build``, cached in the corpus feature directory (and listed in
     ``USED_CACHES``, so ``--hub-data`` ships it). Targets come from
     ``st_dir/<teacher>/shard-*.pkl`` when present, else from the runs repo;
     the key uses the hub's checksums then, so a VM that has the cache never
     downloads the targets."""
     from .student_targets import WINDOWS
+    windows = Path(windows or WINDOWS)
     local = {t: sorted((st_dir / t).glob("shard-*.pkl")) for t in TEACHERS}
     if all(local.values()):
         digests = {t: [(p.name, _sha256(p)) for p in ps] for t, ps in local.items()}
@@ -296,7 +298,7 @@ def student_features(st_dir: Path, tok, spec, vocab, bank, markers: bool = True,
         from .gold_eval import HF_REPO
         digests = {}
         for t in TEACHERS:
-            files = [f for f in HfApi().list_repo_tree(HF_REPO, path_in_repo=f"{t}/student-targets")
+            files = [f for f in HfApi().list_repo_tree(HF_REPO, path_in_repo=f"{t}/{name}")
                      if f.path.endswith(".pkl")]
             digests[t] = sorted((Path(f.path).name, f.lfs.sha256) for f in files)
     h = hashlib.sha256(json.dumps([spec.hf_id, spec.max_subwords, markers, limit,
@@ -304,7 +306,7 @@ def student_features(st_dir: Path, tok, spec, vocab, bank, markers: bool = True,
                                   ).encode())
     h.update(json.dumps([[r["id"], r["name"]] for r in bank["relations"]]
                         + [[t["id"], t["name"]] for t in bank["entity_types"]]).encode())
-    h.update(file_digest(WINDOWS).encode())
+    h.update(file_digest(windows).encode())
     path = FEATURES / f"{spec.name}-student-{h.hexdigest()[:16]}.pkl"
     USED_CACHES.append(path)
     if path.exists():
@@ -314,10 +316,10 @@ def student_features(st_dir: Path, tok, spec, vocab, bank, markers: bool = True,
         from huggingface_hub import snapshot_download
         from .gold_eval import HF_REPO
         hub = st_dir.parent / "hub"
-        snapshot_download(HF_REPO, allow_patterns=[f"{t}/student-targets/*" for t in TEACHERS],
+        snapshot_download(HF_REPO, allow_patterns=[f"{t}/{name}/*" for t in TEACHERS],
                           local_dir=str(hub))
-        local = {t: sorted((hub / t / "student-targets").glob("shard-*.pkl")) for t in TEACHERS}
-    out = build(WINDOWS, local, tok, spec, vocab, bank, markers=markers, limit=limit)
+        local = {t: sorted((hub / t / name).glob("shard-*.pkl")) for t in TEACHERS}
+    out = build(windows, local, tok, spec, vocab, bank, markers=markers, limit=limit)
     FEATURES.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     with tmp.open("wb") as fh:
