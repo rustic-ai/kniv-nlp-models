@@ -1002,6 +1002,10 @@ def main() -> int:
         for n, prm in model.named_parameters():
             prm.requires_grad = n.startswith(trainable)
         heads = RELATION_HEADS
+        if args.student_targets:                 # the distillation terms this scope can train
+            from .student_kd import KD_HEADS
+            heads = heads + tuple(h for h in KD_HEADS if h in ("kd_span", "kd_span_rank", "kd_rel",
+                                                               "kd_rel_rank", "kd_label"))
         model.rel_lora.sticky = True
     if args.freeze:
         keep = tuple(x for x in args.freeze.split(",") if x)
