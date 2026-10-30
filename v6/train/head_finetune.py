@@ -97,6 +97,37 @@ def v5_ner_features(split: str, limit: int, tok, spec, vocab, rng) -> list[dict]
     return out
 
 
+def ner_kd_features(n: int, tok, spec, vocab, rng) -> list[dict]:
+    """``n`` student windows with both teachers' NER distributions, mixed as
+    in distillation (``student_kd.WEIGHTS``) and laid out on this run's words
+    (``ner_soft`` ``[W, tags]``); no hard labels."""
+    from huggingface_hub import hf_hub_download
+    from .student_kd import TEACHERS, WEIGHTS, _mix_topk, load_targets
+    from .student_targets import WINDOWS
+    tg = [load_targets([Path(hf_hub_download(HF_REPO, f"{t}/student-targets/shard-0-of-1.pkl"))])
+          for t in TEACHERS]
+    rows = [json.loads(line) for line in open(WINDOWS)]
+    rows = [r for r in rows if r["id"] in tg[0] and r["id"] in tg[1]]
+    rows = [rows[i] for i in sorted(rng.choice(len(rows), min(n, len(rows)), replace=False))]
+    T, stats, out = len(vocab.labels["ner"]), Counter(), []
+    for r in rows:
+        f = encode_row({"window_id": r["id"], "domain": r.get("domain", ""), "tokens": r["tokens"],
+                        "loss_mask": None, "sentence_spans": r["sentence_spans"], "pos": None,
+                        "morph": None, "lemma": None, "ner": None, "dep": None, "dep_heads": None,
+                        "srl_frames": None, "cls": None, "sentiment": None},
+                       tok, spec.max_subwords, vocab, stats)
+        a, b = tg[0][r["id"]], tg[1][r["id"]]
+        Ws = len(f["word_ok"])
+        idx, pr = _mix_topk(a["ner"], b["ner"], a["W"], b["W"], Ws, WEIGHTS["ner"])
+        soft = np.zeros((Ws, T), dtype=np.float32)
+        np.add.at(soft, (np.repeat(np.arange(Ws), idx.shape[1]), idx.reshape(-1)), pr.reshape(-1))
+        f["ner_soft"] = soft
+        out.append(f)
+    print(f"  NER distillation: {len(out):,} student windows, "
+          f"{sum(len(f['word_ok']) for f in out):,} words", flush=True)
+    return out
+
+
 @torch.no_grad()
 def cache(model, feats: list[dict], tok, device, mixes, batch: int = 32) -> list[dict]:
     """Per item: each mix's word vectors ``[W,H]`` (fp16, CPU) and its labels.
@@ -118,6 +149,8 @@ def cache(model, feats: list[dict], tok, device, mixes, batch: int = 32) -> list
             out[i] = {**{m + "_w": reps[m][j, :W].to(torch.float16).cpu() for m in mixes},
                       **{k_: torch.from_numpy(np.asarray(f[k_][:W]).astype(np.int64))
                          for k_ in LABELS if k_ in f},
+                      **({"ner_soft": torch.from_numpy(f["ner_soft"][:W]).to(torch.float16)}
+                         if "ner_soft" in f else {}),
                       "word_ok": torch.from_numpy(np.asarray(f["word_ok"][:W])),
                       "sent_of_word": torch.from_numpy(np.asarray(f["sent_of_word"][:W]).astype(np.int64))}
         if (k // batch) % 50 == 0:
@@ -222,6 +255,10 @@ def main() -> int:
     ap.add_argument("--ner-lstm", type=int, default=0, metavar="D",
                     help="replace the NER classifier with a fresh BiLSTM head of width D")
     ap.add_argument("--ner-lr", type=float, default=3e-4, help="learning rate of a fresh NER head")
+    ap.add_argument("--ner-kd", type=int, default=0, metavar="N",
+                    help="also train NER on N student windows against both teachers' mixed NER "
+                         "distributions (soft cross-entropy)")
+    ap.add_argument("--ner-kd-weight", type=float, default=1.0)
     ap.add_argument("--stages", default="tag,ner,dep",
                     help="which heads to train, in order: tag (POS/morph/lemma), ner, dep")
     ap.add_argument("--ner-dev", type=int, default=3000, help="v5 NER dev sample for selection")
@@ -258,7 +295,15 @@ def main() -> int:
     else:
         ctr = v5_ner_features("train", args.ner_train, tok, spec, vocab, rng)
     cdv = v5_ner_features("dev", args.ner_dev, tok, spec, vocab, rng)
+    if args.ner_kd:
+        ctr += ner_kd_features(args.ner_kd, tok, spec, vocab, rng)
     c_tr = cache(model, ctr, tok, device, ("pos", "ner"))
+    if args.ner_kd:                            # one key set per batch: zeros where no soft target
+        T = len(vocab.labels["ner"])
+        for x in c_tr:
+            W = len(x["word_ok"])
+            x.setdefault("ner_soft", torch.zeros(W, T, dtype=torch.float16))
+            x.setdefault("ner", torch.full((W,), IGNORE, dtype=torch.long))
     c_dv = cache(model, cdv, tok, device, ("pos", "ner"))
     print(f"cached UD {len(ud_tr):,}/{len(ud_dv):,} sentences, v5 NER {len(c_tr):,}/{len(c_dv):,} "
           f"sentences in {time.time() - t0:.0f}s", flush=True)
@@ -326,7 +371,14 @@ def main() -> int:
         from .model import NerLSTMHead
         if isinstance(model.ner, NerLSTMHead):       # needs whole sentences
             pos_p = torch.softmax(model.pos(b["pos_w"]).float(), -1).detach()
-            return ce(model.ner(torch.cat([b["ner_w"], pos_p], -1), b["word_ok"]), b["ner"])
+            lg = model.ner(torch.cat([b["ner_w"], pos_p], -1), b["word_ok"])
+            out = ce(lg, b["ner"])
+            if "ner_soft" in b:                  # the teachers' distributions (--ner-kd)
+                m = b["word_ok"] & (b["ner_soft"].sum(-1) > 0)
+                if bool(m.any()):
+                    kd = -(b["ner_soft"][m] * F.log_softmax(lg[m].float(), -1)).sum(-1).mean()
+                    out = out + args.ner_kd_weight * kd
+            return out
         m = b["ner"] != IGNORE
         pos_p = torch.softmax(model.pos(b["pos_w"][m]).float(), -1).detach()
         return ce(model.ner(torch.cat([b["ner_w"][m], pos_p], -1)), b["ner"][m])
@@ -335,11 +387,18 @@ def main() -> int:
     if args.ner_lstm and "ner" in stages:
         from .model import NerLSTMHead
         old_ner, old_score = model.ner, score_ner(c_dv)
-        print(f"NER: deployed classifier on dev {old_score['main']:.4f}", flush=True)
-        model.ner = NerLSTMHead(model.ner[1].in_features, len(L), d=args.ner_lstm).to(device)
+        print(f"NER: deployed head on dev {old_score['main']:.4f}", flush=True)
+        if isinstance(model.ner, NerLSTMHead) and model.ner.rnn.hidden_size == args.ner_lstm:
+            import copy                        # a BiLSTM of this width already: continue from it
+            model.ner = copy.deepcopy(old_ner)
+            print(f"NER head: the deployed BiLSTM, width {args.ner_lstm}, trained on", flush=True)
+        else:
+            n_in = (model.ner.proj.in_features if isinstance(model.ner, NerLSTMHead)
+                    else model.ner[1].in_features)
+            model.ner = NerLSTMHead(n_in, len(L), d=args.ner_lstm).to(device)
+            print(f"NER head: fresh BiLSTM, width {args.ner_lstm}", flush=True)
         for prm in model.ner.parameters():
             prm.requires_grad = False
-        print(f"NER head: fresh BiLSTM, width {args.ner_lstm}", flush=True)
     lr0 = args.lr
     if old_ner is not None:
         args.lr = args.ner_lr
@@ -347,7 +406,7 @@ def main() -> int:
                     device, args, rng) if "ner" in stages else {})
     args.lr = lr0
     if old_ner is not None and r_ner["main"] <= old_score["main"]:
-        print(f"NER: the BiLSTM ({r_ner['main']:.4f}) does not beat the classifier; kept", flush=True)
+        print(f"NER: the fresh BiLSTM ({r_ner['main']:.4f}) does not beat the deployed head; kept", flush=True)
         model.ner, args.ner_lstm, r_ner = old_ner, 0, old_score
 
     @torch.no_grad()
