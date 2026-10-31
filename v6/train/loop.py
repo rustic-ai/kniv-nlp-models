@@ -1165,7 +1165,10 @@ def main() -> int:
             for m0 in range(start, per_epoch * spec.grad_accum, spec.grad_accum):
                 this, seen, bad = defaultdict(float), set(), []
                 for m in range(m0, m0 + spec.grad_accum):
-                    items = [train[i] for i in batches[m]]
+                    # Token packing after each epoch's shuffle gives a slightly different
+                    # batch count per epoch; per_epoch is epoch 0's, so a shorter epoch
+                    # wraps around to its own first batches (resume offsets stay valid).
+                    items = [train[i] for i in batches[m % len(batches)]]
                     b = collate(items, tok.pad_token_id)
                     b = label_coll(b) if label_coll is not None else b
                     if args.student_targets:
