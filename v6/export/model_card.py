@@ -75,6 +75,10 @@ MODELS = {
         "arch_tag": "modernbert",
         "int8_speed": "1.6-1.9x faster than fp32",
         "int8_drop": "0.6",
+        "int8_note": " On conversations INT8 keeps about 80% of the fp32\n"
+                     "model's facts exactly (the teachers 86-88%); the differences are mostly\n"
+                     "low-margin facts, so filter on `margin` or use fp32/FP16 where stable output\n"
+                     "matters.",
         "choose": "",
         "about": "A distilled student of the two kniv v7 models,\n"
                  "[kniv-v7-ultrabert-380m-en](https://huggingface.co/{org}/kniv-v7-ultrabert-380m-en) and\n"
@@ -109,6 +113,7 @@ TEACHER = {
     "date": "2026-10-20",
     "missed": "About 29% of facts are missed, mostly\n  borderline decisions.",
     "limits": "",
+    "int8_note": "",
 }
 
 CARD = """---
@@ -254,7 +259,7 @@ entities get six coarse types (PER, ORG, LOC, TIME, NUM, MISC).
 | INT8 | `Kniv(path, int8=True)` | CPU speed: {int8_speed} |
 
 FP16 matches fp32 within 0.001 on every task. INT8 stays within {int8_drop}
-points. To download only the FP16 files:
+points.{int8_note} To download only the FP16 files:
 
 ```python
 path = snapshot_download("{org}/{repo}", ignore_patterns=[
@@ -385,7 +390,7 @@ def write(model: str, out: Path) -> None:
                        org=ORG, repo=m["repo"], choose=m["choose"], github=GITHUB,
                        window=m["window"], base_licence=m["base_licence"], hn=m["hn"], int8_speed=m["int8_speed"], int8_how=m.get("int8_how", ""), int8_drop=m["int8_drop"],
                        about=m["about"].format(org=ORG, other=m["other"], choose=m["choose"]),
-                       date=m["date"], missed=m["missed"], limits=m["limits"],
+                       date=m["date"], missed=m["missed"], limits=m["limits"], int8_note=m["int8_note"],
                        lme0=s["lme"][0], lme1=s["lme"][1],
                        lme2=s["lme"][2], lme3=s["lme"][3],
                        **{k: v for k, v in s.items() if k != "lme"})
