@@ -60,6 +60,55 @@ MODELS = {
               "(each true relation's nearest relations by label embedding in its batch).",
         "choose": "slightly better parsing, NER, semantic roles and encyclopedic relations",
     },
+    "modernbert-base": {
+        "repo": "kniv-v7-modernbert-base-en", "run": "modernbert-base-nerkd",
+        "base": "answerdotai/ModernBERT-base", "base_licence": "Apache-2.0", "params": "221M",
+        "encoder_params": "149M", "window": "1,024", "other": "kniv-v7-ultrabert-380m-en",
+        "date": "2026-10-30",
+        "scores": {
+            "pos": "0.981", "lemma_morph": "0.977 / 0.977", "uas_las": "0.943 / 0.926",
+            "ner": "0.863", "srl_e2e": "0.807", "cls": "0.756",
+            "coref": "0.667", "re_gold": "0.725", "re_e2e": "0.608",
+            "fewrel": "0.798 / 0.666 / 0.622", "crossner": "0.496",
+            "fewnerd": "0.467", "lme": ("0.760", "0.493", "0.947", "134")},
+        "hn": "",
+        "arch_tag": "modernbert",
+        "int8_speed": "1.6-1.9x faster than fp32",
+        "int8_drop": "0.6",
+        "choose": "",
+        "about": "A distilled student of the two kniv v7 models,\n"
+                 "[kniv-v7-ultrabert-380m-en](https://huggingface.co/{org}/kniv-v7-ultrabert-380m-en) and\n"
+                 "[kniv-v7-deberta-v3-large-en](https://huggingface.co/{org}/kniv-v7-deberta-v3-large-en):\n"
+                 "the same outputs, graphs and runtime at less than half their size (221M parameters\n"
+                 "against 485M and 538M) and about twice their speed on CPU. It is within a point of\n"
+                 "the better teacher on tagging, parsing, NER and semantic roles, and within two on\n"
+                 "document-level relations. It is weaker on entity types with names it has not seen\n"
+                 "and on coreference (see Limitations): choose a teacher if those matter most.\n\n"
+                 "**[GUIDE.md](GUIDE.md)** shows the known failure modes of the kniv v7 models and how\n"
+                 "to work around them in your own code; they apply to this model too.",
+        "missed": "More facts are missed than with the teachers (Re-DocRED\n"
+                  "  end to end 0.608 against 0.627).",
+        "limits": "- **New entity types.** Typing entities with type names it has not seen is the\n"
+                  "  largest gap to the teachers: CrossNER 0.496 against 0.580, Few-NERD 0.467\n"
+                  "  against 0.523.\n"
+                  "- **Coreference** is 4 points below the better teacher (LitBank 0.667 against 0.707).\n"
+                  "- **More facts, lower precision.** On conversations it returns about twice as many\n"
+                  "  facts as the UltraBERT model (134 against 73 per LongMemEval question), many with\n"
+                  "  low margins: its higher share of answers found in extracted entities and facts\n"
+                  "  (0.760 / 0.493 against 0.693 / 0.480) is partly that volume. Raise the thresholds\n"
+                  "  or filter on `margin` for precision (GUIDE.md).\n",
+    },
+}
+
+# Fields every model shares unless its entry sets them (the teachers' text).
+TEACHER = {
+    "about": "A sibling model, [{other}](https://huggingface.co/{org}/{other}), shares the\n"
+             "design. Choose this one if you want {choose}.\n\n"
+             "**[GUIDE.md](GUIDE.md)** compares the two models and shows how to work\n"
+             "around their known failure modes in your own code.",
+    "date": "2026-10-20",
+    "missed": "About 29% of facts are missed, mostly\n  borderline decisions.",
+    "limits": "",
 }
 
 CARD = """---
@@ -115,11 +164,7 @@ knowledge against a schema you supply at inference time.
   fact its polarity, modality, holder and time. In a conversation each
   speaker is an entity, so "I moved to Lisbon" yields `(user, lives in, Lisbon)`.
 
-A sibling model, [{other}](https://huggingface.co/{org}/{other}), shares the
-design. Choose this one if you want {choose}.
-
-**[GUIDE.md](GUIDE.md)** compares the two models and shows how to work
-around their known failure modes in your own code.
+{about}
 
 ## Model details
 
@@ -127,7 +172,7 @@ around their known failure modes in your own code.
 |---|---|
 | developed by | Dragonscale ([{org}](https://huggingface.co/{org})) |
 | model type | multi-task transformer encoder |
-| version | kniv v7 (`{run}`), 2026-10-20 |
+| version | kniv v7 (`{run}`), {date} |
 | base model | [{base}](https://huggingface.co/{base}) |
 | parameters | {params} |
 | input | up to 512 words per window ({window} subwords) |
@@ -257,9 +302,8 @@ at run time (see GUIDE.md).
 - **Facts are candidates.** Treat each fact as a candidate with a confidence
   (`margin`), not as verified truth. Keep a human in the loop where facts
   about people drive decisions.
-- **Document-level relations.** About 29% of facts are missed, mostly
-  borderline decisions. Lower the thresholds for recall (GUIDE.md).
-- **Entity grouping** is rule-based. Partial names ("Obama" / "Barack
+- **Document-level relations.** {missed} Lower the thresholds for recall (GUIDE.md).
+{limits}- **Entity grouping** is rule-based. Partial names ("Obama" / "Barack
   Obama") are not merged.
 - **Per-window facts.** Facts are per window; nothing is linked across
   windows or documents.
@@ -333,13 +377,15 @@ def model_index(m: dict) -> str:
 
 
 def write(model: str, out: Path) -> None:
-    m = MODELS[model]
+    m = {**TEACHER, **MODELS[model]}
     s = m["scores"]
-    text = CARD.format(results_rows=results_rows(m), arch_tag=m["arch_tag"], model_index=model_index(m), lr=m["lr"], batch=m["batch"],
-                       steps_a=m["steps_a"], hours=m["hours"], base=m["base"], base_short=m["base"].split("/")[-1], run=m["run"],
+    text = CARD.format(results_rows=results_rows(m), arch_tag=m["arch_tag"], model_index=model_index(m), lr=m.get("lr", ""), batch=m.get("batch", ""),
+                       steps_a=m.get("steps_a", ""), hours=m.get("hours", ""), base=m["base"], base_short=m["base"].split("/")[-1], run=m["run"],
                        params=m["params"], encoder_params=m["encoder_params"], other=m["other"],
                        org=ORG, repo=m["repo"], choose=m["choose"], github=GITHUB,
-                       window=m["window"], base_licence=m["base_licence"], hn=m["hn"], int8_speed=m["int8_speed"], int8_how=m["int8_how"], int8_drop=m["int8_drop"],
+                       window=m["window"], base_licence=m["base_licence"], hn=m["hn"], int8_speed=m["int8_speed"], int8_how=m.get("int8_how", ""), int8_drop=m["int8_drop"],
+                       about=m["about"].format(org=ORG, other=m["other"], choose=m["choose"]),
+                       date=m["date"], missed=m["missed"], limits=m["limits"],
                        lme0=s["lme"][0], lme1=s["lme"][1],
                        lme2=s["lme"][2], lme3=s["lme"][3],
                        **{k: v for k, v in s.items() if k != "lme"})
