@@ -1013,7 +1013,7 @@ class V6Model(nn.Module):
                  legacy_rank: int | None = None, trust_remote_code: bool = False,
                  word_pool: str = "first", attr_head: bool = False,
                  srl_pred_hidden: int = 0, srl_ctx: int = 0, linker: int = 0,
-                 ner_lstm: int = 0, rel_xattn_layers: int = 2):
+                 ner_lstm: int = 0, rel_xattn_layers: int = 2, coref_adapter: int = 0):
         super().__init__()
         # Word vectors: the first subword (v6), or the mean of all of a word's
         # subwords -- for tokenizers that split words often, with little in
@@ -1142,6 +1142,12 @@ class V6Model(nn.Module):
         # read labels moves neither the marker pass nor the plain pass.
         self.label_lora = (RelationAdapter(self.encoder, label_adapter)
                            if phase2 and label_adapter else None)
+        # Coreference through its own adapter (v7 students): the coreference
+        # head reads a second encoder pass, so it can adapt the encoder while
+        # every other head keeps the plain pass bit-identical. Starts as the
+        # plain pass (B = 0).
+        self.coref_lora = (RelationAdapter(self.encoder, coref_adapter)
+                           if phase2 and coref_adapter else None)
         # Schema-conditioned entity spans, read off the plain pass.
         self.span = None
         if span_head:
@@ -1277,6 +1283,25 @@ class V6Model(nn.Module):
         finally:
             if not self.rel_lora.sticky:
                 self.rel_lora.on = False
+        return tuple(F.layer_norm(h, h.shape[-1:]) for h in out.hidden_states)
+
+    def _coref_layers(self, batch: dict):
+        """The coreference adapter's encoder pass, with every other adapter
+        off. Not safe under gradient checkpointing (the switch is off again
+        by the time backward recomputes the forward)."""
+        others = [a for a in (self.rel_lora, self.legacy_lora, self.label_lora) if a is not None]
+        prev = [a.on for a in others]
+        for a in others:
+            a.on = False
+        self.coref_lora.on = True
+        try:
+            out = self.encoder(input_ids=batch["input_ids"],
+                               attention_mask=batch["attention_mask"],
+                               output_hidden_states=True)
+        finally:
+            self.coref_lora.on = False
+            for a, on in zip(others, prev):
+                a.on = on
         return tuple(F.layer_norm(h, h.shape[-1:]) for h in out.hidden_states)
 
     def _marker_pass(self, batch: dict):
@@ -1543,7 +1568,8 @@ class V6Model(nn.Module):
             self._pool(self._words(layers, "sentiment", first), batch, "sentiment"))
 
         if self.phase2 and "coref_ok" in batch:
-            cw = self.coref.words(self.mix["coref"](layers), first, wm,
+            cl = layers if self.coref_lora is None else self._coref_layers(batch)
+            cw = self.coref.words(self.mix["coref"](cl), first, wm,
                                   batch["attention_mask"])
             o["coref_scores"], o["coref_cand"] = self.coref.antecedents(cw, wm)
             o["coref_a"] = cw

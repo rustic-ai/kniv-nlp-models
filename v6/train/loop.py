@@ -388,7 +388,7 @@ def _load_init(model, init: str, vocab: Vocab, relation: str = "drop",
                                                       "mix.coref.", "mix.relation.", "ent.",
                                                       "mix.ent.", "rel_lora.", "label_enc.",
                                                       "legacy_", "span.", "mix.ent_span.",
-                                                      "label_lora.", "attr."))]
+                                                      "label_lora.", "attr.", "coref_lora."))]
     if fresh or unexpected:
         raise SystemExit(f"--init does not fit this model: missing {fresh[:5]}, "
                          f"unexpected {unexpected[:5]}")
@@ -604,6 +604,9 @@ def main() -> int:
                          "every eval on held-out teacher windows (relation_zs_acc: is a true relation "
                          "ranked first; selects best.pt) and report FewRel's never-trained "
                          "relations (fewrel_zs_acc)")
+    ap.add_argument("--coref-adapter", type=int, default=0, metavar="R",
+                    help="a rank-R LoRA for a coreference-only encoder pass (needs "
+                         "--grad-checkpointing off): the other heads keep the plain pass")
     ap.add_argument("--label-adapter", type=int, default=0, metavar="R",
                     help="read label texts through their own rank-R adapter (v6.2 zero-shot head)")
     ap.add_argument("--legacy-rank", type=int, default=16,
@@ -862,7 +865,10 @@ def main() -> int:
                     trust_remote_code=spec.trust_remote_code,
                     word_pool=args.word_pool, attr_head=args.attr_head,
                     srl_pred_hidden=args.srl_pred_hidden, srl_ctx=args.srl_ctx,
-                    ner_lstm=args.ner_lstm, rel_xattn_layers=args.rel_xattn_layers).to(device)
+                    ner_lstm=args.ner_lstm, rel_xattn_layers=args.rel_xattn_layers,
+                    coref_adapter=args.coref_adapter).to(device)
+    if args.coref_adapter and spec.grad_checkpointing:
+        raise SystemExit("--coref-adapter needs --grad-checkpointing off")
     init_relation = args.init_relation or "drop"
     if init_relation == "transplant" and args.rel_head != "label":
         raise SystemExit("--init-relation transplant needs --rel-head label")
@@ -979,12 +985,13 @@ def main() -> int:
         model.plain_grad = True
         heads = RELATION_HEADS
     elif args.train_scope == "coref":
-        # The coreference head and its layer mix alone, on the plain pass;
-        # the encoder and every other head stay as --init left them.
+        # The coreference head and its layer mix alone, on the plain pass (or
+        # on its own adapter's pass, which trains too); the encoder and every
+        # other head stay as --init left them.
         if not args.phase2:
             raise SystemExit("--train-scope coref needs --phase2")
         for n, prm in model.named_parameters():
-            prm.requires_grad = n.startswith(("coref.", "mix.coref."))
+            prm.requires_grad = n.startswith(("coref.", "mix.coref.", "coref_lora."))
         model.freeze_encoder = True
         heads = ("coref", "coref_span")
         if args.student_targets:                 # the teachers' antecedents on the student windows
@@ -1124,6 +1131,7 @@ def main() -> int:
                                  "srl_pred_hidden": args.srl_pred_hidden,
                                  "srl_ctx": args.srl_ctx, "ner_lstm": args.ner_lstm,
                                  "rel_xattn_layers": args.rel_xattn_layers,
+                                 "coref_adapter": args.coref_adapter,
                                  "word_pool": args.word_pool,
                                  "attr_head": args.attr_head,
                                  "kg_holdout": hold_ids,
