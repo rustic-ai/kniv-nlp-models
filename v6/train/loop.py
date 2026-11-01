@@ -987,6 +987,8 @@ def main() -> int:
             prm.requires_grad = n.startswith(("coref.", "mix.coref."))
         model.freeze_encoder = True
         heads = ("coref", "coref_span")
+        if args.student_targets:                 # the teachers' antecedents on the student windows
+            heads = heads + ("kd_coref",)
         model.train()
     elif args.train_scope == "relation":
         # The relation adapter, relation and entity heads alone, on the adapted
