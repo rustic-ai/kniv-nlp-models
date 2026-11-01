@@ -157,6 +157,48 @@ MODELS = {
                   "  73 for the UltraBERT model), many with low margins. Raise the thresholds or\n"
                   "  filter on `margin` for precision (GUIDE.md).\n",
     },
+    "ettin-32m": {
+        "size": "small",
+        "repo": "kniv-v7-small-en", "run": "ettin-32m-s30-coref",
+        "base": "jhu-clsp/ettin-encoder-32m", "base_licence": "MIT", "params": "76M",
+        "encoder_params": "32M", "window": "1,024", "other": "kniv-v7-large-en",
+        "date": "2026-11-01",
+        "scores": {
+            "pos": "0.972", "lemma_morph": "0.974 / 0.972", "uas_las": "0.932 / 0.911",
+            "ner": "0.827", "srl_e2e": "0.773", "cls": "0.756",
+            "coref": "0.620", "re_gold": "0.672", "re_e2e": "0.567",
+            "fewrel": "0.787 / 0.667 / 0.577", "crossner": "0.410",
+            "fewnerd": "0.461", "lme": ("0.747", "0.447", "0.960", "178")},
+        "hn": "",
+        "arch_tag": "modernbert",
+        "int8_speed": "about 1.2x faster than fp32 (at this size much of the time is in the heads "
+                      "and the host code)",
+        "int8_drop": "0.8",
+        "choose": "",
+        "about": "**Preview.** A small distilled student of the two kniv v7 models,\n"
+                 "[kniv-v7-xlarge-u-en](https://huggingface.co/{org}/kniv-v7-xlarge-u-en) and\n"
+                 "[kniv-v7-xlarge-d-en](https://huggingface.co/{org}/kniv-v7-xlarge-d-en),\n"
+                 "on a 32M-parameter encoder (76M parameters with the heads): the same outputs, graphs\n"
+                 "and runtime as the larger models. It is close to them on tagging and parsing (POS\n"
+                 "0.972, LAS 0.911) and gives usable entities, roles and facts, but it is clearly\n"
+                 "weaker on NER, semantic roles, coreference, relations and entity types (see\n"
+                 "Results and Limitations). It is released as a preview: it misses our quality\n"
+                 "targets for this size on those tasks. For better quality at moderate size use\n"
+                 "[kniv-v7-large-en](https://huggingface.co/{org}/kniv-v7-large-en).\n\n"
+                 "**[GUIDE.md](GUIDE.md)** shows the known failure modes of the kniv v7 models and how\n"
+                 "to work around them in your own code; they apply to this model too.",
+        "missed": "More facts are missed than with the larger models (Re-DocRED\n"
+                  "  end to end 0.567 against 0.627 for the better teacher and 0.608 for the 150M student).",
+        "limits": "- **Preview quality.** Against the better teacher: NER 0.827 against 0.870, semantic\n"
+                  "  roles 0.773 against 0.810, relations with gold entities 0.672 against 0.733.\n"
+                  "- **Coreference** is the largest gap: LitBank 0.620 against 0.707.\n"
+                  "- **New entity types.** Typing entities with type names it has not seen: CrossNER\n"
+                  "  0.410 against 0.580, Few-NERD 0.461 against 0.523.\n"
+                  "- **More facts, lower precision.** On conversations it returns more facts than the\n"
+                  "  larger models (178 per LongMemEval question, against 134 for the 150M student and\n"
+                  "  73 for the UltraBERT model), many with low margins. Raise the thresholds or\n"
+                  "  filter on `margin` for precision (GUIDE.md).\n",
+    },
 }
 
 # Fields every model shares unless its entry sets them (the teachers' text).
