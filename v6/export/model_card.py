@@ -77,7 +77,7 @@ MODELS = {
         "hn": "",
         "arch_tag": "modernbert",
         "int8_speed": "1.6-1.9x faster than fp32",
-        "int8_drop": "0.6",
+        "int8_drop": "0.4",
         "int8_note": " On conversations INT8 keeps about 80% of the fp32\n"
                      "model's facts exactly (the teachers 86-88%); the differences are mostly\n"
                      "low-margin facts, so filter on `margin` or use fp32/FP16 where stable output\n"
