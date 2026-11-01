@@ -16,9 +16,10 @@ GITHUB = "https://github.com/rustic-ai/kniv-nlp-models"
 
 MODELS = {
     "ultrabert-380m": {
-        "repo": "kniv-v7-ultrabert-380m-en", "run": "ultrabert-380m-v7b8ev",
+        "size": "xlarge-u",
+        "repo": "kniv-v7-xlarge-u-en", "run": "ultrabert-380m-v7b8ev",
         "base": "dmis-lab/UltraBERT-380M", "base_licence": "Apache-2.0", "params": "485M",
-        "encoder_params": "378M", "window": "1,024", "other": "kniv-v7-deberta-v3-large-en",
+        "encoder_params": "378M", "window": "1,024", "other": "kniv-v7-xlarge-d-en",
         "scores": {
             "pos": "0.978", "lemma_morph": "0.976 / 0.977", "uas_las": "0.945 / 0.927",
             "ner": "0.860", "srl_root": "0.846", "srl_e2e": "0.797", "cls": "0.761",
@@ -39,9 +40,10 @@ MODELS = {
                   "parameters",
     },
     "deberta-v3-large": {
-        "repo": "kniv-v7-deberta-v3-large-en", "run": "deberta-v3-large-v7b8ev",
+        "size": "xlarge-d",
+        "repo": "kniv-v7-xlarge-d-en", "run": "deberta-v3-large-v7b8ev",
         "base": "microsoft/deberta-v3-large", "base_licence": "MIT", "params": "538M",
-        "encoder_params": "434M", "window": "512", "other": "kniv-v7-ultrabert-380m-en",
+        "encoder_params": "434M", "window": "512", "other": "kniv-v7-xlarge-u-en",
         "scores": {
             "pos": "0.982", "lemma_morph": "0.978 / 0.978", "uas_las": "0.946 / 0.929",
             "ner": "0.870", "srl_root": "0.855", "srl_e2e": "0.810", "cls": "0.758",
@@ -61,9 +63,10 @@ MODELS = {
         "choose": "slightly better parsing, NER, semantic roles and encyclopedic relations",
     },
     "modernbert-base": {
-        "repo": "kniv-v7-modernbert-base-en", "run": "modernbert-base-nerkd",
+        "size": "large",
+        "repo": "kniv-v7-large-en", "run": "modernbert-base-nerkd",
         "base": "answerdotai/ModernBERT-base", "base_licence": "Apache-2.0", "params": "221M",
-        "encoder_params": "149M", "window": "1,024", "other": "kniv-v7-ultrabert-380m-en",
+        "encoder_params": "149M", "window": "1,024", "other": "kniv-v7-xlarge-u-en",
         "date": "2026-10-30",
         "scores": {
             "pos": "0.981", "lemma_morph": "0.977 / 0.977", "uas_las": "0.943 / 0.926",
@@ -81,8 +84,8 @@ MODELS = {
                      "matters.",
         "choose": "",
         "about": "A distilled student of the two kniv v7 models,\n"
-                 "[kniv-v7-ultrabert-380m-en](https://huggingface.co/{org}/kniv-v7-ultrabert-380m-en) and\n"
-                 "[kniv-v7-deberta-v3-large-en](https://huggingface.co/{org}/kniv-v7-deberta-v3-large-en):\n"
+                 "[kniv-v7-xlarge-u-en](https://huggingface.co/{org}/kniv-v7-xlarge-u-en) and\n"
+                 "[kniv-v7-xlarge-d-en](https://huggingface.co/{org}/kniv-v7-xlarge-d-en):\n"
                  "the same outputs, graphs and runtime at less than half their size (221M parameters\n"
                  "against 485M and 538M) and about twice their speed on CPU. It is within a point of\n"
                  "the better teacher on tagging, parsing, NER and semantic roles, and within two on\n"
@@ -103,9 +106,10 @@ MODELS = {
                   "  or filter on `margin` for precision (GUIDE.md).\n",
     },
     "ettin-17m": {
-        "repo": "kniv-v7-ettin-17m-en", "run": "ettin-17m-s-s30-coref",
+        "size": "tiny",
+        "repo": "kniv-v7-tiny-en", "run": "ettin-17m-s-s30-coref",
         "base": "jhu-clsp/ettin-encoder-17m", "base_licence": "MIT", "params": "55M",
-        "encoder_params": "17M", "window": "1,024", "other": "kniv-v7-modernbert-base-en",
+        "encoder_params": "17M", "window": "1,024", "other": "kniv-v7-large-en",
         "date": "2026-11-01",
         "scores": {
             "pos": "0.968", "lemma_morph": "0.973 / 0.969", "uas_las": "0.926 / 0.904",
@@ -130,15 +134,15 @@ MODELS = {
                    "high. See GUIDE.md on thresholds.\n",
         "choose": "",
         "about": "**Preview.** The smallest distilled student of the two kniv v7 models,\n"
-                 "[kniv-v7-ultrabert-380m-en](https://huggingface.co/{org}/kniv-v7-ultrabert-380m-en) and\n"
-                 "[kniv-v7-deberta-v3-large-en](https://huggingface.co/{org}/kniv-v7-deberta-v3-large-en),\n"
+                 "[kniv-v7-xlarge-u-en](https://huggingface.co/{org}/kniv-v7-xlarge-u-en) and\n"
+                 "[kniv-v7-xlarge-d-en](https://huggingface.co/{org}/kniv-v7-xlarge-d-en),\n"
                  "on a 17M-parameter encoder (55M parameters with the heads): the same outputs, graphs\n"
                  "and runtime as the larger models. It is close to them on tagging and parsing (POS\n"
                  "0.968, LAS 0.904) and gives usable entities, roles and facts, but it is clearly\n"
                  "weaker on NER, semantic roles, coreference, relations and entity types (see\n"
                  "Results and Limitations). It is released as a preview: it misses our quality\n"
                  "targets for this size on those tasks. For better quality at moderate size use\n"
-                 "[kniv-v7-modernbert-base-en](https://huggingface.co/{org}/kniv-v7-modernbert-base-en).\n\n"
+                 "[kniv-v7-large-en](https://huggingface.co/{org}/kniv-v7-large-en).\n\n"
                  "**[GUIDE.md](GUIDE.md)** shows the known failure modes of the kniv v7 models and how\n"
                  "to work around them in your own code; they apply to this model too.",
         "missed": "More facts are missed than with the larger models (Re-DocRED\n"
@@ -208,7 +212,7 @@ model-index:
 {model_index}
 ---
 
-# kniv v7 ({base_short})
+# kniv v7 {size} ({base_short})
 
 One English encoder that gives a full linguistic analysis and extracts
 knowledge against a schema you supply at inference time.
@@ -222,6 +226,8 @@ knowledge against a schema you supply at inference time.
   speaker is an entity, so "I moved to Lisbon" yields `(user, lives in, Lisbon)`.
 
 {about}
+
+{family}
 
 ## Model details
 
@@ -388,6 +394,26 @@ Questions and issues: [{github}/issues]({github}/issues).
 """
 
 
+ORDER = ("tiny", "small", "medium", "large", "xlarge-d", "xlarge-u")
+ROLE = {"xlarge-d": "teacher", "xlarge-u": "teacher"}
+
+
+def family(current: str) -> str:
+    """The size table of every kniv v7 model, this one in bold."""
+    rows = ["| model | base encoder | parameters | role |", "|---|---|---|---|"]
+    for size in ORDER:
+        key = next((k for k, m in MODELS.items() if m["size"] == size), None)
+        if key is None:
+            continue
+        m = MODELS[key]
+        name = f"[{m['repo']}](https://huggingface.co/{ORG}/{m['repo']})"
+        if key == current:
+            name = f"**{m['repo']}** (this model)"
+        rows.append(f"| {name} | {m['base'].split('/')[-1]} | {m['params']} | "
+                    f"{ROLE.get(size, 'distilled student')} |")
+    return "**The kniv v7 models**, smallest first:\n\n" + "\n".join(rows)
+
+
 def results_rows(m: dict) -> str:
     sc = m["scores"]
     rows = [("UD English EWT, POS", sc["pos"]), ("UD English EWT, lemma / morphology", sc["lemma_morph"]),
@@ -443,7 +469,7 @@ def write(model: str, out: Path) -> None:
                        window=m["window"], base_licence=m["base_licence"], hn=m["hn"], int8_speed=m["int8_speed"], int8_how=m.get("int8_how", ""), int8_drop=m["int8_drop"],
                        about=m["about"].format(org=ORG, other=m["other"], choose=m["choose"]),
                        date=m["date"], missed=m["missed"], limits=m["limits"], int8_note=m["int8_note"],
-                       qs_note=m["qs_note"],
+                       qs_note=m["qs_note"], size=m["size"], family=family(model),
                        lme0=s["lme"][0], lme1=s["lme"][1],
                        lme2=s["lme"][2], lme3=s["lme"][3],
                        **{k: v for k, v in s.items() if k != "lme"})

@@ -1,7 +1,7 @@
 """kniv v7 inference: text (or conversation turns) to a full analysis.
 
     from kniv_v7 import Kniv
-    k = Kniv("path/to/kniv-v7-ultrabert-380m-en")            # ONNX, fp32
+    k = Kniv("path/to/kniv-v7-xlarge-u-en")                # ONNX, fp32
     out = k.analyse("Ada Lovelace was born in London in 1815.",
                     relations=[{"name": "place of birth", "description": "where the head was born"}])
 

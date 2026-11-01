@@ -1,8 +1,14 @@
 # kniv v7: strengths, weaknesses and workarounds
 
-A guide for people building on the two kniv v7 models:
-- [`kniv-v7-ultrabert-380m-en`](https://huggingface.co/dragonscale-ai/kniv-v7-ultrabert-380m-en) (UltraBERT below);
-- [`kniv-v7-deberta-v3-large-en`](https://huggingface.co/dragonscale-ai/kniv-v7-deberta-v3-large-en) (DeBERTa below).
+A guide for people building on the kniv v7 models. The measurements are of
+the two largest, the teachers the smaller models were distilled from:
+- [`kniv-v7-xlarge-u-en`](https://huggingface.co/dragonscale-ai/kniv-v7-xlarge-u-en) (UltraBERT-380M, "UltraBERT" below);
+- [`kniv-v7-xlarge-d-en`](https://huggingface.co/dragonscale-ai/kniv-v7-xlarge-d-en) (DeBERTa-v3-large, "DeBERTa" below).
+
+The distilled students ([`kniv-v7-tiny-en`](https://huggingface.co/dragonscale-ai/kniv-v7-tiny-en),
+[`kniv-v7-large-en`](https://huggingface.co/dragonscale-ai/kniv-v7-large-en) and the sizes between)
+share the outputs, runtime and failure modes; each model card states its own
+scores and gaps.
 
 For each capability it covers what each model does well, where our
 evaluations found it failing, and how to avoid those failures in your own
