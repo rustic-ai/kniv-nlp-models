@@ -118,6 +118,16 @@ MODELS = {
         "int8_speed": "about 1.1x faster than fp32 (at this size most of the time is in the heads "
                       "and the host code)",
         "int8_drop": "0.4",
+        "qs_note": "\n**This model and the example.** At the default thresholds this model returns no\n"
+                   "facts for the conversation above in fp32: its score for `(user, lives in, Lisbon)`\n"
+                   "sits exactly at the threshold (-2.00 against -2.0; INT8 keeps it). Lowering the\n"
+                   "threshold for your own relations recovers it:\n\n"
+                   "```python\n"
+                   "kniv.unseen_offset = -2.25    # default -2.0; lower = more facts, lower precision\n"
+                   "```\n\n"
+                   "The employer fact stays below its threshold, and lowering it further also admits\n"
+                   "wrong facts such as `(user, lives in, a bank)`, which this model scores almost as\n"
+                   "high. See GUIDE.md on thresholds.\n",
         "choose": "",
         "about": "**Preview.** The smallest distilled student of the two kniv v7 models,\n"
                  "[kniv-v7-ultrabert-380m-en](https://huggingface.co/{org}/kniv-v7-ultrabert-380m-en) and\n"
@@ -155,6 +165,7 @@ TEACHER = {
     "missed": "About 29% of facts are missed, mostly\n  borderline decisions.",
     "limits": "",
     "int8_note": "",
+    "qs_note": "",
 }
 
 CARD = """---
@@ -273,7 +284,7 @@ for f in w["facts"]:
     print(w["entities"][f["head"]]["text"], f["relation"], w["entities"][f["tail"]]["text"],
           f["polarity"], f["modality"])
 ```
-
+{qs_note}
 Pass text as `kniv.analyse(text, ...)` (paragraphs separated by blank lines)
 or a conversation as `turns`. `analyse` returns one record per window:
 
@@ -432,6 +443,7 @@ def write(model: str, out: Path) -> None:
                        window=m["window"], base_licence=m["base_licence"], hn=m["hn"], int8_speed=m["int8_speed"], int8_how=m.get("int8_how", ""), int8_drop=m["int8_drop"],
                        about=m["about"].format(org=ORG, other=m["other"], choose=m["choose"]),
                        date=m["date"], missed=m["missed"], limits=m["limits"], int8_note=m["int8_note"],
+                       qs_note=m["qs_note"],
                        lme0=s["lme"][0], lme1=s["lme"][1],
                        lme2=s["lme"][2], lme3=s["lme"][3],
                        **{k: v for k, v in s.items() if k != "lme"})
