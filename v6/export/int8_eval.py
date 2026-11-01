@@ -8,6 +8,12 @@ graphs, on the same dev items, scored against gold.
   96 relations, the release's calibrated offsets.
 - CrossNER politics test (300 sentences; the scorecard calibrates on it):
   exact-match span F1 from the span head.
+- OntoNotes 5 test (2,000 sentences): NER span F1.
+- PropBank EWT test, every predicate: end-to-end argument F1 (the model's
+  own predicates; predicate, role and span must match).
+- LitBank (400-word windows): coreference CoNLL F1, window-averaged.
+  INT8 changes about 15% of the arguments SRL outputs (borderline ones), so
+  agreement with fp32 is no proxy: these three are scored against gold.
 
 Gate (docs/v7-release-plan.md): INT8 within 1 point of fp32 on each.
 """
@@ -74,6 +80,39 @@ def crossner(k, items, types):
     return {"span_f1": 2 * tp / max(npred + ngold, 1)}
 
 
+def ner(k, items):
+    from ..entities import bio_spans
+    tp = npred = ngold = 0
+    for it in items:
+        w = k.window({"tokens": it.tokens, "sentence_spans": [[0, len(it.tokens)]]}, [], None, True, 4)
+        ps, gs = {tuple(x) for x in w["ner"]}, set(bio_spans(it.layers["ner"]))
+        tp += len(ps & gs); npred += len(ps); ngold += len(gs)
+    return {"ner_f1": 2 * tp / max(npred + ngold, 1)}
+
+
+def srl(k, rows):
+    from ..entities import bio_spans
+    tp = npred = ngold = 0
+    for r in rows:
+        w = k.window({"tokens": r["words"], "sentence_spans": [[0, len(r["words"])]]}, [], None, True, 4)
+        ps = {(f["predicate"], *a) for f in w["srl"] for a in map(tuple, f["args"])}
+        gs = {(f["predicate_idx"],) + x for f in r["frames"] for x in bio_spans(f["srl_tags"]) if x[0] != "V"}
+        tp += len(ps & gs); npred += len(ps); ngold += len(gs)
+    return {"srl_e2e_f1": 2 * tp / max(npred + ngold, 1)}
+
+
+def litbank(k, items):
+    from ..score.coref import conll_f1
+    from ..train.gold_eval import _sentences
+    sc = []
+    for it in items:
+        w = k.window({"tokens": it.tokens, "sentence_spans": [list(x) for x in _sentences(it.tokens)]},
+                     [], None, True, 4)
+        gold = it.layers["coref"]
+        sc.append(conll_f1(gold, [[tuple(m) for m in c] for c in w["coref"]])["conll_f1"] if gold else 1.0)
+    return {"coref_conll": sum(sc) / len(sc)}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--release", type=Path, required=True)
@@ -91,11 +130,18 @@ def main() -> int:
     rd_items = load_rel_items("dev", limit=args.docs)
     rels = [r for r in load_bank()["relations"] if r["source"] == "redocred"]
     cn = load_crossner("politics")[:args.n]
+    from ..gold.litbank import load_coref_items
+    from ..gold.ner import load_ner_items
+    from ..train.gold_eval import DATA_DIR
+    ner_items = load_ner_items("ontonotes5", limit=args.n * 20 // 3)
+    srl_rows = json.loads((DATA_DIR / "prepared" / "propbank-full" / "test.json").read_text())
+    lit_items = load_coref_items()
     types = sorted({t for it in cn for t, _, _ in it["spans"]})
     res = {}
     for v in ["fp32"] + args.variants.split(","):
         k = Kniv(args.release, variant=None if v == "fp32" else v)
-        r = {**ud(k, ud_items), **redocred(k, rd_items, rels), **crossner(k, cn, types)}
+        r = {**ud(k, ud_items), **redocred(k, rd_items, rels), **crossner(k, cn, types),
+             **ner(k, ner_items), **srl(k, srl_rows), **litbank(k, lit_items)}
         res[v] = {m: round(x, 4) for m, x in r.items()}
         print(v, res[v], flush=True)
     for v in args.variants.split(","):

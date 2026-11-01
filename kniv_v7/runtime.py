@@ -44,8 +44,9 @@ SPAN_MAX_WIDTH = 12
 # ── backends ─────────────────────────────────────────────────────────
 class OnnxBackend:
     """The eight graphs in onnxruntime. ``variant="fp16"``: the encoder
-    graphs in half precision; ``int8=True``: ``plain`` and ``marker`` in
-    INT8 (feed-forward down-projections fp32), ``label`` in FP16."""
+    graphs in half precision; ``int8=True``: every graph a release ships in
+    INT8 (``plain`` and ``marker``; in the small students the head graphs
+    too), ``label`` in FP16."""
 
     def __init__(self, onnx_dir: Path, int8: bool = False, providers=None, variant: str | None = None):
         import onnxruntime as ort
