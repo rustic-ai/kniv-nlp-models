@@ -14,8 +14,8 @@ kniv = Kniv(root)
 relations = [{"name": "lives in", "description": "the place where the head resides"},
              {"name": "employer", "description": "the organization the head works for"}]
 
-out = kniv.extract(turns=[("user", "I moved to Lisbon last year and started at a bank."),
-                          ("assistant", "Congratulations on the move!")],
+out = kniv.extract(turns=[("user", "I live in Berlin and work for Siemens."),
+                          ("assistant", "Nice, how long have you been there?")],
                    relations=relations,
                    entity_types=[{"name": "location"}, {"name": "organization"}, {"name": "person"}])
 for w in out:

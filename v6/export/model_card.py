@@ -122,32 +122,21 @@ MODELS = {
         "int8_speed": "about 1.1x faster than fp32 (at this size most of the time is in the heads "
                       "and the host code)",
         "int8_drop": "0.4",
-        "qs_note": "\n**This model and the example.** At the default thresholds this model returns no\n"
-                   "facts for the conversation above in fp32: its score for `(user, lives in, Lisbon)`\n"
-                   "sits exactly at the threshold (-2.00 against -2.0; INT8 keeps it). Lowering the\n"
-                   "threshold for your own relations recovers it:\n\n"
-                   "```python\n"
-                   "kniv.unseen_offset = -2.25    # default -2.0; lower = more facts, lower precision\n"
-                   "```\n\n"
-                   "The employer fact stays below its threshold, and lowering it further also admits\n"
-                   "wrong facts such as `(user, lives in, a bank)`, which this model scores almost as\n"
-                   "high. See GUIDE.md on thresholds.\n",
         "choose": "",
-        "about": "**Preview.** The smallest distilled student of the two kniv v7 models,\n"
+        "about": "The smallest distilled student of the two kniv v7 models,\n"
                  "[kniv-v7-xlarge-u-en](https://huggingface.co/{org}/kniv-v7-xlarge-u-en) and\n"
                  "[kniv-v7-xlarge-d-en](https://huggingface.co/{org}/kniv-v7-xlarge-d-en),\n"
                  "on a 17M-parameter encoder (55M parameters with the heads): the same outputs, graphs\n"
                  "and runtime as the larger models. It is close to them on tagging and parsing (POS\n"
                  "0.968, LAS 0.904) and gives usable entities, roles and facts, but it is clearly\n"
                  "weaker on NER, semantic roles, coreference, relations and entity types (see\n"
-                 "Results and Limitations). It is released as a preview: it misses our quality\n"
-                 "targets for this size on those tasks. For better quality at moderate size use\n"
+                 "Results and Limitations). For better quality at moderate size use\n"
                  "[kniv-v7-large-en](https://huggingface.co/{org}/kniv-v7-large-en).\n\n"
                  "**[GUIDE.md](GUIDE.md)** shows the known failure modes of the kniv v7 models and how\n"
                  "to work around them in your own code; they apply to this model too.",
         "missed": "More facts are missed than with the larger models (Re-DocRED\n"
                   "  end to end 0.543 against 0.627 for the better teacher and 0.608 for the 150M student).",
-        "limits": "- **Preview quality.** Against the better teacher: NER 0.818 against 0.870, semantic\n"
+        "limits": "- **Harder tasks.** Against the better teacher: NER 0.818 against 0.870, semantic\n"
                   "  roles 0.754 against 0.810, relations with gold entities 0.644 against 0.733.\n"
                   "- **Coreference** is the largest gap: LitBank 0.601 against 0.707.\n"
                   "- **New entity types.** Typing entities with type names it has not seen: CrossNER\n"
@@ -175,27 +164,68 @@ MODELS = {
                       "and the host code)",
         "int8_drop": "0.8",
         "choose": "",
-        "about": "**Preview.** A small distilled student of the two kniv v7 models,\n"
+        "about": "A small distilled student of the two kniv v7 models,\n"
                  "[kniv-v7-xlarge-u-en](https://huggingface.co/{org}/kniv-v7-xlarge-u-en) and\n"
                  "[kniv-v7-xlarge-d-en](https://huggingface.co/{org}/kniv-v7-xlarge-d-en),\n"
                  "on a 32M-parameter encoder (76M parameters with the heads): the same outputs, graphs\n"
                  "and runtime as the larger models. It is close to them on tagging and parsing (POS\n"
                  "0.972, LAS 0.911) and gives usable entities, roles and facts, but it is clearly\n"
                  "weaker on NER, semantic roles, coreference, relations and entity types (see\n"
-                 "Results and Limitations). It is released as a preview: it misses our quality\n"
-                 "targets for this size on those tasks. For better quality at moderate size use\n"
+                 "Results and Limitations). For better quality at moderate size use\n"
                  "[kniv-v7-large-en](https://huggingface.co/{org}/kniv-v7-large-en).\n\n"
                  "**[GUIDE.md](GUIDE.md)** shows the known failure modes of the kniv v7 models and how\n"
                  "to work around them in your own code; they apply to this model too.",
         "missed": "More facts are missed than with the larger models (Re-DocRED\n"
                   "  end to end 0.567 against 0.627 for the better teacher and 0.608 for the 150M student).",
-        "limits": "- **Preview quality.** Against the better teacher: NER 0.827 against 0.870, semantic\n"
+        "limits": "- **Harder tasks.** Against the better teacher: NER 0.827 against 0.870, semantic\n"
                   "  roles 0.773 against 0.810, relations with gold entities 0.672 against 0.733.\n"
                   "- **Coreference** is the largest gap: LitBank 0.620 against 0.707.\n"
                   "- **New entity types.** Typing entities with type names it has not seen: CrossNER\n"
                   "  0.410 against 0.580, Few-NERD 0.461 against 0.523.\n"
                   "- **More facts, lower precision.** On conversations it returns more facts than the\n"
                   "  larger models (178 per LongMemEval question, against 134 for the 150M student and\n"
+                  "  73 for the UltraBERT model), many with low margins. Raise the thresholds or\n"
+                  "  filter on `margin` for precision (GUIDE.md).\n",
+    },
+    "ettin-68m": {
+        "size": "medium",
+        "repo": "kniv-v7-medium-en", "run": "ettin-68m-s30-coref",
+        "base": "jhu-clsp/ettin-encoder-68m", "base_licence": "MIT", "params": "122M",
+        "encoder_params": "68M", "window": "1,024", "other": "kniv-v7-large-en",
+        "date": "2026-11-01",
+        "scores": {
+            "pos": "0.975", "lemma_morph": "0.975 / 0.975", "uas_las": "0.938 / 0.919",
+            "ner": "0.835", "srl_e2e": "0.792", "cls": "0.762",
+            "coref": "0.642", "re_gold": "0.703", "re_e2e": "0.605",
+            "fewrel": "0.749 / 0.636 / 0.571", "crossner": "0.453",
+            "fewnerd": "0.462", "lme": ("0.740", "0.460", "0.940", "168")},
+        "hn": "",
+        "arch_tag": "modernbert",
+        "int8_speed": "about 1.4x faster than fp32",
+        "int8_drop": "0.3",
+        "choose": "",
+        "about": "A mid-sized distilled student of the two kniv v7 models,\n"
+                 "[kniv-v7-xlarge-u-en](https://huggingface.co/{org}/kniv-v7-xlarge-u-en) and\n"
+                 "[kniv-v7-xlarge-d-en](https://huggingface.co/{org}/kniv-v7-xlarge-d-en),\n"
+                 "on a 68M-parameter encoder (122M parameters with the heads): the same outputs, graphs\n"
+                 "and runtime as the larger models. It is close to them on tagging, parsing and\n"
+                 "semantic roles (POS 0.975, LAS 0.919, SRL 0.792) and on relations end to end (0.605,\n"
+                 "against 0.608 for kniv-v7-large-en, 1.8 times its size), and weaker on NER,\n"
+                 "coreference and entity types (see Results and Limitations). For the best quality at\n"
+                 "moderate size use [kniv-v7-large-en](https://huggingface.co/{org}/kniv-v7-large-en).\n\n"
+                 "**[GUIDE.md](GUIDE.md)** shows the known failure modes of the kniv v7 models and how\n"
+                 "to work around them in your own code; they apply to this model too.",
+        "missed": "More facts are missed than with the teachers (Re-DocRED\n"
+                  "  end to end 0.605 against 0.627 for the better teacher).",
+        "limits": "- **Harder tasks.** Against the better teacher: NER 0.835 against 0.870, relations\n"
+                  "  with gold entities 0.703 against 0.733.\n"
+                  "- **Coreference** is the largest gap: LitBank 0.642 against 0.707.\n"
+                  "- **New entity types.** Typing entities with type names it has not seen: CrossNER\n"
+                  "  0.453 against 0.580, Few-NERD 0.462 against 0.523.\n"
+                  "- **Zero-shot relations** are a little below the 32M student on FewRel (0.749 / 0.636\n"
+                  "  / 0.571 against 0.787 / 0.667 / 0.577 for 5 / 10 / 15-way).\n"
+                  "- **More facts, lower precision.** On conversations it returns more facts than the\n"
+                  "  larger models (168 per LongMemEval question, against 134 for the 150M student and\n"
                   "  73 for the UltraBERT model), many with low margins. Raise the thresholds or\n"
                   "  filter on `margin` for precision (GUIDE.md).\n",
     },
@@ -265,7 +295,7 @@ knowledge against a schema you supply at inference time.
 - **Knowledge layer:** entities of the types you name, facts for the
   relations you name (a name plus an optional description), and for every
   fact its polarity, modality, holder and time. In a conversation each
-  speaker is an entity, so "I moved to Lisbon" yields `(user, lives in, Lisbon)`.
+  speaker is an entity, so "I live in Berlin" yields `(user, lives in, Berlin)`.
 
 {about}
 
@@ -321,8 +351,8 @@ from kniv_v7 import Kniv
 ```python
 kniv = Kniv(path)
 out = kniv.analyse(
-    turns=[("user", "I moved to Lisbon last year and started at a bank."),
-           ("assistant", "Congratulations on the move!")],
+    turns=[("user", "I live in Berlin and work for Siemens."),
+           ("assistant", "Nice, how long have you been there?")],
     relations=[{{"name": "lives in", "description": "the place where the head resides"}},
                {{"name": "employer", "description": "the organization the head works for"}}],
     entity_types=[{{"name": "location"}}, {{"name": "organization"}}, {{"name": "person"}}])
@@ -331,8 +361,32 @@ w = out[0]
 for f in w["facts"]:
     print(w["entities"][f["head"]]["text"], f["relation"], w["entities"][f["tail"]]["text"],
           f["polarity"], f["modality"])
+# user lives in Berlin positive asserted
+# user employer Siemens positive asserted
 ```
-{qs_note}
+
+Plain text works the same way:
+
+```python
+out = kniv.analyse(
+    "Henry Wager Halleck (January 16, 1815 – January 9, 1872) was a United States Army "
+    "officer, scholar, and lawyer.",
+    relations=[{{"name": "date of birth", "description": "date on which the subject was born"}},
+               {{"name": "date of death", "description": "date on which the subject died"}},
+               {{"name": "military branch", "description": "branch to which this person belongs"}}],
+    entity_types=[{{"name": "person"}}, {{"name": "organization"}}, {{"name": "date"}}])
+
+w = out[0]
+for f in w["facts"]:
+    print(w["entities"][f["head"]]["text"], f["relation"], w["entities"][f["tail"]]["text"],
+          f["polarity"], f["modality"])
+# Henry Wager Halleck date of birth January 16 , 1815 positive asserted
+# Henry Wager Halleck date of death January 9 , 1872 positive asserted
+# Henry Wager Halleck military branch United States Army positive asserted
+```
+
+Every kniv v7 model returns exactly these facts for both examples, in fp32 and INT8.
+(The sentence is from the English Wikipedia article on Henry Halleck, CC BY-SA 4.0.)
 Pass text as `kniv.analyse(text, ...)` (paragraphs separated by blank lines)
 or a conversation as `turns`. `analyse` returns one record per window:
 
