@@ -58,6 +58,7 @@ def plain_inputs(b: dict) -> tuple:
 def check(model, tok, spec, vocab) -> dict:
     from ..label_bank import load as load_bank
     from ..train.kdata import TypeCollator, label_text
+    model.coref.k = COREF_K          # the reference shortlist the graphs export
     g = {k: v(model).eval() for k, v in GRAPHS.items()}
     worst: dict[str, float] = {}
 
