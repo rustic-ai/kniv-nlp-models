@@ -29,7 +29,9 @@ from torch import nn
 
 from ..train.model import NEG, NerLSTMHead, V6Model, _dist_bucket
 
-COREF_K = 50
+# The antecedent shortlist at inference. Training scores 50; 100 adds 0.2-1.0
+# LitBank CoNLL-F1 on every v7 model for 4-11% end-to-end latency.
+COREF_K = 100
 
 
 def merged_encoder(model: V6Model, adapter) -> nn.Module:
@@ -110,6 +112,30 @@ def _layers(enc, ids, mask):
     return tuple(F.layer_norm(h, (H,)) for h in out.hidden_states)
 
 
+class FineSplit(nn.Module):
+    """``CorefHead.fine`` with its first linear split by input block:
+    ``[a_i, a_j, a_i*a_j, d] W^T = a_i W_i^T + a_j W_j^T + (a_i*a_j) W_p^T +
+    d W_d^T``. The a_i and a_j terms run once per word and are gathered, the
+    distance term once per bucket; only the product term runs per candidate
+    pair, a third of the original per-pair work."""
+
+    def __init__(self, coref):
+        super().__init__()
+        lin = coref.fine[0]
+        H = coref.coarse.in_features
+        w, b = lin.weight.detach(), lin.bias.detach()
+
+        def part(lo, hi, bias=None):
+            m = nn.Linear(H, H, bias=bias is not None)
+            m.weight = nn.Parameter(w[:, lo:hi].clone(), requires_grad=False)
+            if bias is not None:
+                m.bias = nn.Parameter(bias.clone(), requires_grad=False)
+            return m
+        self.wi, self.wj, self.wp = part(0, H, b), part(H, 2 * H), part(2 * H, 3 * H)
+        self.register_buffer("wd", coref.dist.weight.detach() @ w[:, 3 * H:].T)   # [10,H]
+        self.act, self.out = coref.fine[1], coref.fine[3]
+
+
 class Plain(nn.Module):
     """``input_ids, attention_mask [1,T]``; ``first_subword, word_end,
     word_mask, sent_of_word [1,W]``; ``sent_ids [S]`` (0..S-1).
@@ -118,13 +144,14 @@ class Plain(nn.Module):
     ``rel_dep [1,W,d], rel_head [1,W+1,d]`` (``dep_rel``'s inputs);
     ``srl_pred [1,W,2]``, ``srl_words [1,W,H]``; ``cls, sentiment [1,S,*]``;
     ``coref_words [1,W,H]``, ``coref_scores [1,W,K+1]``, ``coref_cand
-    [1,W,K]`` (K = 50; columns past min(50, W) are NEG); ``ent [1,W,13]``;
+    [1,W,K]`` (K = ``COREF_K``; columns past min(K, W) are NEG); ``ent [1,W,13]``;
     ``span_words [1,W,H]``."""
 
     def __init__(self, model: V6Model):
         super().__init__()
         self.m = model
         self.enc = _plain_encoder(model)
+        self.fine = FineSplit(model.coref)
 
     def forward(self, input_ids, attention_mask, first_subword, word_end, word_mask,
                 sent_of_word, sent_ids):
@@ -190,7 +217,7 @@ class Plain(nn.Module):
         return w if c.context is None else encoder_layers(c.context, w, ~word_mask)
 
     def antecedents(self, a, wm):
-        """``CorefHead.antecedents`` with a fixed K = 50: the coarse scores
+        """``CorefHead.antecedents`` with a fixed K = ``COREF_K``: the coarse scores
         are padded with NEG columns so top-k never needs K <= W."""
         c = self.m.coref
         _, W, D = a.shape
@@ -203,8 +230,11 @@ class Plain(nn.Module):
         ap = torch.cat([a, torch.zeros(1, COREF_K, D, dtype=a.dtype, device=a.device)], 1)
         aj = ap[0][cand[0]].unsqueeze(0)                                   # [1,W,K,D]
         ai = a.unsqueeze(2).expand_as(aj)
-        dist = c.dist(_dist_bucket(i.view(1, W, 1) - cand)).to(a.dtype)
-        fine = c.fine(torch.cat([ai, aj, ai * aj, dist], -1)).squeeze(-1).float()
+        f = self.fine
+        pj = torch.cat([f.wj(a), torch.zeros(1, COREF_K, D, dtype=a.dtype, device=a.device)], 1)
+        h = (f.wi(a).unsqueeze(2) + pj[0][cand[0]].unsqueeze(0) + f.wp(ai * aj)
+             + f.wd[_dist_bucket(i.view(1, W, 1) - cand)].to(a.dtype))
+        fine = f.out(f.act(h)).squeeze(-1).float()
         s = torch.where(top > NEG / 2, top + fine, torch.full_like(top, NEG))
         return torch.cat([torch.zeros(1, W, 1, device=a.device), s], -1), cand
 

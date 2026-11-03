@@ -127,7 +127,7 @@ def coref_diff(sa, ca, sb, cb) -> float:
     return worst
 
 
-def export_fp16(run: str, local: Path | None, out: Path) -> int:
+def export_fp16(run: str, local: Path | None, out: Path, graphs: list[str] | None = None) -> int:
     """The encoder graphs (``plain``, ``label``, ``marker``) with their encoder
     copy in fp16, as ``<graph>-fp16.onnx``; compared with the fp32 PyTorch
     graphs on the parity windows (reported, not gated: the gate is accuracy,
@@ -141,7 +141,7 @@ def export_fp16(run: str, local: Path | None, out: Path) -> int:
     ws = windows()
     example = inputs_for(g32, model, tok, spec, vocab, ws[-1], rels)
     worst: dict[str, float] = {}
-    for name in ENCODER_GRAPHS:
+    for name in [n for n in ENCODER_GRAPHS if not graphs or n in graphs]:
         ins, outs, axes = SPEC[name]
         g16 = halve(GRAPHS[name](model).eval())
         path = out / f"{name}-fp16.onnx"
@@ -167,7 +167,7 @@ def export_fp16(run: str, local: Path | None, out: Path) -> int:
     return 0
 
 
-def export(run: str, local: Path | None, out: Path, int8: bool) -> int:
+def export(run: str, local: Path | None, out: Path, int8: bool, graphs: list[str] | None = None) -> int:
     import onnxruntime as ort
     torch.backends.mha.set_fastpath_enabled(False)
     model, tok, spec, vocab, _ = load_run(run, HF_REPO, torch.device("cpu"), local)
@@ -177,7 +177,8 @@ def export(run: str, local: Path | None, out: Path, int8: bool) -> int:
     ws = windows()
     example = inputs_for(g, model, tok, spec, vocab, ws[-1], rels)
     out.mkdir(parents=True, exist_ok=True)
-    for name, (ins, outs, axes) in SPEC.items():
+    spec_ = {k: v for k, v in SPEC.items() if not graphs or k in graphs}
+    for name, (ins, outs, axes) in spec_.items():
         path = out / f"{name}.onnx"
         torch.onnx.export(g[name], example[name], path, input_names=ins, output_names=outs,
                           dynamic_axes=axes, opset_version=OPSET, dynamo=False,
@@ -185,11 +186,11 @@ def export(run: str, local: Path | None, out: Path, int8: bool) -> int:
         print(f"exported {path.name}", flush=True)
     # Parity on the other windows (not the example the trace saw).
     sess = {k: ort.InferenceSession(str(out / f"{k}.onnx"), providers=["CPUExecutionProvider"])
-            for k in SPEC}
+            for k in spec_}
     worst: dict[str, float] = {}
     for w in ws[:-1]:
         inp = inputs_for(g, model, tok, spec, vocab, w, rels)
-        for name, (ins, outs, _) in SPEC.items():
+        for name, (ins, outs, _) in spec_.items():
             with torch.no_grad():
                 ref = g[name](*inp[name])
             ref = ref if isinstance(ref, tuple) else (ref,)
@@ -211,13 +212,13 @@ def export(run: str, local: Path | None, out: Path, int8: bool) -> int:
     meta = {"run": run, "encoder": spec.hf_id, "max_subwords": spec.max_subwords,
             "word_pool": model.word_pool, "coref_k": COREF_K, "opset": OPSET,
             "graphs": {k: {"inputs": [i.name for i in sess[k].get_inputs()], "outputs": v[1]}
-                       for k, v in SPEC.items()},
+                       for k, v in spec_.items()},
             "pad_token_id": tok.pad_token_id, "sep_token_id": tok.sep_token_id,
             "labels": vocab.labels, "parity_max_abs_diff": worst}
     (out / "onnx_meta.json").write_text(json.dumps(meta, indent=1))
     if int8 and not bad:
         from onnxruntime.quantization import QuantType, quantize_dynamic
-        for name in ENCODER_GRAPHS:
+        for name in [n for n in ENCODER_GRAPHS if n in spec_]:
             quantize_dynamic(str(out / f"{name}.onnx"), str(out / f"{name}-int8.onnx"),
                              weight_type=QuantType.QInt8, use_external_data_format=False)
             print(f"quantised {name}-int8.onnx", flush=True)
@@ -231,10 +232,12 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--int8", action="store_true")
     ap.add_argument("--fp16", action="store_true", help="export only the fp16 encoder graphs")
+    ap.add_argument("--graphs", default="", help="comma-separated graphs to export (default: all)")
     args = ap.parse_args()
+    graphs = [g for g in args.graphs.split(",") if g] or None
     if args.fp16:
-        return export_fp16(args.run, args.local, args.out)
-    return export(args.run, args.local, args.out, args.int8)
+        return export_fp16(args.run, args.local, args.out, graphs)
+    return export(args.run, args.local, args.out, args.int8, graphs)
 
 
 if __name__ == "__main__":
