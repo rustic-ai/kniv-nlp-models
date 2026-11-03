@@ -146,6 +146,25 @@ def two_d_weights(path: Path) -> list[str]:
             and any(inits.get(i) == 2 for i in n.input)]
 
 
+def only_feeding(path: Path, outputs: set[str]) -> set[str]:
+    """Names of the nodes that reach ``outputs`` and no other graph output
+    (the head behind them, not the shared encoder)."""
+    import onnx
+    m = onnx.load(str(path), load_external_data=False)
+    producer = {o: n for n in m.graph.node for o in n.output}
+
+    def ancestors(names) -> set[str]:
+        seen, todo = set(), [producer[x] for x in names if x in producer]
+        while todo:
+            n = todo.pop()
+            if n.name not in seen:
+                seen.add(n.name)
+                todo += [producer[i] for i in n.input if i in producer]
+        return seen
+    rest = {o.name for o in m.graph.output} - outputs
+    return ancestors(outputs) - ancestors(rest)
+
+
 class Reader:
     """Calibration inputs for one graph (static quantisation)."""
 

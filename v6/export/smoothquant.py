@@ -30,7 +30,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from .int8_search import record, two_d_weights
+from .int8_search import only_feeding, record, two_d_weights
 
 DOWN = {"ultrabert": r"mlp\.down_proj$", "deberta": r"layer\.\d+\.output\.dense$",
         "modernbert": r"mlp\.Wo$"}                  # ModernBERT and Ettin
@@ -92,6 +92,12 @@ def main() -> int:
     ap.add_argument("--release", type=Path, required=True)
     ap.add_argument("--alpha", default="0.5,0.75")
     ap.add_argument("--graphs", default="plain,marker")
+    ap.add_argument("--local", type=Path, default=Path("data/v6-eval/checkpoints"))
+    ap.add_argument("--fp32-outputs", default="",
+                    help="comma-separated graph outputs whose own linears stay fp32 "
+                         "(DeBERTa: coref_words,coref_scores,coref_cand)")
+    ap.add_argument("--tag", default="", help="suffix for the output graph name")
+    ap.add_argument("--fp32-nodes", default="", help="regex over ONNX node names left fp32")
     args = ap.parse_args()
     import onnxruntime as ort
     from onnxruntime.quantization import QuantType, quantize_dynamic
@@ -100,7 +106,7 @@ def main() -> int:
     from .onnx_v7 import OPSET, SPEC
     from .torch_backend import TorchBackend
     torch.backends.mha.set_fastpath_enabled(False)
-    model, *_ = load_run(args.run, HF_REPO, torch.device("cpu"), Path("data/v6-eval/checkpoints"))
+    model, *_ = load_run(args.run, HF_REPO, torch.device("cpu"), args.local)
     tb = TorchBackend(model)
     pattern = DOWN[next((k for k in ("ultrabert", "deberta") if k in args.run), "modernbert")]
     inputs = record(args.release, tb)
@@ -126,13 +132,16 @@ def main() -> int:
             ex = check[0]
             example = tuple(torch.from_numpy(np.asarray(ex[k])) if k in ex
                             else torch.zeros(1, 1, dtype=torch.long) for k in ins)
-            tag = f"sq{int(alpha * 100)}"
+            tag = f"sq{int(alpha * 100)}{args.tag}"
             fp = d / f"{g}-{tag}-fp32.onnx"
             torch.onnx.export(sg, example, fp, input_names=ins, output_names=outs, dynamic_axes=axes,
                               opset_version=OPSET, dynamo=False, external_data=True)
             q = d / f"{g}-{tag}.onnx"
+            keep = only_feeding(fp, set(args.fp32_outputs.split(","))) if args.fp32_outputs else set()
+            nodes = [n for n in two_d_weights(fp) if n not in keep
+                     and not (args.fp32_nodes and re.search(args.fp32_nodes, n))]
             quantize_dynamic(str(fp), str(q), weight_type=QuantType.QInt8, per_channel=True,
-                             nodes_to_quantize=two_d_weights(fp), op_types_to_quantize=["MatMul"])
+                             nodes_to_quantize=nodes, op_types_to_quantize=["MatMul"])
             ort.InferenceSession(str(q), providers=["CPUExecutionProvider"])     # loads
             for p in (fp, fp.with_name(fp.name + ".data")):
                 if p.exists():
