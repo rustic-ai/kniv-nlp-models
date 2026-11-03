@@ -23,7 +23,7 @@ MODELS = {
         "scores": {
             "pos": "0.978", "lemma_morph": "0.976 / 0.977", "uas_las": "0.945 / 0.927",
             "ner": "0.860", "srl_root": "0.846", "srl_e2e": "0.797", "cls": "0.761",
-            "coref": "0.707", "re_gold": "0.728", "re_e2e": "0.616",
+            "coref": "0.709", "re_gold": "0.728", "re_e2e": "0.616",
             "fewrel": "0.729 / 0.675 / 0.550", "heldout": "0.888", "crossner": "0.580",
             "fewnerd": "0.523", "lme": ("0.693", "0.480", "0.913", "73")},
         "hn": "",
@@ -47,14 +47,15 @@ MODELS = {
         "scores": {
             "pos": "0.982", "lemma_morph": "0.978 / 0.978", "uas_las": "0.946 / 0.929",
             "ner": "0.870", "srl_root": "0.855", "srl_e2e": "0.810", "cls": "0.758",
-            "coref": "0.692", "re_gold": "0.733", "re_e2e": "0.627",
+            "coref": "0.697", "re_gold": "0.733", "re_e2e": "0.627",
             "fewrel": "0.731 / 0.620 / 0.602", "heldout": "0.852", "crossner": "0.533",
             "fewnerd": "0.506", "lme": ("0.573", "0.400", "0.967", "82")},
         "arch_tag": "deberta-v3",
         "lr": "8e-5", "batch": "4 windows x 8 accumulation",
         "steps_a": "12,000", "hours": "about 46",
-        "int8_speed": "1.5-1.7x faster than fp32",
-        "int8_how": "the plain pass in per-channel INT8 after SmoothQuant (alpha 0.85); the "
+        "int8_speed": "about 1.3x faster than fp32",
+        "int8_how": "the plain pass in per-channel INT8 after SmoothQuant (alpha 0.85), with its "
+                    "coreference head and feed-forward down-projections kept fp32; the "
                     "relation pass, more sensitive, in per-channel INT8 with its feed-forward "
                     "down-projections kept fp32",
         "int8_drop": "0.2",
@@ -71,13 +72,13 @@ MODELS = {
         "scores": {
             "pos": "0.981", "lemma_morph": "0.977 / 0.977", "uas_las": "0.943 / 0.926",
             "ner": "0.863", "srl_e2e": "0.807", "cls": "0.756",
-            "coref": "0.667", "re_gold": "0.725", "re_e2e": "0.608",
-            "fewrel": "0.798 / 0.666 / 0.622", "crossner": "0.496",
-            "fewnerd": "0.467", "lme": ("0.760", "0.493", "0.947", "134")},
+            "coref": "0.671", "re_gold": "0.725", "re_e2e": "0.608",
+            "fewrel": "0.798 / 0.666 / 0.622", "crossner": "0.503",
+            "fewnerd": "0.489", "lme": ("0.760", "0.493", "0.947", "134")},
         "hn": "",
         "arch_tag": "modernbert",
-        "int8_speed": "1.6-1.9x faster than fp32",
-        "int8_drop": "0.4",
+        "int8_speed": "about 1.6x faster than fp32",
+        "int8_drop": "0.5",
         "int8_note": " On conversations INT8 keeps about 80% of the fp32\n"
                      "model's facts exactly (the teachers 86-88%); the differences are mostly\n"
                      "low-margin facts, so filter on `margin` or use fp32/FP16 where stable output\n"
@@ -96,9 +97,9 @@ MODELS = {
         "missed": "More facts are missed than with the teachers (Re-DocRED\n"
                   "  end to end 0.608 against 0.627).",
         "limits": "- **New entity types.** Typing entities with type names it has not seen is the\n"
-                  "  largest gap to the teachers: CrossNER 0.496 against 0.580, Few-NERD 0.467\n"
+                  "  largest gap to the teachers: CrossNER 0.503 against 0.580, Few-NERD 0.489\n"
                   "  against 0.523.\n"
-                  "- **Coreference** is 4 points below the better teacher (LitBank 0.667 against 0.707).\n"
+                  "- **Coreference** is 4 points below the better teacher (LitBank 0.671 against 0.709).\n"
                   "- **More facts, lower precision.** On conversations it returns about twice as many\n"
                   "  facts as the UltraBERT model (134 against 73 per LongMemEval question), many with\n"
                   "  low margins: its higher share of answers found in extracted entities and facts\n"
@@ -114,7 +115,7 @@ MODELS = {
         "scores": {
             "pos": "0.968", "lemma_morph": "0.973 / 0.969", "uas_las": "0.926 / 0.904",
             "ner": "0.818", "srl_e2e": "0.754", "cls": "0.753",
-            "coref": "0.601", "re_gold": "0.644", "re_e2e": "0.543",
+            "coref": "0.608", "re_gold": "0.644", "re_e2e": "0.543",
             "fewrel": "0.773 / 0.609 / 0.487", "crossner": "0.434",
             "fewnerd": "0.429", "lme": ("0.753", "0.507", "0.993", "168")},
         "hn": "",
@@ -138,7 +139,7 @@ MODELS = {
                   "  end to end 0.543 against 0.627 for the better teacher and 0.608 for the 150M student).",
         "limits": "- **Harder tasks.** Against the better teacher: NER 0.818 against 0.870, semantic\n"
                   "  roles 0.754 against 0.810, relations with gold entities 0.644 against 0.733.\n"
-                  "- **Coreference** is the largest gap: LitBank 0.601 against 0.707.\n"
+                  "- **Coreference** is the largest gap: LitBank 0.608 against 0.709.\n"
                   "- **New entity types.** Typing entities with type names it has not seen: CrossNER\n"
                   "  0.434 against 0.580, Few-NERD 0.429 against 0.523.\n"
                   "- **More facts, lower precision.** On conversations it returns more facts than the\n"
@@ -155,12 +156,12 @@ MODELS = {
         "scores": {
             "pos": "0.972", "lemma_morph": "0.974 / 0.972", "uas_las": "0.932 / 0.911",
             "ner": "0.827", "srl_e2e": "0.773", "cls": "0.756",
-            "coref": "0.620", "re_gold": "0.672", "re_e2e": "0.567",
+            "coref": "0.630", "re_gold": "0.672", "re_e2e": "0.567",
             "fewrel": "0.787 / 0.667 / 0.577", "crossner": "0.410",
             "fewnerd": "0.461", "lme": ("0.747", "0.447", "0.960", "178")},
         "hn": "",
         "arch_tag": "modernbert",
-        "int8_speed": "about 1.2x faster than fp32 (at this size much of the time is in the heads "
+        "int8_speed": "about 1.1x faster than fp32 (at this size much of the time is in the heads "
                       "and the host code)",
         "int8_drop": "0.8",
         "choose": "",
@@ -179,7 +180,7 @@ MODELS = {
                   "  end to end 0.567 against 0.627 for the better teacher and 0.608 for the 150M student).",
         "limits": "- **Harder tasks.** Against the better teacher: NER 0.827 against 0.870, semantic\n"
                   "  roles 0.773 against 0.810, relations with gold entities 0.672 against 0.733.\n"
-                  "- **Coreference** is the largest gap: LitBank 0.620 against 0.707.\n"
+                  "- **Coreference** is the largest gap: LitBank 0.630 against 0.709.\n"
                   "- **New entity types.** Typing entities with type names it has not seen: CrossNER\n"
                   "  0.410 against 0.580, Few-NERD 0.461 against 0.523.\n"
                   "- **More facts, lower precision.** On conversations it returns more facts than the\n"
@@ -196,12 +197,12 @@ MODELS = {
         "scores": {
             "pos": "0.975", "lemma_morph": "0.975 / 0.975", "uas_las": "0.938 / 0.919",
             "ner": "0.835", "srl_e2e": "0.792", "cls": "0.762",
-            "coref": "0.642", "re_gold": "0.703", "re_e2e": "0.605",
-            "fewrel": "0.749 / 0.636 / 0.571", "crossner": "0.453",
-            "fewnerd": "0.462", "lme": ("0.740", "0.460", "0.940", "168")},
+            "coref": "0.644", "re_gold": "0.703", "re_e2e": "0.605",
+            "fewrel": "0.749 / 0.636 / 0.571", "crossner": "0.452",
+            "fewnerd": "0.478", "lme": ("0.740", "0.460", "0.940", "168")},
         "hn": "",
         "arch_tag": "modernbert",
-        "int8_speed": "about 1.4x faster than fp32",
+        "int8_speed": "about 1.3x faster than fp32",
         "int8_drop": "0.3",
         "choose": "",
         "about": "A mid-sized distilled student of the two kniv v7 models,\n"
@@ -219,9 +220,9 @@ MODELS = {
                   "  end to end 0.605 against 0.627 for the better teacher).",
         "limits": "- **Harder tasks.** Against the better teacher: NER 0.835 against 0.870, relations\n"
                   "  with gold entities 0.703 against 0.733.\n"
-                  "- **Coreference** is the largest gap: LitBank 0.642 against 0.707.\n"
+                  "- **Coreference** is the largest gap: LitBank 0.644 against 0.709.\n"
                   "- **New entity types.** Typing entities with type names it has not seen: CrossNER\n"
-                  "  0.453 against 0.580, Few-NERD 0.462 against 0.523.\n"
+                  "  0.452 against 0.580, Few-NERD 0.478 against 0.523.\n"
                   "- **Zero-shot relations** are a little below the 32M student on FewRel (0.749 / 0.636\n"
                   "  / 0.571 against 0.787 / 0.667 / 0.577 for 5 / 10 / 15-way).\n"
                   "- **More facts, lower precision.** On conversations it returns more facts than the\n"
@@ -230,6 +231,45 @@ MODELS = {
                   "  filter on `margin` for precision (GUIDE.md).\n",
     },
 }
+
+V71_DATE = "2026-11-03"
+
+# v7.1 per model: LitBank coreference (v7.0 -> v7.1), end-to-end speed-up at 500
+# words (fp32, INT8), and the model-specific changes.
+V71 = {
+    "ettin-17m": ("0.601", "0.608", "7%", "4%", ""),
+    "ettin-32m": ("0.620", "0.630", "10%", "4%", ""),
+    "ettin-68m": ("0.642", "0.644", "13%", "5%", "flat"),
+    "modernbert-base": ("0.667", "0.671", "16%", "8%", "flat"),
+    "ultrabert-380m": ("0.707", "0.709", "13%", "7%", ""),
+    "deberta-v3-large": ("0.692", "0.697", "13%", "", "int8"),
+}
+FLAT = {
+    "ettin-68m": "Few-NERD 0.462 -> 0.478 (CrossNER unchanged), Re-DocRED end to end with the "
+                 "six DocRED-style types passed +0.8",
+    "modernbert-base": "CrossNER 0.496 -> 0.503, Few-NERD 0.467 -> 0.489, Re-DocRED end to end "
+                       "with the six DocRED-style types passed +2.3",
+}
+
+
+def v71_notes(model: str) -> str:
+    old, new, fp, i8, extra = V71[model]
+    out = [f"- **Coreference** considers 100 antecedent candidates per word instead of 50: "
+           f"LitBank {old} -> {new}.",
+           "- **Faster coreference scoring.** The pair scorer's first layer is split exactly into "
+           "per-word and per-pair parts, so most of it runs once per word: the same scores, "
+           f"{fp} faster end to end in fp32" + (f" and {i8} in INT8." if i8 else ".")]
+    if extra == "flat":
+        out.append("- **Entity types.** A flat type prior (the learned per-type bias, which "
+                   "favoured generic types, is now one constant) and a re-chosen span offset: "
+                   f"{FLAT[model]}. Only calls that pass `entity_types` are affected.")
+    if extra == "int8":
+        out.append("- **INT8 coreference.** The v7.0 INT8 graph lost 3 points of coreference "
+                   "(LitBank 0.665 against 0.697 fp32 at 100 candidates); the coreference head and "
+                   "the feed-forward down-projections are now kept fp32, and INT8 is within 0.1. "
+                   "INT8 is about 15% slower than v7.0's at 500 words as a result.")
+    return "\n".join(out)
+
 
 # Fields every model shares unless its entry sets them (the teachers' text).
 TEACHER = {
@@ -307,7 +347,7 @@ knowledge against a schema you supply at inference time.
 |---|---|
 | developed by | Dragonscale ([{org}](https://huggingface.co/{org})) |
 | model type | multi-task transformer encoder |
-| version | kniv v7 (`{run}`), {date} |
+| version | kniv v7.1 (`{run}`), {v71_date}; v7.0 {date} |
 | base model | [{base}](https://huggingface.co/{base}) |
 | parameters | {params} |
 | input | up to 512 words per window ({window} subwords) |
@@ -469,6 +509,13 @@ at run time (see GUIDE.md).
 - **Long windows.** Text past {window} subwords in a window is not analysed.
 - **English only.**
 
+## Changelog
+
+**v7.1 ({v71_date}).** The trained weights are unchanged{v71_weights}; the outputs change as below.
+To get v7.0 back, download with `revision="v7.0"`.
+
+{v71}
+
 ## Licence
 
 Apache-2.0. The base encoder ([{base}](https://huggingface.co/{base})) is {base_licence}.
@@ -564,7 +611,7 @@ def write(model: str, out: Path) -> None:
                        org=ORG, repo=m["repo"], choose=m["choose"], github=GITHUB,
                        window=m["window"], base_licence=m["base_licence"], hn=m["hn"], int8_speed=m["int8_speed"], int8_how=m.get("int8_how", ""), int8_drop=m["int8_drop"],
                        about=m["about"].format(org=ORG, other=m["other"], choose=m["choose"]),
-                       date=m["date"], missed=m["missed"], limits=m["limits"], int8_note=m["int8_note"],
+                       date=m["date"], v71_date=V71_DATE, v71=v71_notes(model), v71_weights=" apart from the entity-type prior" if V71[model][4] == "flat" else "", missed=m["missed"], limits=m["limits"], int8_note=m["int8_note"],
                        qs_note=m["qs_note"], size=m["size"], family=family(model),
                        lme0=s["lme"][0], lme1=s["lme"][1],
                        lme2=s["lme"][2], lme3=s["lme"][3],
