@@ -160,6 +160,15 @@ def validate_payload(layer: str, payload: object, n: int,
                                            "source": str(v.get("source") or "").strip()})
         return out, None, None
 
+    if layer == "kgsyn":
+        if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+            return None, "passage has no text", "parse"
+        facts = [{"head": str(f["head"]).strip(), "relation": str(f["relation"]).strip(),
+                  "tail": str(f["tail"]).strip()}
+                 for f in payload.get("facts") or []
+                 if isinstance(f, dict) and all(k in f for k in ("head", "relation", "tail"))]
+        return {"text": payload["text"].strip(), "facts": facts}, None, None
+
     if layer == "kgvarjudge":
         if not isinstance(payload, list):
             return None, "verdicts is not a list", "parse"

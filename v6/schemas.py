@@ -375,6 +375,28 @@ KGVARJUDGE_SCHEMA = _envelope("rewrite_verdicts", {
     ),
 })
 
+KGSYN_SCHEMA = _envelope("synthetic_passage", {
+    "passage": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "the passage, 1-3 sentences"},
+            "facts": _array_of(
+                {
+                    "type": "object",
+                    "properties": {
+                        "head": {"type": "string", "description": "the head mention exactly as written in the text"},
+                        "relation": {"type": "string"},
+                        "tail": {"type": "string", "description": "the tail mention exactly as written in the text"},
+                    },
+                    "required": ["head", "relation", "tail"], "additionalProperties": False,
+                },
+                "Every fact the passage states for the requested relations, one per list item.",
+            ),
+        },
+        "required": ["text", "facts"], "additionalProperties": False,
+    },
+})
+
 
 SCHEMAS = {
     # The real kg schema is built per window (annotate/kg.py); this default
@@ -384,6 +406,7 @@ SCHEMAS = {
     "kgjudge": KGJUDGE_SCHEMA,
     "kgvar": KGVAR_SCHEMA,
     "kgvarjudge": KGVARJUDGE_SCHEMA,
+    "kgsyn": KGSYN_SCHEMA,
     "discover": DISCOVER_SCHEMA,
     "cls": CLS_SCHEMA,
     "sentiment": SENTIMENT_SCHEMA,
@@ -405,7 +428,7 @@ PAYLOAD_KEY = {
     "dep": "arcs", "srl": "tags", "rel": "triples",
     "cls": "labels", "sentiment": "sentiment", "keywords": "keywords",
     "discover": "relations", "bankmerge": "relations", "kg": "knowledge", "kgjudge": "verdicts",
-    "kgvar": "variants", "kgvarjudge": "verdicts",
+    "kgvar": "variants", "kgvarjudge": "verdicts", "kgsyn": "passage",
 }
 
 

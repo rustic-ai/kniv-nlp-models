@@ -773,9 +773,174 @@ def check(annotator: str, judge: str, n_recall: int = 100, n_judge_facts: int = 
     return 0
 
 
+# ── synthetic value and list facts ───────────────────────────────────
+# Natural short text rarely states prices, stakes, quantities or skill lists
+# (rounds 1-3), so these are written to order: the LLM writes a passage that
+# states facts for the requested relations and returns them; the teacher then
+# annotates the passage blind, against a schema with distractors, and must
+# recover them. Each scenario's first relations are its value / list ones.
+SCENARIOS = {
+    "acquisition": (["has price", "has monetary value"],
+                    ["acquires", "board member of", "investor", "owned by", "headquartered in"]),
+    "company results": (["total revenue", "net profit", "employees", "has count"],
+                        ["headquartered in", "subsidiary of", "has tax rate"]),
+    "person profile": (["has expertise in", "has age"],
+                       ["employer", "holds position", "educated at", "located in"]),
+    "product listing": (["has price", "has capacity", "has feature"],
+                        ["made of", "runs on", "supports payment method"]),
+    "travel booking": (["has price", "has duration"],
+                       ["has destination", "scheduled for", "booked for", "uses payment method"]),
+    "recipe": (["has ingredient", "has duration", "has count"], ["made of"]),
+    "software": (["has default value", "has value", "has feature"], ["runs on", "uses"]),
+    "finance": (["has monetary value", "has tax rate", "has budget"], ["due on", "owes payment to", "funded by"]),
+}
+STYLES = ["a news sentence", "a press release", "a short professional bio", "a chat message from a customer",
+          "a product listing", "a work email", "an excerpt from an annual report", "a forum post",
+          "a meeting note", "a booking confirmation"]
+LIST_HINT = {"has expertise in", "has ingredient", "has feature", "supports payment method", "uses"}
+
+SYSTEM["kgsyn"] = (
+    "You write short, realistic passages for training an information-extraction model. Given a "
+    "scenario, a style and some relations (each with a definition), write ONE passage of 1-3 "
+    "sentences in that style that states facts for each listed relation, then list those facts.\n"
+    "- Invent realistic, varied names, places, amounts and dates (fictional is fine; avoid famous "
+    "real people). Vary phrasing; do not copy the relation names into the text.\n"
+    "- State each fact explicitly enough that a careful reader would extract it from the passage alone.\n"
+    "- Amounts, prices, percentages, counts, ages and durations are written as in real text "
+    "('$1.2 billion', '35%', '3 hours', '12 employees').\n"
+    "- For a relation marked LIST, state 2-3 tail items in one list ('skilled in Python, SQL and "
+    "dbt') and give one fact per item.\n"
+    "- In the facts, give head and tail exactly as written in the passage, head to tail as the "
+    "definition reads. List every fact the passage states for the listed relations, and nothing else."
+)
+
+
+def syn_requests(n: int, base: SchemaSampler) -> list[KGItem]:
+    by = {r["name"]: r for r in base.relations}
+    out = []
+    names = sorted(SCENARIOS)
+    for i in range(n):
+        rng = _rng(f"syn:{i}")
+        sc = names[i % len(names)]
+        values, others = SCENARIOS[sc]
+        values = [v for v in values if v in by]
+        others = [o for o in others if o in by]
+        k_val = int(rng.integers(1, min(2, len(values)) + 1))
+        k_oth = int(rng.integers(1, min(2, len(others)) + 1))
+        chosen = (list(rng.choice(values, k_val, replace=False))
+                  + list(rng.choice(others, k_oth, replace=False)))
+        style = STYLES[int(rng.integers(len(STYLES)))]
+        lines = [f"Scenario: {sc}", f"Style: {style}", "Relations (head -> tail):"]
+        for r in chosen:
+            mark = " [LIST]" if r in LIST_HINT else ""
+            lines.append(f"- {r}{mark}: {by[r]['description']}")
+        out.append(KGItem(id=f"syn{i:04d}:{sc}:{'|'.join(chosen)}", tokens=[], sentence_spans=[],
+                          speakers=None, participants=[], types=[], relations=[], domain=sc,
+                          layers={"syn_prompt": "\n".join(lines), "relations": chosen, "style": style}))
+    return out
+
+
+class Synthesizer(KGAnnotator):
+    def build_messages(self, layer: str, item) -> list[dict]:
+        return [{"role": "system", "content": SYSTEM["kgsyn"]},
+                {"role": "user", "content": item.layers["syn_prompt"] + self._json_hint(layer)}]
+
+
+def synth(annotator: str, n: int) -> int:
+    """Pilot of the synthetic value and list set: generate ``n`` passages,
+    annotate each blind with the round-2 prompt against its scenario's
+    relations plus distractors, and score how many written facts the teacher
+    recovers."""
+    from .windows import tokenize
+    global ROUND
+    base = SchemaSampler(load_bank())
+    by = {r["name"]: r for r in base.relations}
+    spec = load_annotators([annotator])[annotator]
+    cache = CacheStore(CACHE, "y1")
+    reqs = syn_requests(n, base)
+    gen = asyncio.run(_run(Synthesizer(spec, cache), "kgsyn", reqs, f"synth-gen-{annotator}"))
+    items, bad = [], Counter()
+    for q in reqs:
+        r = gen.get(q.id)
+        if r is None or not r.ok:
+            bad["generation failed"] += 1
+            continue
+        text, facts = r.payload["text"], r.payload["facts"]
+        want = set(q.layers["relations"])
+        ok = [f for f in facts if f["relation"] in want and _contains(text, f["head"]) and _contains(text, f["tail"])]
+        bad["facts dropped (relation or mention)"] += len(facts) - len(ok)
+        vals, _ = SCENARIOS[q.domain]
+        if not any(f["relation"] in vals for f in ok):
+            bad["no value or list fact"] += 1
+            continue
+        # sentences: split the tokens at sentence-final punctuation
+        toks = tokenize(text)
+        spans, s0 = [], 0
+        for j, t in enumerate(toks):
+            if t in {".", "!", "?"} and j + 1 < len(toks):
+                spans.append([s0, j + 1]); s0 = j + 1
+        spans.append([s0, len(toks)])
+        rng = _rng(f"synschema:{q.id}")
+        values, others = SCENARIOS[q.domain]
+        menu = [x for x in values + others if x in by]
+        pool = [r2["name"] for r2 in base.relations if r2["name"] not in menu]
+        distract = list(rng.choice(pool, 3, replace=False))
+        schema = sorted(menu + distract, key=lambda x: _rng(f"o:{q.id}:{x}").random())
+        items.append(KGItem(id=f"{q.id}:ann", tokens=toks, sentence_spans=spans, speakers=None,
+                            participants=[], types=GENERAL_TYPES + base.always,
+                            relations=[{"name": x, "description": by[x]["description"]} for x in schema],
+                            domain=q.domain, layers={"gold": ok, "text": text, "style": q.layers["style"]}))
+    keep, ROUND = ROUND, 2
+    try:
+        ann = asyncio.run(_run(ShortKG(spec, cache), "kg", items, f"synth-ann-{annotator}"))
+    finally:
+        ROUND = keep
+    c = defaultdict(Counter)
+    examples = []
+    for it in items:
+        r = ann.get(it.id)
+        cc = c[it.domain]
+        cc["texts"] += 1
+        gold = it.layers["gold"]
+        cc["gold"] += len(gold)
+        if r is None or not r.ok:
+            cc["failed"] += 1
+            continue
+        p = r.payload
+
+        def name(i):
+            a, b = p["entities"][i]["spans"][0]
+            return " ".join(it.tokens[a:b])
+
+        def same(x, y):
+            return bool(x) and bool(y) and (_contains(x, y) or _contains(y, x))
+        pred = [(name(f["head"]), f["relation"], name(f["tail"])) for f in p["facts"]]
+        found = [g for g in gold if any(rel == g["relation"] and same(h, g["head"]) and same(t, g["tail"])
+                                         for h, rel, t in pred)]
+        cc["found"] += len(found)
+        cc["value_gold"] += sum(g["relation"] in SCENARIOS[it.domain][0] for g in gold)
+        cc["value_found"] += sum(g["relation"] in SCENARIOS[it.domain][0] for g in found)
+        cc["extra"] += max(0, len(pred) - len(found))
+        if len(examples) < 12 and len(found) < len(gold):
+            miss = [g for g in gold if g not in found]
+            examples.append(f"[{it.domain}] {it.layers['text'][:200]}\n    missed: "
+                            + "; ".join(f"{g['head']} | {g['relation']} | {g['tail']}" for g in miss[:3]))
+    print(f"{len(reqs)} requests, {len(items)} passages kept; dropped: {dict(bad)}")
+    print(f"{'scenario':17s} {'texts':>5s} {'facts':>5s} {'recovered':>9s} {'value rec.':>10s} {'extra/t':>7s}")
+    tot = Counter()
+    for d in sorted(c):
+        tot.update(c[d])
+    for d, cc in sorted(list(c.items()) + [("ALL", tot)], key=lambda x: x[0] == "ALL"):
+        print(f"{d:17s} {cc['texts']:5d} {cc['gold']:5d} {cc['found'] / max(cc['gold'], 1):9.0%} "
+              f"{cc['value_found'] / max(cc['value_gold'], 1):10.0%} {cc['extra'] / max(cc['texts'], 1):7.2f}")
+    print("\n".join(examples))
+    (OUT / "synth.json").write_text(json.dumps([{**it.__dict__} for it in items]))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=["rank", "dry", "pilot", "variants", "check"])
+    ap.add_argument("cmd", choices=["rank", "dry", "pilot", "variants", "check", "synth"])
     ap.add_argument("--round", type=int, default=1, choices=[1, 2, 3])
     ap.add_argument("--release", default="release/ultrabert-380m", help="rank: the v7 model that ranks")
     ap.add_argument("--texts", type=int, default=500)
@@ -786,6 +951,11 @@ def main() -> int:
     ap.add_argument("--judge-facts", type=int, default=300, help="check: teacher facts judged")
     args = ap.parse_args()
     set_round(args.round)
+    if args.cmd == "synth":
+        global OUT
+        OUT = RUNS_DIR / "kg-short-synth"
+        OUT.mkdir(parents=True, exist_ok=True)
+        return synth(args.annotator, args.texts)
     if args.cmd == "rank":
         return rank(args.texts, args.release)
     rank_map = json.loads(RANK.read_text()) if ROUND >= 2 else None
