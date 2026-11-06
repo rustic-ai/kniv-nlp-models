@@ -717,7 +717,8 @@ def cmd_probe(a) -> int:
         # train.log is appended across runs; report only the latest.
         starts = [i for i, l in enumerate(lines) if l.startswith(RUN_MARKER)]
         lines = lines[starts[-1]:] if starts else lines
-        if any(l.startswith("PROBE") or "Traceback" in l or "Error" in l for l in lines) \
+        done = "BENCH" if "--bench" in a.extra else "PROBE"
+        if any(l.startswith(done) or "Traceback" in l or "Error" in l for l in lines) \
                 or time.time() > deadline:
             break
         time.sleep(60)
@@ -725,7 +726,7 @@ def cmd_probe(a) -> int:
         print("no PROBE line; last lines of train.log:")
         print("\n".join(lines[-15:]))
     for l in lines:
-        if "probe step" in l or l.startswith("PROBE") or "Error" in l:
+        if "probe step" in l or l.startswith(("PROBE", "BENCH", "probe batches")) or "Error" in l:
             print(l)
     if not a.keep:
         release(sess, check=False)          # a probe's VM bills until released

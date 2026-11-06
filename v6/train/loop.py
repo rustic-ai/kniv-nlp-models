@@ -733,6 +733,10 @@ def main() -> int:
     ap.add_argument("--dev-limit", type=int)
     ap.add_argument("--seed", type=int, default=13)
     ap.add_argument("--device")
+    ap.add_argument("--bench", type=int, metavar="STEPS",
+                    help="with --probe and --max-batch-tokens: then time STEPS optimiser steps "
+                         "over the batches training forms (shuffled, every source) and report "
+                         "items/s and hours per epoch")
     ap.add_argument("--probe", type=int, metavar="STEPS",
                     help="memory/speed probe on the longest batches; saves nothing")
     args = ap.parse_args()
@@ -1140,7 +1144,13 @@ def main() -> int:
               f"{len(real):,} batches per epoch "
               f"for {len(train):,} items", flush=True)
         order = (picks * spec.grad_accum)[:max(spec.grad_accum, len(picks))]
-        return _probe(model, opt, train, order, args.probe, spec, tok, device, amp, label_coll)
+        rc = _probe(model, opt, train, order, args.probe, spec, tok, device, amp, label_coll)
+        if args.bench:
+            rc = _bench(model, opt, train, real, args.bench, spec, tok, device, amp,
+                        label_coll, prefetch=not args.no_prefetch,
+                        relation_only=args.train_scope.startswith("relation")
+                        or args.train_scope == "knowledge-full") or rc
+        return rc
     if args.probe:
         # Worst case: the longest windows, every step.
         longest = sorted(range(len(train)), key=lambda i: -len(train[i]["input_ids"]))
@@ -1456,6 +1466,56 @@ def _probe(model, opt, train, order, steps, spec, tok, device, amp, label_coll=N
            "words_per_sec": round(n_words / (sum(times[1:]) / max(len(times) - 1, 1)), 1),
            **memory()}
     print("PROBE " + json.dumps(rep), flush=True)
+    return 0
+
+
+def _bench(model, opt, train, real, steps, spec, tok, device, amp, label_coll=None,
+           prefetch=True, relation_only=False) -> int:
+    """Throughput on the training mix: ``steps`` optimiser steps over the
+    first batches of epoch 0's order (shuffled across sources), collated as
+    the loop does. The first two steps are warm-up and not timed."""
+    import json
+    model.train()
+    n = (steps + 2) * spec.grad_accum
+    keys = list(range(min(n, len(real))))
+
+    def build(m):
+        b = collate([train[i] for i in real[m]], tok.pad_token_id)
+        b = label_coll(b) if label_coll is not None else b
+        return _pin(b) if device.type == "cuda" else b
+    feed = Prefetch(build, keys, enabled=prefetch)
+    times, items, toks = [], 0, 0
+    try:
+        for s in range(len(keys) // spec.grad_accum):
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            t0 = time.time()
+            for m in range(s * spec.grad_accum, (s + 1) * spec.grad_accum):
+                b = _to(next(feed), device)
+                with amp():
+                    L = losses(model(b, relation_only=relation_only), b)
+                loss = sum(l for l, _ in L.values()) / spec.grad_accum
+                if loss.requires_grad:
+                    loss.backward()
+                if s >= 2:
+                    items += len(real[m])
+                    toks += int(b["attention_mask"].sum()) if "attention_mask" in b else 0
+            opt.step(); opt.zero_grad(set_to_none=True)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            if s >= 2:
+                times.append(time.time() - t0)
+    finally:
+        feed.close()
+    sec = sum(times) / max(len(times), 1)
+    rep = {"batch_size": spec.batch_size, "grad_accum": spec.grad_accum, "prefetch": prefetch,
+           "last_attn_only": getattr(model, "last_attn_only", False),
+           "timed_steps": len(times), "sec_per_step": round(sec, 3),
+           "items_per_sec": round(items / max(sum(times), 1e-9), 1),
+           "tokens_per_sec": round(toks / max(sum(times), 1e-9), 1),
+           "batches_per_epoch": len(real),
+           "epoch_hours": round(len(real) / spec.grad_accum * sec / 3600, 2), **memory()}
+    print("BENCH " + json.dumps(rep), flush=True)
     return 0
 
 
