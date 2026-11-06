@@ -44,7 +44,7 @@ from pathlib import Path
 from .config import DATA_DIR
 
 BANK_PATH = DATA_DIR / "v6-corpus" / "label_bank.json"
-VERSION = 6
+VERSION = 7
 N_HOLDOUT = 20
 N_FEWREL_EXTRA = 7          # FewRel training relations added to the zero-shot holdout (v7)
 TREX_MIN_FACTS = 50         # a T-REx property joins the bank with >= 50 aligned facts
@@ -158,9 +158,28 @@ def _fewrel_extra(relations: list[dict]) -> list[str]:
     return cand[:N_FEWREL_EXTRA]
 
 
+# Version 7 (v8): the general entity types the short-text teacher annotates
+# against (``kg_short``). person / organization / location / activity are
+# already in the bank and keep their entries; the rest are appended.
+GENERAL_SHORT_TYPES = [{"name": n, "description": d, "source": "general-short"} for n, d in [
+    ("person", "a human being, named or described ('my sister', 'the CEO')"),
+    ("organization", "a company, institution, team, government body or other group"),
+    ("location", "a place: a country, city, region, building, address or natural feature"),
+    ("product or service", "something made or offered: a device, software product, plan, dish or service"),
+    ("financial item", "a loan, credit facility, account, fund, obligation, share class or other financial "
+                       "instrument or balance"),
+    ("document or agreement", "a contract, licence, policy, law, report, filing or other written instrument"),
+    ("event", "a meeting, deal, launch, trip, election, incident or other occurrence"),
+    ("job title", "a role or position someone holds, such as 'data engineer' or 'chief financial officer'"),
+    ("skill or technology", "a skill, programming language, tool, method or technical field"),
+    ("activity", "something people do: a sport, hobby, task or practice, such as 'surfing' or 'hiking'"),
+]]
+
+
 def extend(bank: dict) -> dict:
-    """Version 6 on top of a version 5 bank (idempotent): the standard
-    zero-shot holdout, T-REx's properties, Wikidata classes as types."""
+    """Versions 6 and 7 on top of a version 5 bank (idempotent): the standard
+    zero-shot holdout, T-REx's properties, Wikidata classes as types; then
+    the general short-text types."""
     rels, types = bank["relations"], bank["entity_types"]
     extra = set(_fewrel_extra(rels)) if bank.get("version", 0) < 6 else set()
     for r in rels:
@@ -199,6 +218,11 @@ def extend(bank: dict) -> dict:
                           "source": "wikidata", "code": v["qid"], "mergeable": True,
                           "temporal": False, "trex_entities": v["entities"]})
             tnames.add(v["label"].lower())
+    tnames = {t["name"].lower() for t in types}
+    for t in GENERAL_SHORT_TYPES:
+        if t["name"].lower() not in tnames:
+            types.append({"id": len(types), **t, "aliases": [], "mergeable": True, "temporal": False})
+            tnames.add(t["name"].lower())
     if len({r["name"] for r in rels}) != len(rels) or len({t["name"] for t in types}) != len(types):
         raise RuntimeError("two labels share a name")
     bank["version"] = VERSION

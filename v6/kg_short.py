@@ -45,7 +45,7 @@ from .annotate.base import CacheStore, RunLogger
 from .annotate.kg import KGAnnotator, KGItem
 from .config import DATA_DIR, RUNS_DIR, load_annotators
 from .kg_teacher import CACHE, SPEAKERS, SchemaSampler, _rng, participants_of
-from .label_bank import load as load_bank
+from .label_bank import GENERAL_SHORT_TYPES, load as load_bank
 from .prompts import SYSTEM, kg_user_message
 
 # Round 1 (the first pilot) and round 2 (v7-ranked schemas, the negation rule,
@@ -127,19 +127,7 @@ MIN_SENT_WORDS = 5   # drops reference lists, headings and table fragments
 # Few-NERD's 66 cover (no unnamed financial items, roles or skills). Written to
 # be mutually exclusive, so every entity has one right type. Not yet in the
 # label bank: added to it (with ids) when the W1 data is prepared.
-GENERAL_TYPES = [{"name": n, "description": d, "source": "general-short"} for n, d in [
-    ("person", "a human being, named or described ('my sister', 'the CEO')"),
-    ("organization", "a company, institution, team, government body or other group"),
-    ("location", "a place: a country, city, region, building, address or natural feature"),
-    ("product or service", "something made or offered: a device, software product, plan, dish or service"),
-    ("financial item", "a loan, credit facility, account, fund, obligation, share class or other financial "
-                       "instrument or balance"),
-    ("document or agreement", "a contract, licence, policy, law, report, filing or other written instrument"),
-    ("event", "a meeting, deal, launch, trip, election, incident or other occurrence"),
-    ("job title", "a role or position someone holds, such as 'data engineer' or 'chief financial officer'"),
-    ("skill or technology", "a skill, programming language, tool, method or technical field"),
-    ("activity", "something people do: a sport, hobby, task or practice, such as 'surfing' or 'hiking'"),
-]]
+GENERAL_TYPES = GENERAL_SHORT_TYPES      # in the label bank from version 7
 
 
 def is_value_relation(r: dict) -> bool:
@@ -1160,9 +1148,158 @@ def effort_compare(annotator: str, judge: str, efforts: list[str], n_syn: int = 
     return 0
 
 
+KG_SHORT = DATA_DIR / "v6-corpus" / "kg_short.json"
+
+
+def _last_ok(run_dir: Path) -> dict[str, dict]:
+    """The last successful payload per item id in a run's event log."""
+    out = {}
+    for line in (run_dir / "events.jsonl").open():
+        e = json.loads(line)
+        if e.get("ok"):
+            out[e["item_id"]] = e["payload"]
+    return out
+
+
+def _record(it: dict, payload: dict, **extra) -> dict:
+    return {"id": it["id"], "tokens": it["tokens"], "sentence_spans": it["sentence_spans"],
+            "speakers": it.get("speakers"), "participants": it.get("participants") or [],
+            "types": [t["name"] for t in it["types"]], "relations": [r["name"] for r in it["relations"]],
+            "domain": it["domain"], "payload": payload, **extra}
+
+
+def _find_entity(it: dict, p: dict, mention: str) -> int:
+    """Index (participants first) of the entity with a mention equal to
+    ``mention`` (or, failing that, containing it / contained in it); -1."""
+    k = len(it.get("participants") or [])
+    m = " ".join(_norm_words(mention))
+    if not m:
+        return -1
+    loose = -1
+    for i, e in enumerate(p["entities"]):
+        for a, b in e["spans"]:
+            t = " ".join(_norm_words(" ".join(it["tokens"][a:b])))
+            if t == m:
+                return k + i
+            if loose < 0 and t and (f" {m} " in f" {t} " or f" {t} " in f" {m} "):
+                loose = k + i
+    return loose
+
+
+def export_short(annotator: str = "sol61") -> int:
+    """Everything the short-text teacher produced, in ``kg_teacher.export``'s
+    record format, to ``KG_SHORT``:
+
+    * ``train`` / ``dev``: the round-4 natural texts (dev: calibration only),
+      without the CoNLL04-overlap ids of ``kg_short_exclude.json``;
+    * ``pairs``: the minimal-pair rewrites, each labelled by what the rewrite
+      was asked to be: the target fact gets the kind's polarity and modality
+      (and, for 'reported', the source as holder), added when the teacher
+      missed it; a rewrite whose fact or source cannot be placed is dropped;
+    * ``synth``: the synthetic value/list passages with the teacher's facts
+      plus every written fact the teacher missed whose arguments are its
+      entities (names and values are swapped at featurisation,
+      ``train.name_swap``)."""
+    global SPLIT
+    excl = set(json.loads((DATA_DIR / "v6-corpus" / "kg_short_exclude.json").read_text())["ids"])
+    r4 = RUNS_DIR / "kg-short-r4"
+    teacher = _last_ok(r4 / f"pilot-{annotator}")
+    out, c = {}, Counter()
+    for split in ("train", "dev"):
+        SPLIT = split
+        set_round(4)
+        rows = []
+        for it in json.loads(ITEMS.read_text()):
+            if it["id"] in excl:
+                c[f"{split}: excluded (CoNLL04 overlap)"] += 1
+                continue
+            p = teacher.get(it["id"])
+            if p is None:
+                c[f"{split}: no annotation"] += 1
+                continue
+            rows.append(_record(it, p))
+        out[split] = rows
+        c[f"{split}: texts"] = len(rows)
+    # minimal pairs
+    var = _last_ok(r4 / f"variants-{annotator}")
+    rows = []
+    for vi in json.loads((r4 / "variants.json").read_text()):
+        p = var.get(vi["id"])
+        L = vi["layers"]
+        if p is None:
+            c["pairs: no annotation"] += 1
+            continue
+        if vi["id"].split(":var:")[0] in excl:
+            c["pairs: excluded (CoNLL04 overlap)"] += 1
+            continue
+        h, t = _find_entity(vi, p, L["head"]), _find_entity(vi, p, L["tail"])
+        if h < 0 or t < 0:
+            c["pairs: dropped (argument not among the entities)"] += 1
+            continue
+        pol, mod = VAR_EXPECT[L["kind"]]
+        holder = -1
+        if L["kind"] == "reported":
+            hit = [f for f in p["facts"] if (f["head"], f["tail"], f["relation"]) == (h, t, L["relation"])]
+            src = (L.get("source") or "").lower()
+            holder = _find_entity(vi, p, L["source"]) if L.get("source") else -1
+            if holder < 0 and hit and hit[0]["holder"] >= 0 and hit[0]["holder"] not in (h, t) and \
+                    (src in PRONOUN_SOURCES or src.split()[:1] and src.split()[0] in DETERMINERS):
+                holder = hit[0]["holder"]          # 'his spokesperson': the teacher's holder
+            if holder < 0:
+                c["pairs: dropped (reported source not placed)"] += 1
+                continue
+        facts, fixed = [], False
+        for f in p["facts"]:
+            if (f["head"], f["tail"], f["relation"]) == (h, t, L["relation"]):
+                if fixed:
+                    continue
+                c["pairs: teacher label kept" if (f["polarity"], f["modality"]) == (pol, mod)
+                  and (L["kind"] != "reported" or f["holder"] == holder) else "pairs: label set by kind"] += 1
+                f = {**f, "polarity": pol, "modality": mod, "holder": holder if L["kind"] == "reported" else f["holder"]}
+                fixed = True
+            facts.append(f)
+        if not fixed:
+            facts.append({"head": h, "tail": t, "relation": L["relation"], "polarity": pol, "modality": mod,
+                          "holder": holder, "time": -1, "evidence": [0]})
+            c["pairs: fact added (teacher missed it)"] += 1
+        rows.append(_record(vi, {**p, "facts": facts}, kind=L["kind"]))
+    out["pairs"] = rows
+    c["pairs: rewrites"] = len(rows)
+    # synthetic
+    sy = RUNS_DIR / "kg-short-synth-r4"
+    ann = _last_ok(sy / f"synth-ann-{annotator}")
+    rows = []
+    for it in json.loads((sy / "synth.json").read_text()):
+        p = ann.get(it["id"])
+        if p is None:
+            c["synth: no annotation"] += 1
+            continue
+        facts = list(p["facts"])
+        have = {(f["head"], f["tail"], f["relation"]) for f in facts}
+        for g in it["layers"]["gold"]:
+            h, t = _find_entity(it, p, g["head"]), _find_entity(it, p, g["tail"])
+            if h < 0 or t < 0 or h == t:
+                c["synth: written fact not placed"] += 1
+                continue
+            if (h, t, g["relation"]) not in have:
+                facts.append({"head": h, "tail": t, "relation": g["relation"], "polarity": "positive",
+                              "modality": "asserted", "holder": -1, "time": -1, "evidence": []})
+                have.add((h, t, g["relation"]))
+                c["synth: written fact added"] += 1
+        rows.append(_record(it, {**p, "facts": facts}, style=it["layers"]["style"]))
+    out["synth"] = rows
+    c["synth: passages"] = len(rows)
+    KG_SHORT.write_text(json.dumps(out))
+    for k in sorted(c):
+        print(f"  {k}: {c[k]:,}")
+    print(f"-> {KG_SHORT} ({KG_SHORT.stat().st_size / 1e6:.0f} MB)")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=["rank", "rank-merge", "dry", "pilot", "variants", "check", "synth", "effort"])
+    ap.add_argument("cmd", choices=["rank", "rank-merge", "dry", "pilot", "variants", "check", "synth", "effort",
+                                        "export"])
     ap.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh"],
                     help="the teacher's reasoning effort (default: the deployment's, as in the pilots)")
     ap.add_argument("--efforts", default="default,low,medium,high,xhigh", help="effort: levels to compare")
@@ -1185,6 +1322,8 @@ def main() -> int:
     SPLIT = args.split
     set_round(args.round)
     TEACHER_EFFORT, CONCURRENCY = args.effort, args.concurrency
+    if args.cmd == "export":
+        return export_short(args.annotator)
     if args.cmd == "effort":
         return effort_compare(args.annotator, args.judge, args.efforts.split(","))
     if args.cmd == "synth":

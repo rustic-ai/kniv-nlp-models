@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from collections import Counter
 
 import numpy as np
@@ -183,7 +184,8 @@ class LabelCollator:
 
 
 def teacher_features(item, payload: dict, tok, max_subwords: int, bank: dict, n_cls: int,
-                     stats: Counter | None = None, markers: bool = True) -> dict | None:
+                     stats: Counter | None = None, markers: bool = True,
+                     keep_unlabelled: float | None = None) -> dict | None:
     """One teacher-annotated window (a ``KGItem`` and its aligned ``kg``
     payload) as relation supervision: participants first (their mentions are
     the speaker tags of the marker pass), then the teacher's entities;
@@ -240,7 +242,8 @@ def teacher_features(item, payload: dict, tok, max_subwords: int, bank: dict, n_
                   "triples": triples, "attrs": attrs, "n_participants": n_part,
                   "evidence": [(h, t, sorted(v)) for (h, t), v in sorted(ev.items())],
                   "schema": schema, "partial": True,
-                  "unlabelled_keep": UNLABELLED_KEEP["teacher"]})
+                  "unlabelled_keep": UNLABELLED_KEEP["teacher"] if keep_unlabelled is None
+                  else keep_unlabelled})
     tname = {t["name"]: t["id"] for t in bank["entity_types"]}
     typed = [(tname[e["type"]], a, b) for e in payload["entities"] if e["type"] in tname
              for a, b in e["spans"]]
@@ -435,13 +438,25 @@ def _corpus():
 
 KNOWLEDGE_FILES = {"fewrel": "fewrel_rel.json", "fewnerd": "fewnerd_spans.json",
                    "docred_distant": "docred_distant_rel.json", "pretrain": "kg_pretrain.json",
-                   "trex": "kg_trex.json"}
+                   "trex": "kg_trex.json", "short": "kg_short.json", "short_pairs": "kg_short.json",
+                   "synth": "kg_short.json"}
+# The short-text teacher's sources (``kg_short export``): natural 1-3
+# sentence texts (train / dev), minimal-pair rewrites, synthetic value and
+# list passages. Synthetic passages are featurised SYNTH_DRAWS times, each
+# with its own draw of names and values (``name_swap``), so no name or value
+# repeats often enough to become a prior.
+SHORT_SPLITS = {"short": None, "short_pairs": "pairs", "synth": "synth"}
+SYNTH_DRAWS = 4
 # Unlabelled pairs of a partial source kept as negatives, per source: FewRel
 # labels one pair per sentence and says nothing of the others.
 # Bump whenever a featuriser's output changes: the feature cache is keyed on it.
 FEATURE_VERSION = 4
 UNLABELLED_KEEP = {"teacher": 0.5, "docred_distant": 0.5, "fewrel": 0.0, "pretrain": 0.5,
-                   "trex": 0.5}
+                   "trex": 0.5,
+                   # short texts are labelled exhaustively within their schema
+                   # (recall 0.82 against a second annotator; synthetic 0.94 + the
+                   # written facts the teacher missed)
+                   "short": 0.8, "short_pairs": 0.8, "synth": 0.9}
 
 
 def _digest(path):
@@ -712,6 +727,9 @@ def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: i
     if not path.exists():
         raise SystemExit(f"{path} missing; run python -m v6.train.kdata --prep")
     hold_sig = (load_holdout() or {}).get("relations") if source == "teacher" else None
+    if source == "synth":                       # the swap's code decides the features too
+        from . import name_swap
+        hold_sig = [_digest(Path(name_swap.__file__)), SYNTH_DRAWS]
     key = hashlib.sha256(json.dumps([FEATURE_VERSION, hold_sig, source, split, tok.name_or_path,
                                      max_subwords, markers, limit,
                                      bank.get("hash"), _digest(path)]).encode()
@@ -733,7 +751,37 @@ def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: i
             if progress is not None and i % 2000 == 0:
                 progress(f"featurising {source}: {i:,}")
             yield x
-    if source == "teacher":
+    if source in SHORT_SPLITS:
+        from ..kg_teacher import KGItem
+        part = SHORT_SPLITS[source] or split
+        data = json.loads(path.read_text())
+        rows = data.get(part, []) if split == "train" or source == "short" else []
+        draws = [None]
+        if source == "synth":
+            from .name_swap import HER_CASES, gender_table, swap_names
+            her = json.loads(HER_CASES.read_text()) if HER_CASES.exists() else None
+            gender = gender_table(rows,
+                                  {r["id"]: r["payload"] for r in rows})
+            draws = list(range(SYNTH_DRAWS))
+        feats = []
+        for r in tick(rows[:limit]):
+            for d in draws:
+                rec, p = r, r["payload"]
+                if d is not None:
+                    item = {**r, "layers": {"style": r.get("style")}}
+                    item, p = swap_names(item, p, f"{r['id']}:{d}", gender, local, her)
+                    rec = {**r, "id": f"{r['id']}#d{d}", "tokens": item["tokens"],
+                           "sentence_spans": item["sentence_spans"]}
+                it = KGItem(id=rec["id"], tokens=rec["tokens"], sentence_spans=rec["sentence_spans"],
+                            speakers=rec["speakers"], participants=rec["participants"],
+                            types=[{"name": t} for t in rec["types"]],
+                            relations=[{"name": n} for n in rec["relations"]], domain=rec["domain"])
+                f = teacher_features(it, p, tok, max_subwords, bank, n_cls, local, markers,
+                                     keep_unlabelled=UNLABELLED_KEEP[source])
+                if f is not None:
+                    f["_source"], f["_id"] = source, rec["id"]
+                    feats.append(f)
+    elif source == "teacher":
         from ..kg_teacher import load_export
         pairs = [(it, p) for it, p in load_export(path) if _is_dev(it.id) == (split == "dev")]
         if split == "dev":
@@ -803,7 +851,7 @@ def main() -> int:
     n_cls = Vocab.load().size("cls")
     for src in [s for s in args.featurise.split(",") if s]:
         for split in {"fewnerd": ("train", "dev"), "fewrel": ("train", "val"),
-                      "teacher": ("train", "dev")}.get(src, ("train",)):
+                      "teacher": ("train", "dev"), "short": ("train", "dev")}.get(src, ("train",)):
             t0, st = time.time(), Counter()
             feats = knowledge_features(src, split, tok, spec.max_subwords, n_cls, bank, stats=st)
             print(f"{src}/{split}: {len(feats):,} items in {time.time() - t0:.0f}s; "

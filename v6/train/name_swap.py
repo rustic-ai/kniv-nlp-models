@@ -435,7 +435,7 @@ def swap_names(item: dict, payload: dict, seed: str, gender: dict[str, str],
             return a + b if b[0] != a[-1] else a + b[1:]
         return a
 
-    for org in sorted(orgs, key=len, reverse=True):
+    for org in sorted(orgs, key=lambda o: (-len(o), o)):      # set order varies by process
         stem = new_stem()
         kind = KIND_OF.get(org[-1])
         tail = [*org[1:-1], kind[rng.integers(len(kind))] if kind else org[-1]]
