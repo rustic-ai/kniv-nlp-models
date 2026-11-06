@@ -1147,7 +1147,7 @@ def main() -> int:
         return effort_compare(args.annotator, args.judge, args.efforts.split(","))
     if args.cmd == "synth":
         global OUT
-        OUT = RUNS_DIR / "kg-short-synth"
+        OUT = RUNS_DIR / ("kg-short-synth-r4" if ROUND == 4 else "kg-short-synth")
         OUT.mkdir(parents=True, exist_ok=True)
         return synth(args.annotator, args.texts)
     if args.cmd == "rank":
