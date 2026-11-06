@@ -24,7 +24,12 @@ _SKEW_SECONDS = 300
 
 _token: str | None = None
 _expires_at: float = 0.0
+# One lock per event loop: an asyncio.Lock is bound to the loop it first runs
+# in, and a process can run several loops one after another (each
+# ``asyncio.run``). Reusing one across loops fails the first time a token
+# refresh has to wait on it.
 _lock: asyncio.Lock | None = None
+_lock_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _fetch() -> tuple[str, float]:
@@ -50,9 +55,10 @@ def _fetch() -> tuple[str, float]:
 
 async def get_token() -> str:
     """Return a valid bearer token, refreshing it at most once at a time."""
-    global _token, _expires_at, _lock
-    if _lock is None:
-        _lock = asyncio.Lock()
+    global _token, _expires_at, _lock, _lock_loop
+    loop = asyncio.get_running_loop()
+    if _lock is None or _lock_loop is not loop:
+        _lock, _lock_loop = asyncio.Lock(), loop
     if _token and time.time() < _expires_at - _SKEW_SECONDS:
         return _token
     async with _lock:
