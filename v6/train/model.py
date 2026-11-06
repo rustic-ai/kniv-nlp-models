@@ -518,6 +518,38 @@ class LabelRelationHead(MarkerRelationHead):
         return float((E @ sol - target).abs().max())
 
 
+def _length_buckets(lens: list[int], max_groups: int = 3, call_cost: int = 256) -> list[list[int]]:
+    """Split rows into at most ``max_groups`` groups of similar length,
+    minimising padded tokens (rows x longest per group) plus ``call_cost``
+    tokens per extra encoder call. Returns row indices per group. The search
+    runs over distinct lengths (label texts are capped, so a few dozen)."""
+    from collections import Counter
+    cnt = Counter(lens)
+    vals = sorted(cnt)
+    m = len(vals)
+    pre = [0]
+    for v in vals:
+        pre.append(pre[-1] + cnt[v])
+    INF = float("inf")
+    # best[g][j]: cost of the j shortest distinct lengths in g groups
+    best = [[INF] * (m + 1) for _ in range(max_groups + 1)]
+    cut = [[0] * (m + 1) for _ in range(max_groups + 1)]
+    best[0][0] = 0
+    for g in range(1, max_groups + 1):
+        for j in range(1, m + 1):
+            for i in range(g - 1, j):
+                c = best[g - 1][i] + (pre[j] - pre[i]) * vals[j - 1]
+                if c < best[g][j]:
+                    best[g][j], cut[g][j] = c, i
+    g = min(range(1, min(max_groups, m) + 1), key=lambda g: best[g][m] + (g - 1) * call_cost)
+    bounds, j = [], m
+    while g:
+        i = cut[g][j]
+        bounds.append((vals[i], vals[j - 1]))
+        j, g = i, g - 1
+    return [[k for k, n in enumerate(lens) if lo <= n <= hi] for lo, hi in bounds[::-1]]
+
+
 class LabelEncoder(nn.Module):
     """A relation or entity type as a vector: the encoder's last layer over
     its label text, mean-pooled, normalised and projected."""
@@ -1013,7 +1045,8 @@ class V6Model(nn.Module):
                  legacy_rank: int | None = None, trust_remote_code: bool = False,
                  word_pool: str = "first", attr_head: bool = False,
                  srl_pred_hidden: int = 0, srl_ctx: int = 0, linker: int = 0,
-                 ner_lstm: int = 0, rel_xattn_layers: int = 2, coref_adapter: int = 0):
+                 ner_lstm: int = 0, rel_xattn_layers: int = 2, coref_adapter: int = 0,
+                 last_attn_only: bool = False):
         super().__init__()
         # Word vectors: the first subword (v6), or the mean of all of a word's
         # subwords -- for tokenizers that split words often, with little in
@@ -1029,6 +1062,14 @@ class V6Model(nn.Module):
         # the default, DeBERTa trained fp16 weights with no fp32 copy, where
         # AdamW updates at its learning rate are mostly lost to rounding -- a
         # silent handicap in exactly the comparison these runs exist for.
+        # last_attn_only: the marker pass reads one attention map, the last
+        # layer's. Eager attention everywhere (needed to read maps) stores
+        # every layer's [B, heads, T, T] probabilities for backward; instead
+        # every layer runs sdpa except the last, which keeps eager and hands
+        # its map over through a hook (_last_attn).
+        self.last_attn_only = bool(last_attn_only and attn_implementation == "eager")
+        if self.last_attn_only:
+            attn_implementation = "sdpa"
         kw = {"attn_implementation": attn_implementation} if attn_implementation else {}
         if trust_remote_code:
             kw["trust_remote_code"] = True
@@ -1038,6 +1079,9 @@ class V6Model(nn.Module):
             self.encoder = AutoModel.from_config(AutoConfig.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code),
                                                  dtype=torch.float32, **kw)
+        self._grab_attn, self._attn_map = False, None
+        if self.last_attn_only:
+            self._eager_last_layer()
         H = self.encoder.config.hidden_size
         L = self.encoder.config.num_hidden_layers + 1
         self.sizes = dict(sizes)
@@ -1304,19 +1348,54 @@ class V6Model(nn.Module):
                 a.on = on
         return tuple(F.layer_norm(h, h.shape[-1:]) for h in out.hidden_states)
 
+    def _eager_last_layer(self):
+        """The last layer's attention module gets its own config copy set to
+        eager (the others read the shared one, sdpa), and a hook that keeps
+        its probabilities while ``_grab_attn`` is set."""
+        import copy
+        layers = getattr(self.encoder, "layers", None)
+        att = None
+        if layers is not None:
+            last = layers[-1]
+            att = getattr(last, "self_attn", None) or getattr(last, "attn", None)
+        if att is None or not hasattr(att, "config"):
+            raise ValueError("last_attn_only: no per-layer attention module with a config "
+                             f"on {type(self.encoder).__name__}")
+        cfg = copy.deepcopy(att.config)
+        cfg._attn_implementation = "eager"
+        att.config = cfg
+
+        def keep(mod, args, out):
+            if self._grab_attn:
+                self._attn_map = out[1]
+        att.register_forward_hook(keep)
+
+    def _encode_with_attn(self, ids, mask):
+        """Encoder pass returning the last hidden layer and the last layer's
+        attention probabilities."""
+        if not self.last_attn_only:
+            out = self.encoder(input_ids=ids, attention_mask=mask, output_attentions=True)
+            return out.last_hidden_state, out.attentions[-1]
+        self._grab_attn, self._attn_map = True, None
+        try:
+            out = self.encoder(input_ids=ids, attention_mask=mask)
+            att = self._attn_map
+        finally:
+            self._grab_attn, self._attn_map = False, None
+        if att is None:
+            raise RuntimeError("last_attn_only: the last layer gave no attention map")
+        return out.last_hidden_state, att
+
     def _marker_pass(self, batch: dict):
         """The marker pass, through the relation adapter when there is one:
         last hidden layer and last-layer attention."""
         if self.rel_lora is not None:
             self.rel_lora.on = True
         try:
-            out = self.encoder(input_ids=batch["rm_input_ids"],
-                               attention_mask=batch["rm_attention_mask"],
-                               output_attentions=True)
+            return self._encode_with_attn(batch["rm_input_ids"], batch["rm_attention_mask"])
         finally:
             if self.rel_lora is not None and not self.rel_lora.sticky:
                 self.rel_lora.on = False
-        return out.last_hidden_state, out.attentions[-1]
 
     def label_embeddings(self, ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Label texts to ``[K, label_dim]``. In evaluation (eval mode, no
@@ -1337,6 +1416,30 @@ class V6Model(nn.Module):
         return cache[key]
 
     def _label_embeddings(self, ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """The label pass in up to three length buckets, each trimmed to its
+        longest text: label texts are padded to the longest in the batch, and
+        31-47% of the label tokens in a short-text batch were padding. Same
+        embeddings (attention masks the padding), fewer tokens."""
+        K = ids.shape[0]
+        if K < 8:
+            return self._label_embeddings_one(ids, mask)
+        pos = torch.arange(1, mask.shape[1] + 1, device=mask.device)
+        lens = (mask.ne(0) * pos).amax(1).clamp(min=1).tolist()
+        groups = _length_buckets(lens)
+        if len(groups) == 1 and max(lens) == mask.shape[1]:
+            return self._label_embeddings_one(ids, mask)
+        outs, order = [], []
+        for g in groups:
+            L = max(lens[i] for i in g)
+            idx = torch.as_tensor(g, device=ids.device)
+            outs.append(self._label_embeddings_one(ids[idx, :L], mask[idx, :L]))
+            order.extend(g)
+        emb = torch.cat(outs)
+        inv = torch.empty(K, dtype=torch.long, device=ids.device)
+        inv[torch.as_tensor(order, device=ids.device)] = torch.arange(K, device=ids.device)
+        return emb[inv]
+
+    def _label_embeddings_one(self, ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """The label pass: label texts through the encoder into ``[K,
         label_dim]``. At inference a schema's embeddings are computed once and
         passed as ``batch["rel_label_emb"]``.
@@ -1375,10 +1478,8 @@ class V6Model(nn.Module):
         self.rel_lora.on, self.legacy_lora.on = False, True
         try:
             with torch.no_grad():
-                out = self.encoder(input_ids=batch["rm_input_ids"],
-                                   attention_mask=batch["rm_attention_mask"],
-                                   output_attentions=True)
-                logits, _ = self.legacy_relation(out.last_hidden_state, out.attentions[-1], batch)
+                seq, att = self._encode_with_attn(batch["rm_input_ids"], batch["rm_attention_mask"])
+                logits, _ = self.legacy_relation(seq, att, batch)
         finally:
             self.legacy_lora.on, self.rel_lora.on = False, prev
         return logits

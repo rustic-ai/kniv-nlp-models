@@ -482,6 +482,58 @@ def _to(batch: dict, device) -> dict:
     return {k: v.to(device, non_blocking=nb) for k, v in batch.items() if hasattr(v, "to")}
 
 
+class Prefetch:
+    """``fn(k)`` for each k in ``keys``, in order, computed ``depth`` ahead in
+    a background thread: collation (tokenising label texts, padding, pinning)
+    then overlaps the GPU's work instead of leaving it idle. Calls happen in
+    the same order as without it, so the collators' random draws are
+    unchanged. ``enabled=False`` computes each on request."""
+
+    def __init__(self, fn, keys, depth: int = 3, enabled: bool = True):
+        import queue
+        import threading
+        self.fn, self.keys, self.enabled = fn, iter(keys), enabled
+        if not enabled:
+            return
+        self.q, self.stop = queue.Queue(maxsize=depth), threading.Event()
+
+        def run():
+            try:
+                for k in self.keys:
+                    item = ("ok", fn(k))
+                    while not self.stop.is_set():
+                        try:
+                            self.q.put(item, timeout=0.5)
+                            break
+                        except queue.Full:
+                            pass
+                    if self.stop.is_set():
+                        return
+                self.q.put(("end", None))
+            except BaseException as exc:      # handed to the consumer
+                self.q.put(("error", exc))
+        self.t = threading.Thread(target=run, daemon=True, name="prefetch")
+        self.t.start()
+
+    def __next__(self):
+        if not self.enabled:
+            return self.fn(next(self.keys))
+        kind, v = self.q.get()
+        if kind == "error":
+            raise v
+        if kind == "end":
+            raise StopIteration
+        return v
+
+    def close(self):
+        if self.enabled:
+            self.stop.set()
+
+
+def _pin(b: dict) -> dict:
+    return {k: v.pin_memory() if torch.is_tensor(v) else v for k, v in b.items()}
+
+
 # ── training ────────────────────────────────────────────────────────
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -640,6 +692,12 @@ def main() -> int:
     ap.add_argument("--attn-implementation", choices=["eager", "sdpa"],
                     help="override the encoder's attention implementation (eager: the marker "
                          "pass can read attention maps on Ettin/ModernBERT)")
+    ap.add_argument("--last-attn-only", action="store_true",
+                    help="with eager attention: every layer runs sdpa except the last, whose "
+                         "attention map the marker pass reads (less memory, faster)")
+    ap.add_argument("--no-prefetch", action="store_true",
+                    help="build micro-batches on the main thread (default: a background thread "
+                         "builds the next ones while the GPU runs)")
     ap.add_argument("--attr-head", action="store_true",
                     help="fact attributes (polarity, modality, holder, time) on the zero-shot "
                          "relation head, trained from the teacher corpus")
@@ -866,7 +924,8 @@ def main() -> int:
                     word_pool=args.word_pool, attr_head=args.attr_head,
                     srl_pred_hidden=args.srl_pred_hidden, srl_ctx=args.srl_ctx,
                     ner_lstm=args.ner_lstm, rel_xattn_layers=args.rel_xattn_layers,
-                    coref_adapter=args.coref_adapter).to(device)
+                    coref_adapter=args.coref_adapter,
+                    last_attn_only=args.last_attn_only).to(device)
     if args.coref_adapter and spec.grad_checkpointing:
         raise SystemExit("--coref-adapter needs --grad-checkpointing off")
     init_relation = args.init_relation or "drop"
@@ -1132,6 +1191,7 @@ def main() -> int:
                                  "srl_ctx": args.srl_ctx, "ner_lstm": args.ner_lstm,
                                  "rel_xattn_layers": args.rel_xattn_layers,
                                  "coref_adapter": args.coref_adapter,
+                                 "last_attn_only": args.last_attn_only,
                                  "word_pool": args.word_pool,
                                  "attr_head": args.attr_head,
                                  "kg_holdout": hold_ids,
@@ -1167,24 +1227,34 @@ def main() -> int:
     model.train()
     last_save = time.time()
     log, n_log = defaultdict(float), 0
+    feed = None
     try:
         while rs.p.step < total:
             epoch = rs.p.epoch
             batches = batch_order(train, micro, args.seed, epoch, args.max_batch_tokens)
             start = (rs.p.step - epoch * per_epoch) * spec.grad_accum
+
+            def build(m, batches=batches):
+                # Token packing after each epoch's shuffle gives a slightly different
+                # batch count per epoch; per_epoch is epoch 0's, so a shorter epoch
+                # wraps around to its own first batches (resume offsets stay valid).
+                items = [train[i] for i in batches[m % len(batches)]]
+                b = collate(items, tok.pad_token_id)
+                b = label_coll(b) if label_coll is not None else b
+                if args.student_targets:
+                    from .student_kd import kd_collate
+                    b = kd_collate(items, b, vocab)
+                return _pin(b) if device.type == "cuda" else b
+            if feed is not None:
+                feed.close()
+            feed = Prefetch(build, range(start, per_epoch * spec.grad_accum),
+                            enabled=not args.no_prefetch)
             for m0 in range(start, per_epoch * spec.grad_accum, spec.grad_accum):
                 this, seen, bad = defaultdict(float), set(), []
+                used = 0
                 for m in range(m0, m0 + spec.grad_accum):
-                    # Token packing after each epoch's shuffle gives a slightly different
-                    # batch count per epoch; per_epoch is epoch 0's, so a shorter epoch
-                    # wraps around to its own first batches (resume offsets stay valid).
-                    items = [train[i] for i in batches[m % len(batches)]]
-                    b = collate(items, tok.pad_token_id)
-                    b = label_coll(b) if label_coll is not None else b
-                    if args.student_targets:
-                        from .student_kd import kd_collate
-                        b = kd_collate(items, b, vocab)
-                    b = _to(b, device)
+                    b = _to(next(feed), device)
+                    used += 1
                     try:
                         with amp():
                             o = model(b, relation_only=args.train_scope.startswith("relation")
@@ -1229,6 +1299,8 @@ def main() -> int:
                         this[h] += v / spec.grad_accum
                         seen.add(h)
                     this["total"] += loss.item()
+                for _ in range(used, spec.grad_accum):
+                    next(feed)                 # a skipped step's remaining micro-batches
                 gn = None
                 if not bad:
                     gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0))
@@ -1338,12 +1410,16 @@ def main() -> int:
                 continue
             break
     except Exception as exc:
+        if feed is not None:
+            feed.close()
         rs.event("error", error=f"{type(exc).__name__}: {exc}", step=rs.p.step,
                  memory=memory())
         rs.status(state="failed", reason=f"{type(exc).__name__}: {exc}"[:300], push=True)
         if hub:
             hub.wait()
         raise
+    if feed is not None:
+        feed.close()
     stop("done")
     print(f"done: {rs.p.step} steps, best composite {rs.p.best:.4f} "
           f"at step {rs.p.best_step}", flush=True)

@@ -108,7 +108,8 @@ def model_from_checkpoint(ck: dict, device) -> tuple:
                     linker=cfg.get("linker", 0),
                     ner_lstm=cfg.get("ner_lstm", 0),
                     rel_xattn_layers=cfg.get("rel_xattn_layers", 2),
-                    coref_adapter=cfg.get("coref_adapter", 0))
+                    coref_adapter=cfg.get("coref_adapter", 0),
+                    last_attn_only=cfg.get("last_attn_only", False))
     model.load_state_dict(ck["model"])          # strict: a mismatch raises
     model.to(device).eval()
     tok = AutoTokenizer.from_pretrained(spec.hf_id)
