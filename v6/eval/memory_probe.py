@@ -73,6 +73,11 @@ TYPES = ["person", "organization", "location", "product", "event", "date", "time
          "money", "animal", "food", "activity", "vehicle", "device", "work of art"]
 
 
+# A fact whose head or tail is only a pronoun ("you" from the assistant's turn,
+# "I") names no one a memory store can key on.
+PRONOUNS = {"i", "me", "my", "mine", "myself", "you", "your", "yours", "yourself", "we", "us", "our"}
+
+
 def _words(s: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", str(s).lower())
 
@@ -135,12 +140,14 @@ def locomo_questions(max_words: int) -> list[dict]:
 
 
 def main() -> int:
-    from ..infer import Extractor
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--run", default="deberta-v3-large-p2-zs-v62-ftr")
     ap.add_argument("--questions", type=int, default=150)
     ap.add_argument("--max-answer-words", type=int, default=5)
     ap.add_argument("--dataset", choices=["longmemeval", "locomo"], default="longmemeval")
+    ap.add_argument("--release", default=None,
+                    help="a released model directory: run its ONNX runtime (INT8) instead of --run")
+    ap.add_argument("--fp32", action="store_true", help="with --release: the fp32 graphs")
     args = ap.parse_args()
     qs = (locomo_questions if args.dataset == "locomo" else longmemeval_questions)(args.max_answer_words)
     by = defaultdict(list)
@@ -148,17 +155,24 @@ def main() -> int:
         by[q["type"]].append(q)
     per = max(1, args.questions // len(by))
     qs = [q for t in sorted(by) for q in by[t][:per]]
-    ex = Extractor(args.run)
+    if args.release:
+        import sys
+        sys.path.insert(0, args.release)
+        from kniv_v7 import Kniv
+        ex = Kniv(args.release, int8=not args.fp32)
+    else:
+        from ..infer import Extractor
+        ex = Extractor(args.run)
+        import v6.train.span_eval as se
+        se.DESCRIBE = True                    # the span head's trained text format
     rels = [{"name": n, "description": d} for n, d in RELATIONS]
     types = [{"name": t} for t in TYPES]
-    import v6.train.span_eval as se
-    se.DESCRIBE = True                        # the span head's trained text format
     stats = defaultdict(Counter)
     rel_use = Counter()
     t0 = time.time()
     examples = []
     for qi, q in enumerate(qs):
-        ents_txt, fact_args, user_facts, n_facts = [], [], 0, 0
+        ents_txt, fact_args, user_facts, n_facts, n_pron = [], [], 0, 0, 0
         for turns in q["evidence"]:
             if True:
                 for w in ex.extract(turns=turns, relations=rels, entity_types=types):
@@ -171,6 +185,7 @@ def main() -> int:
                         h, t = E[f["head"]], E[f["tail"]]
                         fact_args += [h["text"], t["text"]] + h.get("mentions", []) + t.get("mentions", [])
                         user_facts += int(h.get("text") in q["speakers"] or t.get("text") in q["speakers"])
+                        n_pron += int(h.get("text", "").lower() in PRONOUNS or t.get("text", "").lower() in PRONOUNS)
                         if len(examples) < 25 and qi % 5 == 0:
                             examples.append(f"[{q['type']}] {h['text']} --{f['relation']}--> "
                                             f"{t['text']} ({f['margin']})")
@@ -181,6 +196,7 @@ def main() -> int:
         c["answer_in_facts"] += int(any(overlap_f1(a, x) >= 0.5 for x in fact_args))
         c["facts_about_user"] += int(user_facts > 0)
         c["facts"] += n_facts
+        c["pronoun_facts"] += n_pron
         if (qi + 1) % 10 == 0:
             print(f"{qi + 1}/{len(qs)} questions, {time.time() - t0:.0f}s", flush=True)
     tot = Counter()
@@ -191,16 +207,17 @@ def main() -> int:
                 "answer_in_entities": c["answer_in_entities"] / max(c["questions"], 1),
                 "answer_in_facts": c["answer_in_facts"] / max(c["questions"], 1),
                 "facts_about_user": c["facts_about_user"] / max(c["questions"], 1),
-                "facts_per_question": c["facts"] / max(c["questions"], 1)} for t, c in stats.items()}
-    print(f"{'type':26s} {'n':>4s} {'ans-in-ents':>11s} {'ans-in-facts':>12s} {'user-facts':>10s} {'facts/q':>8s}")
+                "facts_per_question": c["facts"] / max(c["questions"], 1),
+                "pronoun_fact_share": c["pronoun_facts"] / max(c["facts"], 1)} for t, c in stats.items()}
+    print(f"{'type':26s} {'n':>4s} {'ans-in-ents':>11s} {'ans-in-facts':>12s} {'user-facts':>10s} {'facts/q':>8s} {'pron-args':>9s}")
     for t, r in sorted(rows.items(), key=lambda x: (x[0] == "ALL", x[0])):
         print(f"{t:26s} {r['questions']:4d} {r['answer_in_entities']:11.3f} {r['answer_in_facts']:12.3f} "
-              f"{r['facts_about_user']:10.3f} {r['facts_per_question']:8.1f}")
+              f"{r['facts_about_user']:10.3f} {r['facts_per_question']:8.1f} {r['pronoun_fact_share']:9.3f}")
     print("most used relations:", rel_use.most_common(12))
     print("\n".join(examples[:15]))
     out = RUNS_DIR / "memory-probe" / time.strftime("%Y%m%d-%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
-    (out / "results.json").write_text(json.dumps({"run": args.run, "dataset": args.dataset,
+    (out / "results.json").write_text(json.dumps({"run": args.release or args.run, "dataset": args.dataset,
                                                   "rows": rows,
                                                   "relations": dict(rel_use), "examples": examples},
                                                  indent=1))
