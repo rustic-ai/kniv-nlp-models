@@ -117,3 +117,6 @@ data/locomo/
 data/longmemeval/
 data/wikidata/
 release/
+
+# digest caches written next to hashed source files
+v6/**/*.py.sha1
