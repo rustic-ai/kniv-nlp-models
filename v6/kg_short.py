@@ -68,6 +68,7 @@ BASE_ITEMS, BASE_VERSION = ITEMS, SHORT_VERSION
 # deployment default, as in the pilots) and the concurrency cap. The effort
 # changes the answers, so it is part of the cache version.
 TEACHER_EFFORT: str | None = None
+SPLIT = "train"
 CONCURRENCY: int | None = None
 
 
@@ -102,6 +103,14 @@ def set_round(n: int) -> None:
     BASE_ITEMS, BASE_VERSION = ITEMS, SHORT_VERSION
     if n == 3:
         BASE_ITEMS, BASE_VERSION = DATA_DIR / "v6-corpus" / "kg_short_items_r2.json", "s2"
+    if n == 4:
+        # the full run: round-2 schemas and prompt, several slices per window;
+        # items and ranks per corpus split (dev texts calibrate, never train)
+        global RANK
+        SHORT_VERSION = "s4"
+        ITEMS = DATA_DIR / "v6-corpus" / f"kg_short_items_r4_{SPLIT}.json"
+        RANK = DATA_DIR / "v6-corpus" / f"kg_short_rank_r4_{SPLIT}.json"
+        BASE_ITEMS, BASE_VERSION = ITEMS, SHORT_VERSION
 
 # Relations whose tail is usually a value or one item of a list.
 VALUE_RE = re.compile(r"\b(price|prices|monetary|costs?|count|value|revenue|amount|duration|percent|"
@@ -274,8 +283,31 @@ class ShortSampler:
         return chosen + catch + b.always
 
 
+def _slices(r: dict) -> list[tuple[int, int]]:
+    """Candidate (first sentence, length) slices of one window. Rounds 1-3:
+    one random 1-3 sentence slice. Round 4: the whole window cut into
+    consecutive, non-overlapping 1-3 sentence pieces, so a domain with few
+    windows (encyclopedic: 1.6k train windows, 28k sentences) can still fill
+    its share."""
+    n = len(r["sentence_spans"])
+    if not n:
+        return []
+    if ROUND < 4:
+        rng = _rng(f"slice:{r['window_id']}")
+        L = int(rng.integers(1, min(3, n) + 1))
+        return [(int(rng.integers(0, n - L + 1)), L)]
+    rng, out, a = _rng(f"slices4:{r['window_id']}"), [], 0
+    while a < n:
+        L = min(int(rng.integers(1, 4)), n - a)
+        out.append((a, L))
+        a += L
+    return out
+
+
 def short_items(n_texts: int, sampler: ShortSampler, split: str = "train") -> list[KGItem]:
-    """``n_texts`` short texts, spread evenly over the corpus domains."""
+    """``n_texts`` short texts, spread evenly over the corpus domains. Slices
+    are taken one per window first, then second slices, and so on, so a
+    domain uses as many different windows as it can."""
     from .train.data import load_rows
     rows = load_rows(split, columns=["window_id", "domain", "tokens", "sentence_spans"])
     speakers = json.loads(SPEAKERS.read_text()) if SPEAKERS.exists() else {}
@@ -286,15 +318,16 @@ def short_items(n_texts: int, sampler: ShortSampler, split: str = "train") -> li
     items = []
     for d in sorted(by):
         got = 0
-        for r in sorted(by[d], key=lambda r: hashlib.sha1(f"kgshort:{r['window_id']}".encode()).hexdigest()):
+        cand = []
+        for r in by[d]:
+            h = hashlib.sha1(f"kgshort:{r['window_id']}".encode()).hexdigest()
+            for j, (a, L) in enumerate(sorted(_slices(r), key=lambda x: _rng(f"o:{r['window_id']}:{x}").random())):
+                cand.append((j, h, a, L, r))
+        cand.sort(key=lambda x: (x[0], x[1], x[2]))
+        for _, _, a, L, r in cand:
             if got >= per:
                 break
             sp_all = [list(x) for x in r["sentence_spans"]]
-            if not sp_all:
-                continue
-            rng = _rng(f"slice:{r['window_id']}")
-            L = int(rng.integers(1, min(3, len(sp_all)) + 1))
-            a = int(rng.integers(0, len(sp_all) - L + 1))
             s0, e0 = sp_all[a][0], sp_all[a + L - 1][1]
             if e0 - s0 > MAX_WORDS or any(e - s < MIN_SENT_WORDS for s, e in sp_all[a:a + L]):
                 continue
@@ -445,7 +478,7 @@ def heldout_grams() -> tuple[set[int], str]:
 
 # ── commands ─────────────────────────────────────────────────────────
 def dry(n: int, sampler: ShortSampler) -> int:
-    items = short_items(n, sampler)
+    items = short_items(n, sampler, SPLIT)
     ITEMS.write_text(json.dumps([it.__dict__ for it in items]))
     c = Counter(it.domain for it in items)
     modes = Counter(it.layers["mode"] for it in items)
@@ -480,25 +513,57 @@ def dry(n: int, sampler: ShortSampler) -> int:
     return 0
 
 
-def rank(n: int, release: str) -> int:
+def rank(n: int, release: str, shard: tuple[int, int] = (0, 1), threads: int = 0) -> int:
     """Round 2, local and free: v7 ranks the whole relation pool against each
-    text (its best margin over the text's entity pairs), for ``n`` texts."""
+    text (its best margin over the text's entity pairs), for ``n`` texts.
+
+    Ranking needs no fact attributes, so the attribute graph is skipped, and
+    each pair keeps its 40 best relations: 8x faster than a plain ``window``
+    call (1.18 -> 0.14 s per text on xlarge-u INT8), with the same top-20 on
+    every one of 30 test texts. ``shard`` = (i, n): this process ranks every
+    n-th text from i, into its own file; ``rank-merge`` joins them.
+    ``threads``: onnxruntime threads per process (4 processes x 3 threads ran
+    1.75x one default process on a 12-core M2 Max).
+
+    Which model ranks: the medium student (ettin-68m) put the teacher's
+    relation in its top 20 for 48% of round-1 facts against xlarge-u's 52%
+    (254 relations, within noise), at 3.5x the speed, so the full run ranks
+    with it."""
     import sys
     import time
     sys.path.insert(0, release)
+    if threads:
+        import onnxruntime as ort
+        _session = ort.InferenceSession
+
+        def session(path, providers=None, **kw):
+            so = ort.SessionOptions()
+            so.intra_op_num_threads, so.inter_op_num_threads = threads, 1
+            return _session(path, sess_options=so, providers=providers)
+        ort.InferenceSession = session
     from kniv_v7 import Kniv
     base = ShortSampler(SchemaSampler(load_bank()))      # round-1 schemas only pick the texts
-    texts = short_items(n, base)
+    texts = short_items(n, base, SPLIT)
     pool = [{"name": r["name"], "description": r["description"]} for r in base.b.relations]
     value_names = {r["name"] for r in base.b.relations if is_value_relation(r)}
     k = Kniv(release, int8=True)
     k.zs_offset -= 30.0                                  # every pair's top relations reach the output
+    graph = k.run
+
+    def run(name, **x):
+        if name == "attr":                               # attributes are not needed to rank
+            m = len(x["pair"])
+            return [np.zeros((m, 2)), np.zeros((m, 6)), np.zeros((m, 2)), np.zeros((m, 2))]
+        return graph(name, **x)
+    k.run = run
+    i0, n_sh = shard
+    texts = texts[i0::n_sh]
     out, t0 = {}, time.time()
     for i, it in enumerate(texts):
         key = it.id.rsplit(":", 1)[0]
         w = {"tokens": it.tokens, "sentence_spans": it.sentence_spans,
              "sentence_speakers": it.speakers or []}
-        o = k.window(w, pool, base.types_for(key), False, len(pool))
+        o = k.window(w, pool, base.types_for(key), False, 40)
         best: dict[str, float] = {}
         for f in o["facts"]:
             best[f["relation"]] = max(best.get(f["relation"], -1e9), f["margin"])
@@ -506,6 +571,16 @@ def rank(n: int, release: str) -> int:
         out[key] = {"top": order[:40], "value": [r for r in order if r in value_names]}
         if i % 50 == 0:
             print(f"{i}/{len(texts)} {time.time() - t0:.0f}s", flush=True)
+    dst = RANK if n_sh == 1 else RANK.with_suffix(f".shard{i0}of{n_sh}.json")
+    dst.write_text(json.dumps(out))
+    print(f"{len(out)} texts ranked -> {dst}")
+    return 0
+
+
+def rank_merge(n_sh: int) -> int:
+    out = {}
+    for i in range(n_sh):
+        out.update(json.loads(RANK.with_suffix(f".shard{i}of{n_sh}.json").read_text()))
     RANK.write_text(json.dumps(out))
     print(f"{len(out)} texts ranked -> {RANK}")
     return 0
@@ -1047,12 +1122,15 @@ def effort_compare(annotator: str, judge: str, efforts: list[str], n_syn: int = 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=["rank", "dry", "pilot", "variants", "check", "synth", "effort"])
+    ap.add_argument("cmd", choices=["rank", "rank-merge", "dry", "pilot", "variants", "check", "synth", "effort"])
     ap.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh"],
                     help="the teacher's reasoning effort (default: the deployment's, as in the pilots)")
     ap.add_argument("--efforts", default="default,low,medium,high,xhigh", help="effort: levels to compare")
     ap.add_argument("--concurrency", type=int, default=None, help="override the annotators' concurrency cap")
-    ap.add_argument("--round", type=int, default=1, choices=[1, 2, 3])
+    ap.add_argument("--shard", default="0/1", help="rank: i/n, this process ranks every n-th text from i")
+    ap.add_argument("--threads", type=int, default=0, help="rank: onnxruntime threads per process")
+    ap.add_argument("--round", type=int, default=1, choices=[1, 2, 3, 4])
+    ap.add_argument("--split", default="train", choices=["train", "dev"], help="dry / rank: corpus split")
     ap.add_argument("--release", default="release/ultrabert-380m", help="rank: the v7 model that ranks")
     ap.add_argument("--texts", type=int, default=500)
     ap.add_argument("--bases", type=int, default=100)
@@ -1061,8 +1139,9 @@ def main() -> int:
     ap.add_argument("--recall-texts", type=int, default=100, help="check: texts the second annotator labels")
     ap.add_argument("--judge-facts", type=int, default=300, help="check: teacher facts judged")
     args = ap.parse_args()
+    global TEACHER_EFFORT, CONCURRENCY, SPLIT
+    SPLIT = args.split
     set_round(args.round)
-    global TEACHER_EFFORT, CONCURRENCY
     TEACHER_EFFORT, CONCURRENCY = args.effort, args.concurrency
     if args.cmd == "effort":
         return effort_compare(args.annotator, args.judge, args.efforts.split(","))
@@ -1072,7 +1151,10 @@ def main() -> int:
         OUT.mkdir(parents=True, exist_ok=True)
         return synth(args.annotator, args.texts)
     if args.cmd == "rank":
-        return rank(args.texts, args.release)
+        i, n = (int(x) for x in args.shard.split("/"))
+        return rank(args.texts, args.release, (i, n), args.threads)
+    if args.cmd == "rank-merge":
+        return rank_merge(int(args.shard.split("/")[1]))
     rank_map = json.loads(RANK.read_text()) if ROUND >= 2 else None
     sampler = ShortSampler(SchemaSampler(load_bank()), rank_map)
     if args.cmd == "dry":
