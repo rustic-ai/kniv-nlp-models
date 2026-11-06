@@ -361,6 +361,20 @@ KGVAR_SCHEMA = _envelope("fact_rewrites", {
     ),
 })
 
+KGVARJUDGE_SCHEMA = _envelope("rewrite_verdicts", {
+    "verdicts": _array_of(
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": KGVAR_KINDS},
+                "ok": {"type": "boolean", "description": "true if the rewrite expresses the fact with that status"},
+            },
+            "required": ["kind", "ok"], "additionalProperties": False,
+        },
+        "One verdict per rewrite.",
+    ),
+})
+
 
 SCHEMAS = {
     # The real kg schema is built per window (annotate/kg.py); this default
@@ -369,6 +383,7 @@ SCHEMAS = {
     "bankmerge": BANKMERGE_SCHEMA,
     "kgjudge": KGJUDGE_SCHEMA,
     "kgvar": KGVAR_SCHEMA,
+    "kgvarjudge": KGVARJUDGE_SCHEMA,
     "discover": DISCOVER_SCHEMA,
     "cls": CLS_SCHEMA,
     "sentiment": SENTIMENT_SCHEMA,
@@ -390,7 +405,7 @@ PAYLOAD_KEY = {
     "dep": "arcs", "srl": "tags", "rel": "triples",
     "cls": "labels", "sentiment": "sentiment", "keywords": "keywords",
     "discover": "relations", "bankmerge": "relations", "kg": "knowledge", "kgjudge": "verdicts",
-    "kgvar": "variants",
+    "kgvar": "variants", "kgvarjudge": "verdicts",
 }
 
 

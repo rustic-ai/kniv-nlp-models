@@ -48,15 +48,32 @@ from .kg_teacher import CACHE, SPEAKERS, SchemaSampler, _rng, participants_of
 from .label_bank import load as load_bank
 from .prompts import SYSTEM, kg_user_message
 
+# Round 1 (the first pilot) and round 2 (v7-ranked schemas, the negation rule,
+# filtered bases, judged rewrites) keep their own items, cache and run logs.
+ROUND = 1
 SHORT_VERSION = "s1"
 OUT = RUNS_DIR / "kg-short"
 ITEMS = DATA_DIR / "v6-corpus" / "kg_short_items.json"
+RANK = DATA_DIR / "v6-corpus" / "kg_short_rank.json"
+RANK_TOP = 20
+
+
+def set_round(n: int) -> None:
+    global ROUND, SHORT_VERSION, OUT, ITEMS
+    ROUND = n
+    if n == 2:
+        SHORT_VERSION = "s2"
+        OUT = RUNS_DIR / "kg-short-r2"
+        ITEMS = DATA_DIR / "v6-corpus" / "kg_short_items_r2.json"
 
 # Relations whose tail is usually a value or one item of a list.
 VALUE_RE = re.compile(r"\b(price|prices|monetary|costs?|count|value|revenue|amount|duration|percent|"
                       r"percentage|salary|stake|budget|fee|fees|uses|skill|skills|expertise|ingredient|capacity|"
                       r"population|age|rate|valuation|funding|quantity|number)\b", re.I)
 CUE_RE = re.compile(r"\d|[$€£¥%]")
+NUM_RE = re.compile(r"\d")
+# value relations whose tail is one item of a list rather than a number
+LIST_RELATIONS = {"uses", "has expertise in", "has ingredient", "uses payment method"}
 MAX_WORDS = 120
 MIN_SENT_WORDS = 5   # drops reference lists, headings and table fragments
 
@@ -101,15 +118,22 @@ class ShortSampler:
     """3-15 relations per text, from the v7 sampler's pool and near-synonym
     conflicts; modes 'normal' (0.5), 'value' (0.3) and 'empty' (0.2)."""
 
-    def __init__(self, base: SchemaSampler):
+    def __init__(self, base: SchemaSampler, rank: dict | None = None):
         self.b = base
         self.value = np.array([is_value_relation(r) for r in base.relations], dtype=float)
+        self.listy = np.array([r["name"] in LIST_RELATIONS for r in base.relations], dtype=float)
+        self.numeric = self.value * (1 - self.listy)
+        self.index = {r["name"]: i for i, r in enumerate(base.relations)}
+        # round 2: per text, the pool relations v7 ranks highest for it (best first)
+        self.rank = rank
 
     def mode(self, key: str) -> str:
         x = _rng(f"smode:{key}").random()
         return "value" if x < 0.3 else ("empty" if x < 0.5 else "normal")
 
-    def relations_for(self, key: str, domain: str) -> tuple[list[int], str]:
+    def relations_for(self, key: str, domain: str, has_number: bool = False) -> tuple[list[int], str]:
+        if self.rank is not None:
+            return self.ranked_for(key, domain, has_number)
         b, rng, mode = self.b, _rng(f"srel:{key}"), self.mode(key)
         n = int(rng.integers(3, 16))
         pick: list[int] = []
@@ -140,6 +164,49 @@ class ShortSampler:
                     neigh[j] = 1.0
             draw(neigh + 1e-9, round(n * 0.2))
             draw(np.ones(len(b.relations)), n - len(pick))
+        return sorted(pick), mode
+
+    def ranked_for(self, key: str, domain: str, has_number: bool) -> tuple[list[int], str]:
+        """Round 2. 'normal': 40% from v7's top 20 for this text, 20% domain
+        prior, 20% neighbours of the picks (hard negatives), the rest random.
+        'value': 40% numeric value relations if the text has a number, else
+        list relations; 20% v7's top 20; 20% neighbours; the rest random.
+        'empty': as round 1."""
+        b, rng, mode = self.b, _rng(f"srel2:{key}"), self.mode(key)
+        n = int(rng.integers(3, 16))
+        pick: list[int] = []
+
+        def draw(weights, k):
+            for _ in range(k):
+                w = np.array(weights, dtype=float)
+                for i in pick:
+                    w[i] = 0
+                    for j in b.conflicts[i]:
+                        w[j] = 0
+                if w.sum() <= 0:
+                    return
+                pick.append(int(rng.choice(len(w), p=w / w.sum())))
+
+        prior = b.prior(domain)
+        if mode == "empty":
+            draw((prior <= np.median(prior)).astype(float), n)
+            return sorted(pick), mode
+        top = np.zeros(len(b.relations))
+        for name in (self.rank.get(key) or [])[:RANK_TOP]:
+            if name in self.index:
+                top[self.index[name]] = 1.0
+        if mode == "value":
+            draw((self.numeric if has_number else self.listy) + 1e-9, round(n * 0.4))
+            draw(top + 1e-9, round(n * 0.2))
+        else:
+            draw(top + 1e-9, round(n * 0.4))
+            draw(prior, round(n * 0.2))
+        neigh = np.zeros(len(b.relations))
+        for i in list(pick):
+            for j in b.by_cat[b.relations[i]["category"]]:
+                neigh[j] = 1.0
+        draw(neigh + 1e-9, round(n * 0.2))
+        draw(np.ones(len(b.relations)), n - len(pick))
         return sorted(pick), mode
 
     def types_for(self, key: str) -> list[dict]:
@@ -192,7 +259,9 @@ def short_items(n_texts: int, sampler: ShortSampler, split: str = "train") -> li
             if cues(tokens, spans) < need:
                 continue
             key = f"{r['window_id']}#{a}-{a + L}"
-            rel_ids, mode = sampler.relations_for(key, d)
+            if sampler.rank is not None and key not in sampler.rank:
+                continue                      # round 2: only texts v7 has ranked
+            rel_ids, mode = sampler.relations_for(key, d, any(NUM_RE.search(t) for t in tokens))
             types = sampler.types_for(key)
             rels = [sampler.b.relations[i] for i in rel_ids]
             digest = hashlib.sha1(json.dumps([[x["name"] for x in rels], [t["name"] for t in types]]
@@ -216,6 +285,24 @@ SYSTEM["kgs"] = SYSTEM["kg"] + (
     "- Each item of a list is its own entity and its own fact: 'skilled in Python and dbt' "
     "gives one fact for Python and one for dbt.\n"
     "- If no listed relation holds, return no facts. Never stretch a relation to fit the text."
+)
+
+SYSTEM["kgs2"] = SYSTEM["kgs"] + (
+    "\n- A negated statement is still a fact to list, with polarity negative: 'Kaili was not "
+    "released from detention', 'Sarah Kim was not charged', 'I don't eat meat'. Do not leave it "
+    "out because it does not hold.\n"
+    "- Planned, wished, asked, conditional and reported statements are facts to list too, with "
+    "their modality; never drop a fact because it is not asserted."
+)
+
+SYSTEM["kgvarjudge"] = (
+    "You check rewrites of one sentence. Each rewrite should express the same fact (the same "
+    "head, relation and tail) with a different status: negated (the text says it does not "
+    "hold), reported (someone else is said to claim it), planned, desired (someone wants it), "
+    "questioned (it is asked about) or hypothetical (conditional or possible). A rewrite is ok "
+    "if it reads naturally, keeps the head and tail mentions, and a careful reader would see "
+    "that exact fact with that exact status. It is not ok if the status attaches to a "
+    "different part of the sentence, the fact itself changed, or the sentence is unnatural."
 )
 
 SYSTEM["kgvar"] = (
@@ -251,10 +338,16 @@ class ShortKG(KGAnnotator):
 
     def build_messages(self, layer: str, item) -> list[dict]:
         sents = [" ".join(item.tokens[s:e]) for s, e in item.sentence_spans]
-        return [{"role": "system", "content": SYSTEM["kgs"]},
+        return [{"role": "system", "content": SYSTEM["kgs2" if ROUND == 2 else "kgs"]},
                 {"role": "user", "content": kg_user_message(
                     sents, item.speakers, item.participants, item.types, item.relations)
                  + self._json_hint(layer)}]
+
+
+class RewriteJudge(KGAnnotator):
+    def build_messages(self, layer: str, item) -> list[dict]:
+        return [{"role": "system", "content": SYSTEM["kgvarjudge"]},
+                {"role": "user", "content": item.layers["judge_prompt"] + self._json_hint(layer)}]
 
 
 class Rewriter(KGAnnotator):
@@ -265,7 +358,7 @@ class Rewriter(KGAnnotator):
 
 def render(item: KGItem) -> str:
     sents = [" ".join(item.tokens[s:e]) for s, e in item.sentence_spans]
-    return ("=== SYSTEM ===\n" + SYSTEM["kgs"] + "\n=== USER ===\n"
+    return ("=== SYSTEM ===\n" + SYSTEM["kgs2" if ROUND == 2 else "kgs"] + "\n=== USER ===\n"
             + kg_user_message(sents, item.speakers, item.participants, item.types, item.relations))
 
 
@@ -317,6 +410,35 @@ def dry(n: int, sampler: ShortSampler) -> int:
     out.write_text("\n\n".join(f"##### {it.id} [{it.domain}, {it.layers['mode']}]\n{render(it)}"
                                for it in pick))
     print(f"5 rendered prompts -> {out}")
+    return 0
+
+
+def rank(n: int, release: str) -> int:
+    """Round 2, local and free: v7 ranks the whole relation pool against each
+    text (its best margin over the text's entity pairs), for ``n`` texts."""
+    import sys
+    import time
+    sys.path.insert(0, release)
+    from kniv_v7 import Kniv
+    base = ShortSampler(SchemaSampler(load_bank()))      # round-1 schemas only pick the texts
+    texts = short_items(n, base)
+    pool = [{"name": r["name"], "description": r["description"]} for r in base.b.relations]
+    k = Kniv(release, int8=True)
+    k.zs_offset -= 30.0                                  # every pair's top relations reach the output
+    out, t0 = {}, time.time()
+    for i, it in enumerate(texts):
+        key = it.id.rsplit(":", 1)[0]
+        w = {"tokens": it.tokens, "sentence_spans": it.sentence_spans,
+             "sentence_speakers": it.speakers or []}
+        o = k.window(w, pool, base.types_for(key), False, len(pool))
+        best: dict[str, float] = {}
+        for f in o["facts"]:
+            best[f["relation"]] = max(best.get(f["relation"], -1e9), f["margin"])
+        out[key] = sorted(best, key=lambda r: -best[r])[:40]
+        if i % 50 == 0:
+            print(f"{i}/{len(texts)} {time.time() - t0:.0f}s", flush=True)
+    RANK.write_text(json.dumps(out))
+    print(f"{len(out)} texts ranked -> {RANK}")
     return 0
 
 
@@ -391,6 +513,18 @@ def _contains(sentence: str, mention: str) -> bool:
     return bool(m) and any(s[i:i + len(m)] == m for i in range(len(s) - len(m) + 1))
 
 
+DETERMINERS = {"the", "a", "an", "this", "that", "these", "those", "its", "their", "his", "her",
+               "our", "my", "your", "each", "every", "some", "such"}
+
+
+def named(mention: str) -> bool:
+    """A name or a value, not a description: a capitalised word that is not a
+    sentence-initial determiner, or a number."""
+    w = mention.split()
+    return any(c.isdigit() for c in mention) or any(
+        t[:1].isupper() and not (i == 0 and t.lower() in DETERMINERS) for i, t in enumerate(w))
+
+
 def bases(items, res, n: int) -> list[tuple[KGItem, dict, str, str, int]]:
     """Up to one plain fact per text: positive, asserted, the author's, both
     arguments named (not participants) in one sentence. Spread over domains."""
@@ -409,6 +543,9 @@ def bases(items, res, n: int) -> list[tuple[KGItem, dict, str, str, int]]:
             for j, (s, e) in enumerate(it.sentence_spans):
                 h = [x for x in hs if s <= x[0] < e]
                 t = [x for x in ts if s <= x[0] < e]
+                if ROUND == 2 and (e - s >= 40 or not h or not t
+                                   or not named(_text(it, h)) or not named(_text(it, t))):
+                    continue
                 if h and t:
                     by[it.domain].append((it, f, _text(it, h), _text(it, t), j))
                     break
@@ -419,7 +556,7 @@ def bases(items, res, n: int) -> list[tuple[KGItem, dict, str, str, int]]:
     return [x for d in sorted(by) for x in by[d][:per]][:n]
 
 
-def variants(annotator: str, n: int) -> int:
+def variants(annotator: str, n: int, judge: str = "astra") -> int:
     items, res = part_a(annotator)
     picked = bases(items, res, n)
     spec = load_annotators([annotator])[annotator]
@@ -436,6 +573,25 @@ def variants(annotator: str, n: int) -> int:
         reqs.append(q)
     rw = asyncio.run(_run(Rewriter(spec, cache), "kgvar", reqs, f"rewrite-{annotator}"))
     from .windows import tokenize
+    verdict = {}
+    if ROUND == 2:
+        # one judge call per base, over all its rewrites
+        jspec = load_annotators([judge])[judge]
+        jq = []
+        for q in reqs:
+            r = rw.get(q.id)
+            if r is None or not r.ok:
+                continue
+            sentence, head, rel, tail = q.layers["base"]
+            lines = [f"Original: {sentence}", f"Fact: [{head}] {rel} [{tail}]", "", "Rewrites:"]
+            lines += [f"- {kind}: {r.payload[kind]['sentence']}" for kind in VAR_KINDS if kind in r.payload]
+            j = KGItem(**{**q.__dict__}); j.id = f"{q.id}:vjudge"
+            j.layers = {"judge_prompt": "\n".join(lines), "base": q.id}
+            jq.append(j)
+        jr = asyncio.run(_run(RewriteJudge(jspec, cache), "kgvarjudge", jq, f"rewrite-judge-{judge}"))
+        for j in jq:
+            r = jr.get(j.id)
+            verdict[j.layers["base"]] = r.payload if r is not None and r.ok else {}
     out, var_items, bad = [], [], Counter()
     for q in reqs:
         r = rw.get(q.id)
@@ -450,6 +606,9 @@ def variants(annotator: str, n: int) -> int:
                 continue
             if not (_contains(v["sentence"], head) and _contains(v["sentence"], tail)):
                 bad[f"{kind}: mention changed"] += 1
+                continue
+            if ROUND == 2 and not verdict.get(q.id, {}).get(kind, False):
+                bad[f"{kind}: judged not ok"] += 1
                 continue
             toks = tokenize(v["sentence"])
             vi = KGItem(id=f"{q.id}:{kind}", tokens=toks, sentence_spans=[[0, len(toks)]], speakers=None,
@@ -560,20 +719,28 @@ def check(annotator: str, judge: str, n_recall: int = 100, n_judge_facts: int = 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=["dry", "pilot", "variants", "check"])
+    ap.add_argument("cmd", choices=["rank", "dry", "pilot", "variants", "check"])
+    ap.add_argument("--round", type=int, default=1, choices=[1, 2])
+    ap.add_argument("--release", default="release/ultrabert-380m", help="rank: the v7 model that ranks")
     ap.add_argument("--texts", type=int, default=500)
     ap.add_argument("--bases", type=int, default=100)
     ap.add_argument("--annotator", default="sol61")
     ap.add_argument("--judge", default="astra")
+    ap.add_argument("--recall-texts", type=int, default=100, help="check: texts the second annotator labels")
+    ap.add_argument("--judge-facts", type=int, default=300, help="check: teacher facts judged")
     args = ap.parse_args()
-    sampler = ShortSampler(SchemaSampler(load_bank()))
+    set_round(args.round)
+    if args.cmd == "rank":
+        return rank(args.texts, args.release)
+    rank_map = json.loads(RANK.read_text()) if ROUND == 2 else None
+    sampler = ShortSampler(SchemaSampler(load_bank()), rank_map)
     if args.cmd == "dry":
         return dry(args.texts, sampler)
     if args.cmd == "pilot":
         return pilot(args.annotator)
     if args.cmd == "variants":
-        return variants(args.annotator, args.bases)
-    return check(args.annotator, args.judge)
+        return variants(args.annotator, args.bases, args.judge)
+    return check(args.annotator, args.judge, args.recall_texts, args.judge_facts)
 
 
 if __name__ == "__main__":

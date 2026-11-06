@@ -160,6 +160,12 @@ def validate_payload(layer: str, payload: object, n: int,
                                            "source": str(v.get("source") or "").strip()})
         return out, None, None
 
+    if layer == "kgvarjudge":
+        if not isinstance(payload, list):
+            return None, "verdicts is not a list", "parse"
+        return {v["kind"]: bool(v["ok"]) for v in payload
+                if isinstance(v, dict) and "kind" in v and "ok" in v}, None, None
+
     if layer == "bankmerge":
         if not isinstance(payload, list) or not payload:
             return None, "relations is empty or not a list", "parse"
