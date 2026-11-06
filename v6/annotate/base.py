@@ -46,6 +46,7 @@ class AnnotationResult:
     well_formed: bool | None = None    # dep only: single root + acyclic
     tokens_in: int = 0
     tokens_out: int = 0
+    tokens_reasoning: int = 0    # part of tokens_out spent on hidden reasoning
     latency_ms: float = 0.0      # time in the API call itself
     queue_ms: float = 0.0        # time waiting on the concurrency semaphore
     cached: bool = False

@@ -108,6 +108,10 @@ class LLMAnnotator:
             messages = messages[:-1] + [
                 {**messages[-1], "content": messages[-1]["content"] + hint}]
         kwargs: dict = {"model": self.spec.model, "messages": messages}
+        # Endpoint-specific request parameters (e.g. reasoning_effort), from the
+        # registry or set per run; part of the cache version wherever they change
+        # the answers (see kg_short).
+        kwargs.update({k: v for k, v in (self.spec.extra or {}).items() if k not in self._unsupported})
         if "temperature" not in self._unsupported:
             kwargs["temperature"] = self.spec.temperature
         if "seed" not in self._unsupported and self.spec.seed is not None:
@@ -178,7 +182,7 @@ class LLMAnnotator:
     def _is_timeout(exc: Exception) -> bool:
         return any(t in str(exc).lower() for t in ("timeout", "timed out"))
 
-    async def _call(self, layer: str, messages: list[dict]) -> tuple[str, int, int]:
+    async def _call(self, layer: str, messages: list[dict]) -> tuple[str, int, int, int]:
         last: Exception | None = None
         timeouts = 0
         for attempt in range(self.max_retries):
@@ -199,10 +203,12 @@ class LLMAnnotator:
                         f"empty content (finish_reason="
                         f"{getattr(choice, 'finish_reason', '?')})")
                 del usage_src
+                det = getattr(usage, "completion_tokens_details", None)
                 return (
                     content,
                     getattr(usage, "prompt_tokens", 0) or 0,
                     getattr(usage, "completion_tokens", 0) or 0,
+                    (getattr(det, "reasoning_tokens", 0) or 0) if det else 0,
                 )
             except Exception as exc:                       # noqa: BLE001
                 last = exc
@@ -265,7 +271,7 @@ class LLMAnnotator:
         # that queue wait into "latency" and make a fast endpoint look slow
         # purely because it was scheduled late.
         t_queued = time.time()
-        tok_in = tok_out = 0
+        tok_in = tok_out = tok_reason = 0
         repairs = 0
         payload = None
         err: str | None = "no attempt"
@@ -275,7 +281,7 @@ class LLMAnnotator:
             t0 = time.time()
             for attempt in range(self.max_repairs + 1):
                 try:
-                    content, ti, to = await self._call(layer, messages)
+                    content, ti, to, tr = await self._call(layer, messages)
                 except Exception as exc:                    # noqa: BLE001
                     return AnnotationResult(
                         item_id=item.id, layer=layer, annotator=self.spec.name,
@@ -288,6 +294,7 @@ class LLMAnnotator:
                     )
                 tok_in += ti
                 tok_out += to
+                tok_reason += tr
 
                 try:
                     obj = json.loads(content)
@@ -318,7 +325,7 @@ class LLMAnnotator:
             repairs=repairs,
             well_formed=(tree_is_wellformed(payload["heads"])
                          if layer == "dep" and payload else None),
-            tokens_in=tok_in, tokens_out=tok_out,
+            tokens_in=tok_in, tokens_out=tok_out, tokens_reasoning=tok_reason,
             latency_ms=(time.time() - t0) * 1000,
             queue_ms=(t0 - t_queued) * 1000,
         )

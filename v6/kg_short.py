@@ -64,6 +64,34 @@ RANK_TOP = 20
 BASE_ITEMS, BASE_VERSION = ITEMS, SHORT_VERSION
 
 
+# Per-run request settings: the teacher's reasoning effort (None = the
+# deployment default, as in the pilots) and the concurrency cap. The effort
+# changes the answers, so it is part of the cache version.
+TEACHER_EFFORT: str | None = None
+CONCURRENCY: int | None = None
+
+
+def _spec(name: str, effort: str | None):
+    import dataclasses
+    spec = load_annotators([name])[name]
+    extra = dict(spec.extra or {})
+    if effort:
+        extra["reasoning_effort"] = effort
+    return dataclasses.replace(spec, extra=extra, max_concurrency=CONCURRENCY or spec.max_concurrency)
+
+
+def teacher_spec(name: str):
+    return _spec(name, TEACHER_EFFORT)
+
+
+def judge_spec(name: str):
+    return _spec(name, None)
+
+
+def store(version: str) -> CacheStore:
+    return CacheStore(CACHE, f"{version}-{TEACHER_EFFORT}" if TEACHER_EFFORT else version)
+
+
 def set_round(n: int) -> None:
     global ROUND, SHORT_VERSION, OUT, ITEMS, BASE_ITEMS, BASE_VERSION
     ROUND = n
@@ -501,8 +529,8 @@ async def _run(ann, layer: str, items: list, tag: str) -> dict:
 
 def pilot(annotator: str) -> int:
     items = load_items()
-    spec = load_annotators([annotator])[annotator]
-    res = asyncio.run(_run(ShortKG(spec, CacheStore(CACHE, SHORT_VERSION)), "kg", items, f"pilot-{annotator}"))
+    spec = teacher_spec(annotator)
+    res = asyncio.run(_run(ShortKG(spec, store(SHORT_VERSION)), "kg", items, f"pilot-{annotator}"))
     agg = defaultdict(Counter)
     for it in items:
         r = res.get(it.id)
@@ -537,10 +565,10 @@ def part_a(annotator: str, bases_of: bool = False) -> tuple[list[KGItem], dict]:
     global ROUND
     path, version = (BASE_ITEMS, BASE_VERSION) if bases_of else (ITEMS, SHORT_VERSION)
     items = [KGItem(**d) for d in json.loads(path.read_text())]
-    spec = load_annotators([annotator])[annotator]
+    spec = teacher_spec(annotator)
     keep, ROUND = ROUND, (2 if bases_of and ROUND == 3 else ROUND)   # round 2's prompt for its cache
     try:
-        res = asyncio.run(_run(ShortKG(spec, CacheStore(CACHE, version)), "kg", items, f"pilot-{annotator}"))
+        res = asyncio.run(_run(ShortKG(spec, store(version)), "kg", items, f"pilot-{annotator}"))
     finally:
         ROUND = keep
     return items, res
@@ -609,8 +637,8 @@ def bases(items, res, n: int) -> list[tuple[KGItem, dict, str, str, int]]:
 def variants(annotator: str, n: int, judge: str = "astra") -> int:
     items, res = part_a(annotator, bases_of=True)
     picked = bases(items, res, n)
-    spec = load_annotators([annotator])[annotator]
-    cache = CacheStore(CACHE, SHORT_VERSION)
+    spec = teacher_spec(annotator)
+    cache = store(SHORT_VERSION)
     reqs = []
     for it, f, head, tail, j in picked:
         s, e = it.sentence_spans[j]
@@ -626,7 +654,7 @@ def variants(annotator: str, n: int, judge: str = "astra") -> int:
     verdict = {}
     if ROUND >= 2:
         # one judge call per base, over all its rewrites
-        jspec = load_annotators([judge])[judge]
+        jspec = judge_spec(judge)
         jq = []
         for q in reqs:
             r = rw.get(q.id)
@@ -721,8 +749,8 @@ def check(annotator: str, judge: str, n_recall: int = 100, n_judge_facts: int = 
     so 'missed' means a supported fact the teacher left out."""
     from .prompt_tune import Judge, _match, judge_prompt
     items, res = part_a(annotator)
-    cache = CacheStore(CACHE, SHORT_VERSION)
-    jspec = load_annotators([judge])[judge]
+    cache = store(SHORT_VERSION)
+    jspec = judge_spec(judge)
     # second annotator on a fixed, domain-balanced sample
     by = defaultdict(list)
     for it in items:
@@ -855,8 +883,8 @@ def synth(annotator: str, n: int) -> int:
     global ROUND
     base = SchemaSampler(load_bank())
     by = {r["name"]: r for r in base.relations}
-    spec = load_annotators([annotator])[annotator]
-    cache = CacheStore(CACHE, "y1")
+    spec = teacher_spec(annotator)
+    cache = store("y1")
     reqs = syn_requests(n, base)
     gen = asyncio.run(_run(Synthesizer(spec, cache), "kgsyn", reqs, f"synth-gen-{annotator}"))
     items, bad = [], Counter()
@@ -938,9 +966,92 @@ def synth(annotator: str, n: int) -> int:
     return 0
 
 
+def effort_compare(annotator: str, judge: str, efforts: list[str], n_syn: int = 40, n_nat: int = 40) -> int:
+    """The teacher at each reasoning effort on one fixed set: synthetic
+    passages (recall of the written facts, exact) and round-2 natural texts
+    (facts per text, precision judged by ``judge`` at its default effort),
+    with latency and tokens. 'default' = no effort sent (the pilots), served
+    from their caches."""
+    global TEACHER_EFFORT, ROUND
+    import statistics as st
+    from .prompt_tune import Judge, judge_prompt
+    syn_all = [KGItem(**d) for d in json.loads((RUNS_DIR / "kg-short-synth" / "synth.json").read_text())]
+    by = defaultdict(list)
+    for it in syn_all:
+        by[it.domain].append(it)
+    syn = [it for d in sorted(by) for it in by[d][:max(1, n_syn // len(by))]]
+    nat_all = [KGItem(**d) for d in json.loads((DATA_DIR / "v6-corpus" / "kg_short_items_r2.json").read_text())]
+    by = defaultdict(list)
+    for it in nat_all:
+        if it.layers["mode"] != "empty":
+            by[it.domain].append(it)
+    nat = [it for d in sorted(by) for it in by[d][:max(1, n_nat // len(by))]]
+    ROUND = 2
+    rows = []
+    for eff in efforts:
+        TEACHER_EFFORT = None if eff == "default" else eff
+        spec = teacher_spec(annotator)
+        rs = asyncio.run(_run(ShortKG(spec, store("y1")), "kg", syn, f"effort-syn-{eff}"))
+        rn = asyncio.run(_run(ShortKG(spec, store("s2")), "kg", nat, f"effort-nat-{eff}"))
+        # recall on the synthetic passages
+        gold = found = 0
+        for it in syn:
+            r = rs.get(it.id)
+            g = it.layers["gold"]
+            gold += len(g)
+            if r is None or not r.ok:
+                continue
+            p = r.payload
+            nm = lambda i: " ".join(it.tokens[slice(*p["entities"][i]["spans"][0])])
+            same = lambda x, y: bool(x) and bool(y) and (_contains(x, y) or _contains(y, x))
+            pred = [(nm(f["head"]), f["relation"], nm(f["tail"])) for f in p["facts"]]
+            found += sum(any(rel == x["relation"] and same(h, x["head"]) and same(t, x["tail"])
+                             for h, rel, t in pred) for x in g)
+        # judged precision on the natural texts
+        jitems, nfacts = [], 0
+        for it in nat:
+            r = rn.get(it.id)
+            if r is None or not r.ok or not r.payload["facts"]:
+                continue
+            j = KGItem(**{**it.__dict__}); j.id = f"{it.id}:judge"
+            j.layers = {"judge_prompt": judge_prompt(it, r.payload), "n": len(r.payload["facts"])}
+            jitems.append(j); nfacts += len(r.payload["facts"])
+        jr = asyncio.run(_run(Judge(judge_spec(judge), store("s2")), "kgjudge", jitems, f"effort-judge-{eff}"))
+        judged = sup = 0
+        for j in jitems:
+            r = jr.get(j.id)
+            if r is not None and r.ok:
+                judged += j.layers["n"]
+                sup += sum(1 for i in range(j.layers["n"]) if r.payload.get(i, False))
+        live = [r for r in list(rs.values()) + list(rn.values()) if not r.cached and r.ok]
+        lat = sorted(r.latency_ms / 1000 for r in live)
+        rows.append({
+            "effort": eff, "syn_recall": found / max(gold, 1), "facts_per_text": nfacts / len(nat),
+            "precision": sup / max(judged, 1),
+            "lat_p50": st.median(lat) if lat else None, "lat_p90": lat[int(0.9 * len(lat))] if lat else None,
+            "out_tokens": st.mean(r.tokens_out for r in live) if live else None,
+            "reasoning_tokens": st.mean(r.tokens_reasoning for r in live) if live else None,
+            "live_calls": len(live)})
+    TEACHER_EFFORT = None
+    print(f"{len(syn)} synthetic passages ({sum(len(i.layers['gold']) for i in syn)} facts), {len(nat)} natural texts")
+    print(f"{'effort':8s} {'syn recall':>10s} {'facts/text':>10s} {'precision':>9s} {'p50 s':>6s} {'p90 s':>6s} "
+          f"{'out tok':>7s} {'reasoning':>9s} {'calls':>5s}")
+    f = lambda x, fmt: (format(x, fmt) if x is not None else "cached")
+    for r in rows:
+        print(f"{r['effort']:8s} {r['syn_recall']:10.1%} {r['facts_per_text']:10.2f} {r['precision']:9.1%} "
+              f"{f(r['lat_p50'], '6.1f'):>6s} {f(r['lat_p90'], '6.1f'):>6s} {f(r['out_tokens'], '7.0f'):>7s} "
+              f"{f(r['reasoning_tokens'], '9.0f'):>9s} {r['live_calls']:5d}")
+    (RUNS_DIR / "kg-short-effort.json").write_text(json.dumps(rows, indent=1))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=["rank", "dry", "pilot", "variants", "check", "synth"])
+    ap.add_argument("cmd", choices=["rank", "dry", "pilot", "variants", "check", "synth", "effort"])
+    ap.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh"],
+                    help="the teacher's reasoning effort (default: the deployment's, as in the pilots)")
+    ap.add_argument("--efforts", default="default,low,medium,high,xhigh", help="effort: levels to compare")
+    ap.add_argument("--concurrency", type=int, default=None, help="override the annotators' concurrency cap")
     ap.add_argument("--round", type=int, default=1, choices=[1, 2, 3])
     ap.add_argument("--release", default="release/ultrabert-380m", help="rank: the v7 model that ranks")
     ap.add_argument("--texts", type=int, default=500)
@@ -951,6 +1062,10 @@ def main() -> int:
     ap.add_argument("--judge-facts", type=int, default=300, help="check: teacher facts judged")
     args = ap.parse_args()
     set_round(args.round)
+    global TEACHER_EFFORT, CONCURRENCY
+    TEACHER_EFFORT, CONCURRENCY = args.effort, args.concurrency
+    if args.cmd == "effort":
+        return effort_compare(args.annotator, args.judge, args.efforts.split(","))
     if args.cmd == "synth":
         global OUT
         OUT = RUNS_DIR / "kg-short-synth"
