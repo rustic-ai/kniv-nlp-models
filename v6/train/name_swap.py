@@ -13,6 +13,12 @@ runs when the features are built, with a fresh draw per (item, epoch):
   surname and "Ms. / Dr. Surname" in formal styles, first name in chats,
   emails and notes, the stem alone for an organisation; in informal styles
   the first mention can be the first name alone;
+* values in the facts' tails get fresh numbers in the same format (prices,
+  amounts, rates, counts, ages), dates and times (one year shift and month
+  rotation per passage), card endings and operating systems; a value that
+  repeats keeps one new value; a passage where one number is derived from
+  others ("3 at $5, $15 in total") keeps its numbers;
+* real brands ("PayPal", "PostgreSQL") are kept;
 * every teacher span is remapped to the new tokens. A span that started or
   ended inside a rewritten name is dropped (and an entity left with no span,
   with its facts); the counts are reported.
@@ -64,6 +70,22 @@ KINDS = [("Analytics", "Data", "Insights", "Intelligence"),
          ("Foods", "Kitchens", "Provisions"),
          ("Consulting", "Advisory", "Associates", "Solutions")]
 KIND_OF = {w: g for g in KINDS for w in g}
+KNOWN_FIRST = set(FEMALE) | set(MALE) | set(NEUTRAL) | set(
+    "Marta Mara Nadia Mira Lena Leena Nina Maren Tessa Nora Leona Marisa Elena Priya Maya Leila".split())
+REAL_BRANDS = set("""PostgreSQL PayPal OpenTelemetry RabbitMQ OpenSSL GitHub GitLab MySQL SQLite MongoDB
+    DynamoDB BigQuery GraphQL NoSQL OAuth JavaScript TypeScript PyTorch TensorFlow NumPy YouTube LinkedIn
+    WhatsApp FaceTime MacBook AirPods PlayStation QuickBooks WordPress SharePoint OneDrive PowerPoint
+    HubSpot NetSuite ChatGPT OpenAI DeepMind CrowdStrike FedEx DoorDash SoftBank BlackRock ExxonMobil
+    MasterCard ClickHouse CockroachDB InfluxDB OpenSearch ElasticSearch CloudFlare DigitalOcean SendGrid
+    MailChimp AutoCAD SolidWorks PowerBI LastPass BambooHR ZipRecruiter JetBlue UberEats GrubHub
+    DevOps WooCommerce BigCommerce QuickTime AirDrop CarPlay HomeKit SmartThings PagerDuty NewRelic
+    DataDog ServiceNow SuccessFactors WebEx GoPro TikTok SnapChat InDesign IntelliJ PhpStorm VMware
+    OpenShift CentOS AlmaLinux FreeBSD OpenBSD MariaDB TimescaleDB DuckDB ScyllaDB OpenAPI""".split())
+FUNCTION = set("""Desk Sync Pay Cart Queue Trace Patch Book View Bridge Dock Vault Task Market Relay Route
+    Stock Till Slot Fleet Flow Link Pilot Grid Note Box Metric Suite Lane Path Scope Forge Meet Stack
+    Seat Stay Shelf Parcel Venue Point Loop Log Stream Tally Vend Data Insight Track Shift Fund Pulse
+    Board Cast Mail Sign Hire Form Shop Wallet Ticket Plan Chart""".split())
+FUNCTION_L = sorted(FUNCTION)
 FORMAL = {"a news sentence", "a press release", "an excerpt from an annual report",
           "a short professional bio", "a booking confirmation", "a product listing"}
 SHE, HE = {"she", "her", "hers", "herself"}, {"he", "him", "his", "himself"}
@@ -155,9 +177,171 @@ def her_cases(model: str = "ettin-68m") -> int:
     return 0
 
 
+# ---- values -------------------------------------------------------------
+MONTHS = "January February March April May June July August September October November December".split()
+OSES = [["Ubuntu", "22.04"], ["Ubuntu", "24.04", "LTS"], ["Debian", "12"], ["Debian", "11"],
+        ["Windows", "10"], ["Windows", "11"], ["Windows", "Server", "2022"], ["macOS", "14"],
+        ["macOS", "15"], ["Rocky", "Linux", "9"], ["Fedora", "40"], ["Alpine", "Linux", "3.19"],
+        ["Red", "Hat", "Enterprise", "Linux", "9"], ["Android", "14"], ["Android", "13"], ["iOS", "17"],
+        ["FreeBSD", "14"], ["Amazon", "Linux", "2023"], ["openSUSE", "Leap", "15.6"], ["ChromeOS"]]
+OS_RE = re.compile(r"^(Ubuntu( Server)? \d+\.\d+( LTS)?|Windows( Server)? \d+|Debian \d+|Android \d+|"
+                   r"macOS \d+|iOS \d+|Fedora \d+)$")
+NUM = re.compile(r"^(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)(%?)$")
+SCALE = {"thousand": 1e3, "million": 1e6, "billion": 1e9, "k": 1e3, "m": 1e6, "bn": 1e9}
+
+
+def _fmt_like(x: float, tok: str) -> str:
+    """``x`` written the way ``tok`` writes a number: same decimals, commas
+    when the original had them, trailing zeros of a round integer kept."""
+    body = NUM.match(tok).group(1)
+    pct = tok.endswith("%")
+    if "." in body:
+        d = len(body.split(".")[1])
+        out = f"{x:.{d}f}"
+    else:
+        digits = body.replace(",", "")
+        zeros = len(digits) - len(digits.rstrip("0")) if len(digits) > 1 else 0
+        q = 10 ** min(zeros, max(len(str(int(round(x)))) - 1, 0))
+        n = max(int(round(x / q)) * q, 1)
+        out = f"{n:,}" if "," in body or n >= 10000 else str(n)
+    return out + ("%" if pct else "")
+
+
+def _quantities(toks) -> list[float]:
+    out = []
+    for i, t in enumerate(toks):
+        m = NUM.match(t)
+        if not m:
+            continue
+        v = float(m.group(1).replace(",", ""))
+        if i + 1 < len(toks) and toks[i + 1].lower() in SCALE:
+            v *= SCALE[toks[i + 1].lower()]
+        out.append(v)
+    return out
+
+
+def derived(toks) -> bool:
+    """True when one quantity is the sum, difference, product or percentage
+    of two others (within 0.5%): perturbing numbers would break the passage."""
+    q = sorted({v for v in _quantities(toks) if v >= 2})
+    for c in q:
+        if c < 10:
+            continue
+        for i, a in enumerate(q):
+            for b in q[i:]:
+                if a == c or b == c:
+                    continue
+                for r in (a + b, a * b, abs(b - a), a * b / 100):
+                    if r > 0 and abs(r - c) <= 0.005 * c:
+                        return True
+    return False
+
+
+def value_edits(toks, payload, rng, claim, stats, tol: bool = True) -> None:
+    """New numbers, dates, times and operating systems for the value facts'
+    tails: every annotated span of a tail entity whose text holds a digit,
+    and every other occurrence of the same multi-word value string. One
+    mapping per passage, so a repeated value stays the same; years move by
+    one shift and months by one rotation, so their order mostly survives."""
+    rel_of = defaultdict(set)
+    for f in payload["facts"]:
+        rel_of[f["tail"]].add(f["relation"])
+    spans, ages = set(), set()
+    for i, rels in rel_of.items():
+        for sp in payload["entities"][i]["spans"]:
+            if sp[1] > len(toks):
+                stats["value span past the end"] += 1
+                continue
+            t = toks[sp[0]:sp[1]]
+            if any(c.isdigit() for x in t for c in x) or OS_RE.match(" ".join(t)):
+                spans.add(tuple(sp))
+                if "has age" in rels:
+                    ages.add(" ".join(t))
+    if not spans:
+        return
+    strings = {tuple(toks[a:b]) for a, b in spans if b - a >= 2}
+    for st in strings:                                   # unannotated repeats of the same value
+        n = len(st)
+        for i in range(len(toks) - n + 1):
+            if tuple(toks[i:i + n]) == st:
+                spans.add((i, i + n))
+    frozen = derived(toks)
+    stats["passages with derived values (numbers kept)"] += frozen
+    year_shift = int(rng.integers(-3, 4))
+    month_rot = int(rng.integers(-4, 5))
+    memo, os_memo = {}, {}
+
+    def new_tok(i, t, kind):
+        key = (kind, t)
+        if key not in memo:
+            m = NUM.match(t)
+            v = float(m.group(1).replace(",", "")) if m else None
+            if kind == "year":
+                out = str(int(v) + year_shift)
+            elif kind == "day":
+                out = str(int(rng.integers(1, 29)))
+            elif kind == "hour":
+                out = str(int(rng.integers(1, 13)))
+            elif kind == "minute":
+                out = ["00", "15", "30", "45"][rng.integers(4)]
+            elif kind == "card":
+                out = f"{int(rng.integers(1000, 10000))}"
+            elif kind == "age":
+                out = str(int(rng.integers(19, 75)))
+            else:
+                for _ in range(8):
+                    x = v * float(np.exp(rng.uniform(-1.0, 1.0)))
+                    if t.endswith("%") and v < 100:
+                        x = min(x, 95.0)
+                    if v >= 2 and "." not in t:
+                        x = max(x, 2.0)          # never "1 hours"
+                    out = _fmt_like(x, t)
+                    if out != t:
+                        break
+            memo[key] = out
+        return memo[key]
+
+    for a, b in sorted(spans):
+        t = toks[a:b]
+        is_age = " ".join(t) in ages
+        if OS_RE.match(" ".join(t)):
+            k = " ".join(t)
+            if k not in os_memo:
+                os_memo[k] = OSES[rng.integers(len(OSES))]
+            claim(a, b, os_memo[k], "value:os")
+            continue
+        for i in range(a, b):
+            x = toks[i]
+            prev = toks[i - 1] if i > 0 else ""
+            nxt = toks[i + 1] if i + 1 < len(toks) else ""
+            if x in MONTHS:
+                claim(i, i + 1, [MONTHS[(MONTHS.index(x) + month_rot) % 12]], "value:month")
+                continue
+            if not NUM.match(x):
+                continue
+            n = float(NUM.match(x).group(1).replace(",", ""))
+            if x.isdigit() and len(x) == 4 and 1990 <= n <= 2039 and "%" not in x:
+                kind = "year"
+            elif x.isdigit() and n <= 31 and (prev in MONTHS or nxt in MONTHS):
+                kind = "day"
+            elif x.isdigit() and nxt == ":":
+                kind = "hour"
+            elif x.isdigit() and prev == ":":
+                kind = "minute"
+            elif x.isdigit() and len(x) == 4 and prev == "in" and i >= 2 and toks[i - 2] == "ending":
+                kind = "card"
+            elif frozen:
+                continue
+            elif x.isdigit() and is_age:
+                kind = "age"
+            else:
+                kind = "num"
+            claim(i, i + 1, [new_tok(i, x, kind)], f"value:{kind}")
+
+
 def swap_names(item: dict, payload: dict, seed: str, gender: dict[str, str],
                stats: Counter | None = None, her: dict | None = None,
-               flip: float = 0.5) -> tuple[dict, dict]:
+               flip: float = 0.5, values: bool = True) -> tuple[dict, dict]:
     """``item`` (a KGItem dict) and its teacher ``payload`` with every person,
     organisation and CamelCase product renamed and later mentions varied; the
     draw depends only on ``seed`` (e.g. f"{item_id}:{epoch}").
@@ -184,8 +368,13 @@ def swap_names(item: dict, payload: dict, seed: str, gender: dict[str, str],
 
     # people: one new name each, first names and surnames distinct in the passage
     ppl = sorted(_people(toks, payload))
+    parts = {x for n in ppl for x in n}
+    singles = sorted({toks[a] for e in payload["entities"] if e["type"] == "person"
+                      for a, b in e["spans"] if b - a == 1 and b <= len(toks) and CAP.match(toks[a])
+                      and toks[a] not in parts and (toks[a] in KNOWN_FIRST or toks[a] in gender)})
     has_she, has_he = any(t in SHE for t in low), any(t in HE for t in low)
     gof = {f: gender.get(f, "n") for f, _ in ppl}
+    gof.update({f: gender.get(f, "n") for f in singles})
     if len(ppl) == 1 and gof[ppl[0][0]] == "n" and has_she != has_he:
         gof[ppl[0][0]] = "f" if has_she else "m"      # the passage's own pronouns decide
     cases = (her or {}).get(item["id"], {})
@@ -218,6 +407,13 @@ def swap_names(item: dict, payload: dict, seed: str, gender: dict[str, str],
                 claim(i, i + 1, [nl], "person:kept_last")
             elif not claimed[i] and t == f:
                 claim(i, i + 1, [nf], "person:kept_first")
+    for f in singles:                        # people named by first name only ("Hi Marta")
+        pool = [x for x in firsts[gof[f]] if x not in used_f]
+        nf = pool[rng.integers(len(pool))]
+        used_f.add(nf)
+        for i, t in enumerate(toks):
+            if not claimed[i] and t == f:
+                claim(i, i + 1, [nf], "person:first_only")
 
     # organisations: new stem, same kind word; later mentions may drop it
     used_s = set()
@@ -227,8 +423,9 @@ def swap_names(item: dict, payload: dict, seed: str, gender: dict[str, str],
             t = _span_text(toks, s)
             if e["type"] == "organization" and 2 <= len(t) <= 3 and all(CAP.match(x) for x in t):
                 orgs.add(t)
-            elif e["type"] in ("product or service", "organization") and len(t) == 1 and CAMEL.match(t[0]):
-                prods.add(t[0])
+            elif e["type"] in ("product or service", "organization") and t and CAMEL.match(t[0]) \
+                    and (len(t) == 1 or e["type"] == "product or service" and len(t) <= 3):
+                prods.add(t[0])                  # "HarborSync", "TraceNest Pro"
     def new_stem():
         pool = [x for x in STEM if x not in used_s]
         a = pool[rng.integers(len(pool))]
@@ -247,25 +444,34 @@ def swap_names(item: dict, payload: dict, seed: str, gender: dict[str, str],
         for i in range(len(toks) - n + 1):
             if tuple(toks[i:i + n]) == org:
                 short = k > 0 and rng.random() < 0.5
-                claim(i, i + n, [stem] if short else org_new, "org:stem" if short else "org:full")
+                claim(i, i + n, org_new[:-1] if short else org_new, "org:stem" if short else "org:full")
                 k += 1
         for i, t in enumerate(toks):
             if not claimed[i] and t == org[0]:
                 claim(i, i + 1, [stem], "org:kept_stem")
     for p in sorted(prods):
+        if p in REAL_BRANDS:
+            stats["product:real brand kept"] += 1
+            continue
         head, tail = CAMEL.match(p).groups()
-        stem = new_stem()
+        # keep the part that says what it is ("Desk", "Pay"); the generator's
+        # brand-ish parts ("Harbor", "Nest", "Ledger") go
+        func = tail if tail in FUNCTION else head if head in FUNCTION else FUNCTION_L[rng.integers(len(FUNCTION_L))]
+        pool = [x for x in STEM if x not in used_s]
+        stem = pool[rng.integers(len(pool))]
+        used_s.add(stem)
         for i, t in enumerate(toks):
             if not claimed[i] and t == p:
-                claim(i, i + 1, [stem + tail], "product")
-            elif not claimed[i] and t == head:
-                claim(i, i + 1, [stem], "product:kept_head")
+                claim(i, i + 1, [stem + func], "product")
 
     if male:
         for i, t in enumerate(low):
             if t in SHE and not claimed[i]:
                 rep = ("his" if cases[str(i)] == "poss" else "him") if t == "her" else TO_MALE[t]
                 claim(i, i + 1, [rep.capitalize() if toks[i][0].isupper() else rep], "pronoun")
+
+    if values:
+        value_edits(toks, payload, _rng(f"value:{seed}"), claim, stats)
 
     # apply, building the boundary map old -> new
     edits.sort()
