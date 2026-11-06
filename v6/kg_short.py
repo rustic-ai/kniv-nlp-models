@@ -1,0 +1,580 @@
+"""Short-text knowledge teacher (v8 W1 + W4): 1-3 sentence texts with their own
+small schemas, and minimal pairs for negation and modality.
+
+    uv run python -m v6.kg_short dry --texts 500          # no API: items, 5 prompts, overlap check
+    uv run python -m v6.kg_short pilot --texts 500        # part A: annotate the short texts
+    uv run python -m v6.kg_short variants --bases 100     # part B: rewrite facts, annotate the rewrites
+    uv run python -m v6.kg_short check                    # judge precision, second-annotator recall, pair agreement
+
+Why short texts: every v7 relation source is long (Re-DocRED and Wikipedia
+documents, ~200-word teacher windows), and v7 fails on 25-word sentences with
+their own 5-relation schema (CoNLL04 zero-shot 0.17-0.28 end to end).
+
+- **Texts** are 1-3 consecutive sentences cut from corpus *train* windows (no
+  new source), kept only when they carry at least two entity or value cues.
+- **Schemas** have 3-15 relations: half "normal" (domain prior, neighbours,
+  random, as the v7 sampler), 30% leaning on value and list relations (price,
+  amount, count, uses, ...), 20% "empty" (relations unlikely in the domain), so
+  the model learns to return nothing.
+- **Minimal pairs** take plain asserted facts from part A and ask for six
+  rewrites changing as little as possible: negated, reported, planned,
+  desired, questioned, hypothetical. The expected polarity and modality are
+  known from the rewrite instruction; the teacher annotates each rewrite too,
+  and the two must agree.
+
+The ``kgs`` system prompt is the v7 ``kg`` prompt plus rules for values, lists
+and empty answers. Its responses are cached under their own prompt version
+(``SHORT_VERSION``), so the v7 teacher cache (``PROMPT_VERSION``) is untouched.
+CoNLL04, CrossRE and the FewRel validation relations stay out: relations with
+``train: false`` never enter a schema, and ``dry`` checks 8-gram overlap with
+the CoNLL04 texts when the dataset is available.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+import re
+from collections import Counter, defaultdict
+from pathlib import Path
+
+import numpy as np
+
+from .annotate.base import CacheStore, RunLogger
+from .annotate.kg import KGAnnotator, KGItem
+from .config import DATA_DIR, RUNS_DIR, load_annotators
+from .kg_teacher import CACHE, SPEAKERS, SchemaSampler, _rng, participants_of
+from .label_bank import load as load_bank
+from .prompts import SYSTEM, kg_user_message
+
+SHORT_VERSION = "s1"
+OUT = RUNS_DIR / "kg-short"
+ITEMS = DATA_DIR / "v6-corpus" / "kg_short_items.json"
+
+# Relations whose tail is usually a value or one item of a list.
+VALUE_RE = re.compile(r"\b(price|prices|monetary|costs?|count|value|revenue|amount|duration|percent|"
+                      r"percentage|salary|stake|budget|fee|fees|uses|skill|skills|expertise|ingredient|capacity|"
+                      r"population|age|rate|valuation|funding|quantity|number)\b", re.I)
+CUE_RE = re.compile(r"\d|[$€£¥%]")
+MAX_WORDS = 120
+MIN_SENT_WORDS = 5   # drops reference lists, headings and table fragments
+
+# The types users put in their own schemas, which neither DocRED's six nor
+# Few-NERD's 66 cover (no unnamed financial items, roles or skills). Written to
+# be mutually exclusive, so every entity has one right type. Not yet in the
+# label bank: added to it (with ids) when the W1 data is prepared.
+GENERAL_TYPES = [{"name": n, "description": d, "source": "general-short"} for n, d in [
+    ("person", "a human being, named or described ('my sister', 'the CEO')"),
+    ("organization", "a company, institution, team, government body or other group"),
+    ("location", "a place: a country, city, region, building, address or natural feature"),
+    ("product or service", "something made or offered: a device, software product, plan, dish or service"),
+    ("financial item", "a loan, credit facility, account, fund, obligation, share class or other financial "
+                       "instrument or balance"),
+    ("document or agreement", "a contract, licence, policy, law, report, filing or other written instrument"),
+    ("event", "a meeting, deal, launch, trip, election, incident or other occurrence"),
+    ("job title", "a role or position someone holds, such as 'data engineer' or 'chief financial officer'"),
+    ("skill or technology", "a skill, programming language, tool, method or technical field"),
+    ("activity", "something people do: a sport, hobby, task or practice, such as 'surfing' or 'hiking'"),
+]]
+
+
+def is_value_relation(r: dict) -> bool:
+    return bool(VALUE_RE.search(r["name"]))
+
+
+def cues(tokens: list[str], spans: list[list[int]]) -> int:
+    """Entity or value cues: capitalised words not starting a sentence, and
+    numbers / currency / percent tokens."""
+    n = 0
+    for s, e in spans:
+        for i in range(s, e):
+            t = tokens[i]
+            if CUE_RE.search(t):
+                n += 1
+            elif i > s and t[:1].isupper() and t.lower() not in {"i", "i'm", "i've", "i'll", "i'd"}:
+                n += 1
+    return n
+
+
+class ShortSampler:
+    """3-15 relations per text, from the v7 sampler's pool and near-synonym
+    conflicts; modes 'normal' (0.5), 'value' (0.3) and 'empty' (0.2)."""
+
+    def __init__(self, base: SchemaSampler):
+        self.b = base
+        self.value = np.array([is_value_relation(r) for r in base.relations], dtype=float)
+
+    def mode(self, key: str) -> str:
+        x = _rng(f"smode:{key}").random()
+        return "value" if x < 0.3 else ("empty" if x < 0.5 else "normal")
+
+    def relations_for(self, key: str, domain: str) -> tuple[list[int], str]:
+        b, rng, mode = self.b, _rng(f"srel:{key}"), self.mode(key)
+        n = int(rng.integers(3, 16))
+        pick: list[int] = []
+
+        def draw(weights, k):
+            for _ in range(k):
+                w = np.array(weights, dtype=float)
+                for i in pick:
+                    w[i] = 0
+                    for j in b.conflicts[i]:
+                        w[j] = 0
+                if w.sum() <= 0:
+                    return
+                pick.append(int(rng.choice(len(w), p=w / w.sum())))
+
+        prior = b.prior(domain)
+        if mode == "empty":
+            # relations this domain's text rarely supports: the bottom half of its prior
+            low = (prior <= np.median(prior)).astype(float)
+            draw(low, n)
+        else:
+            if mode == "value":
+                draw(self.value + 1e-9, round(n * 0.5))
+            draw(prior, round(n * 0.5) if mode == "normal" else n - len(pick) - round(n * 0.2))
+            neigh = np.zeros(len(b.relations))
+            for i in list(pick):
+                for j in b.by_cat[b.relations[i]["category"]]:
+                    neigh[j] = 1.0
+            draw(neigh + 1e-9, round(n * 0.2))
+            draw(np.ones(len(b.relations)), n - len(pick))
+        return sorted(pick), mode
+
+    def types_for(self, key: str) -> list[dict]:
+        """Types that can cover a short text: the coarse six (0.6), or 4-10
+        fine types plus the fine catch-alls ('other person', ...), so every
+        entity still has exactly one right type. Never coarse and fine
+        together (an entity would have two right answers)."""
+        b, rng = self.b, _rng(f"stype:{key}")
+        x = rng.random()
+        if x < 0.4:
+            return [t for t in b.coarse if t["code"] not in ("TIME", "NUM")] + b.always
+        if x < 0.7:
+            return GENERAL_TYPES + b.always
+        catch = [t for t in b.fine if t["name"].startswith("other ")]
+        rest = [t for t in b.fine if not t["name"].startswith("other ")]
+        k = int(rng.integers(4, 11))
+        chosen = [rest[i] for i in sorted(rng.choice(len(rest), k, replace=False))]
+        return chosen + catch + b.always
+
+
+def short_items(n_texts: int, sampler: ShortSampler, split: str = "train") -> list[KGItem]:
+    """``n_texts`` short texts, spread evenly over the corpus domains."""
+    from .train.data import load_rows
+    rows = load_rows(split, columns=["window_id", "domain", "tokens", "sentence_spans"])
+    speakers = json.loads(SPEAKERS.read_text()) if SPEAKERS.exists() else {}
+    by = defaultdict(list)
+    for r in rows:
+        by[r["domain"]].append(r)
+    per = max(1, n_texts // len(by))
+    items = []
+    for d in sorted(by):
+        got = 0
+        for r in sorted(by[d], key=lambda r: hashlib.sha1(f"kgshort:{r['window_id']}".encode()).hexdigest()):
+            if got >= per:
+                break
+            sp_all = [list(x) for x in r["sentence_spans"]]
+            if not sp_all:
+                continue
+            rng = _rng(f"slice:{r['window_id']}")
+            L = int(rng.integers(1, min(3, len(sp_all)) + 1))
+            a = int(rng.integers(0, len(sp_all) - L + 1))
+            s0, e0 = sp_all[a][0], sp_all[a + L - 1][1]
+            if e0 - s0 > MAX_WORDS or any(e - s < MIN_SENT_WORDS for s, e in sp_all[a:a + L]):
+                continue
+            tokens = r["tokens"][s0:e0]
+            spans = [[s - s0, e - s0] for s, e in sp_all[a:a + L]]
+            spk = speakers.get(r["window_id"])
+            spk = spk[a:a + L] if spk else None
+            need = 1 if spk and any(spk) else 2
+            if cues(tokens, spans) < need:
+                continue
+            key = f"{r['window_id']}#{a}-{a + L}"
+            rel_ids, mode = sampler.relations_for(key, d)
+            types = sampler.types_for(key)
+            rels = [sampler.b.relations[i] for i in rel_ids]
+            digest = hashlib.sha1(json.dumps([[x["name"] for x in rels], [t["name"] for t in types]]
+                                             ).encode()).hexdigest()[:10]
+            items.append(KGItem(
+                id=f"{key}:{digest}", tokens=tokens, sentence_spans=spans, speakers=spk,
+                participants=participants_of(spk), types=types,
+                relations=[{"name": x["name"], "description": x["description"]} for x in rels],
+                domain=d, layers={"mode": mode, "window_id": r["window_id"]}))
+            got += 1
+    return items
+
+
+# ── prompts ──────────────────────────────────────────────────────────
+SYSTEM["kgs"] = SYSTEM["kg"] + (
+    "\n\nSHORT TEXTS, VALUES AND LISTS.\n"
+    "- The passage may be a single sentence. Extract from it exactly as from a long one.\n"
+    "- Amounts, prices, percentages, counts, ages, dates and durations are entities (type "
+    "number or time) whenever a listed relation takes them: in 'Northwind will buy CareLoop "
+    "for $1.2 billion', '$1.2 billion' is an entity and the tail of a price relation.\n"
+    "- Each item of a list is its own entity and its own fact: 'skilled in Python and dbt' "
+    "gives one fact for Python and one for dbt.\n"
+    "- If no listed relation holds, return no facts. Never stretch a relation to fit the text."
+)
+
+SYSTEM["kgvar"] = (
+    "You rewrite one sentence so that one fact in it changes status, changing as few words as "
+    "possible. Keep the two entity mentions exactly as written (same spelling and case), keep "
+    "the rest of the sentence natural and grammatical, and do not add other facts. Write one "
+    "rewrite for each kind:\n"
+    "- negated: the text says the fact does NOT hold ('X does not work for Y', 'X was not "
+    "charged with Y').\n"
+    "- reported: someone else, named or described in the sentence, is said to claim it ('Her "
+    "manager says X works for Y'); give that person's mention as 'source'.\n"
+    "- planned: it is intended or scheduled, not yet true ('X will join Y next month').\n"
+    "- desired: someone wants or wishes it ('X would love to work for Y').\n"
+    "- questioned: it is asked about ('Does X work for Y?').\n"
+    "- hypothetical: it is conditional or possible ('If the deal closes, X might work for Y')."
+)
+VAR_KINDS = ("negated", "reported", "planned", "desired", "questioned", "hypothetical")
+# kind -> (polarity, modality) a correct annotation of the rewrite must carry
+VAR_EXPECT = {"negated": ("negative", "asserted"), "reported": ("positive", "reported"),
+              "planned": ("positive", "planned"), "desired": ("positive", "desired"),
+              "questioned": ("positive", "questioned"), "hypothetical": ("positive", "hypothetical")}
+
+
+def var_user(sentence: str, head: str, relation: str, description: str, tail: str) -> str:
+    return (f"Sentence: {sentence}\n"
+            f"Fact: [{head}] {relation} [{tail}]  ({relation}: {description})\n"
+            f"Head mention: {head}\nTail mention: {tail}")
+
+
+class ShortKG(KGAnnotator):
+    """The ``kg`` layer (same schema, alignment and validation) with the
+    short-text system prompt."""
+
+    def build_messages(self, layer: str, item) -> list[dict]:
+        sents = [" ".join(item.tokens[s:e]) for s, e in item.sentence_spans]
+        return [{"role": "system", "content": SYSTEM["kgs"]},
+                {"role": "user", "content": kg_user_message(
+                    sents, item.speakers, item.participants, item.types, item.relations)
+                 + self._json_hint(layer)}]
+
+
+class Rewriter(KGAnnotator):
+    def build_messages(self, layer: str, item) -> list[dict]:
+        return [{"role": "system", "content": SYSTEM["kgvar"]},
+                {"role": "user", "content": item.layers["var_prompt"] + self._json_hint(layer)}]
+
+
+def render(item: KGItem) -> str:
+    sents = [" ".join(item.tokens[s:e]) for s, e in item.sentence_spans]
+    return ("=== SYSTEM ===\n" + SYSTEM["kgs"] + "\n=== USER ===\n"
+            + kg_user_message(sents, item.speakers, item.participants, item.types, item.relations))
+
+
+# ── overlap with held-out evaluation text ───────────────────────────
+def _grams(tokens: list[str], n: int = 8) -> set[int]:
+    w = [t.lower() for t in tokens if any(c.isalnum() for c in t)]
+    return {hash(tuple(w[i:i + n])) for i in range(len(w) - n + 1)}
+
+
+def heldout_grams() -> tuple[set[int], str]:
+    try:
+        from datasets import load_dataset
+        g: set[int] = set()
+        for split in ("train", "validation", "test"):
+            for x in load_dataset("DFKI-SLT/conll04", split=split):
+                g |= _grams(x["tokens"])
+        return g, "CoNLL04 (all splits)"
+    except Exception as e:  # noqa: BLE001 - optional check
+        return set(), f"skipped ({type(e).__name__})"
+
+
+# ── commands ─────────────────────────────────────────────────────────
+def dry(n: int, sampler: ShortSampler) -> int:
+    items = short_items(n, sampler)
+    ITEMS.write_text(json.dumps([it.__dict__ for it in items]))
+    c = Counter(it.domain for it in items)
+    modes = Counter(it.layers["mode"] for it in items)
+    words = [len(it.tokens) for it in items]
+    nsent = Counter(len(it.sentence_spans) for it in items)
+    nrel = [len(it.relations) for it in items]
+    val = sum(any(is_value_relation(r) for r in it.relations) for it in items)
+    print(f"{len(items)} texts -> {ITEMS}")
+    print("domains:", dict(sorted(c.items())))
+    print("modes:", dict(modes), f"| schemas with a value relation: {val / len(items):.0%}")
+    print(f"words: median {int(np.median(words))}, max {max(words)} | sentences: {dict(sorted(nsent.items()))}"
+          f" | relations per schema: median {int(np.median(nrel))}, {min(nrel)}-{max(nrel)}")
+    print(f"value relations in the pool: {int(sampler.value.sum())}, e.g. "
+          + ", ".join(r["name"] for r, v in zip(sampler.b.relations, sampler.value) if v)[:400])
+    g, src = heldout_grams()
+    hits = [it.id for it in items if _grams(it.tokens) & g] if g else []
+    print(f"8-gram overlap with {src}: {len(hits)} texts{(' ' + str(hits[:5])) if hits else ''}")
+    chars = [len(render(it)) for it in items]
+    print(f"prompt size: median {int(np.median(chars))} chars (~{int(np.median(chars)) // 4} tokens)")
+    out = OUT / "dry-prompts.txt"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pick = [next(it for it in items if it.layers["mode"] == m) for m in ("normal", "value", "empty")]
+    pick += [next(it for it in items if it.domain == "conversation" and it not in pick)]
+    pick += [next(it for it in items if it.domain == "technical" and it not in pick)]
+    out.write_text("\n\n".join(f"##### {it.id} [{it.domain}, {it.layers['mode']}]\n{render(it)}"
+                               for it in pick))
+    print(f"5 rendered prompts -> {out}")
+    return 0
+
+
+def load_items() -> list[KGItem]:
+    return [KGItem(**d) for d in json.loads(ITEMS.read_text())]
+
+
+async def _run(ann, layer: str, items: list, tag: str) -> dict:
+    logger = RunLogger(OUT / tag, every=50)
+    out = {}
+    try:
+        for coro in asyncio.as_completed([ann.annotate_and_cache(layer, it) for it in items]):
+            r = await coro
+            logger.record(r, (0, 0), len(items)); out[r.item_id] = r
+    finally:
+        logger.close()
+    return out
+
+
+def pilot(annotator: str) -> int:
+    items = load_items()
+    spec = load_annotators([annotator])[annotator]
+    res = asyncio.run(_run(ShortKG(spec, CacheStore(CACHE, SHORT_VERSION)), "kg", items, f"pilot-{annotator}"))
+    agg = defaultdict(Counter)
+    for it in items:
+        r = res.get(it.id)
+        c = agg[it.domain]
+        c["texts"] += 1
+        if r is None or not r.ok:
+            c["failed"] += 1
+            continue
+        p = r.payload
+        c["mentions"] += p["stats"]["mentions"]; c["aligned"] += p["stats"]["aligned"]
+        c["facts"] += len(p["facts"]); c["empty"] += not p["facts"]
+        c[f"empty_{it.layers['mode']}"] += not p["facts"]; c[f"mode_{it.layers['mode']}"] += 1
+        rels = {x["name"] for x in it.relations if is_value_relation(x)}
+        c["value_facts"] += sum(f["relation"] in rels for f in p["facts"])
+        c["neg"] += sum(f["polarity"] == "negative" for f in p["facts"])
+    print(f"{'domain':13s} {'texts':>5s} {'fail':>4s} {'align':>6s} {'facts/t':>7s} {'empty%':>6s} "
+          f"{'empty%|empty-mode':>17s} {'value facts':>11s}")
+    tot = Counter()
+    for d in sorted(agg):
+        tot.update(agg[d])
+    for d, c in sorted(list(agg.items()) + [("ALL", tot)], key=lambda x: x[0] == "ALL"):
+        ok = max(c["texts"] - c["failed"], 1)
+        print(f"{d:13s} {c['texts']:5d} {c['failed']:4d} {c['aligned'] / max(c['mentions'], 1):6.1%} "
+              f"{c['facts'] / ok:7.2f} {c['empty'] / ok:6.0%} "
+              f"{c['empty_empty'] / max(c['mode_empty'], 1):17.0%} {c['value_facts']:11d}")
+    return 0
+
+
+def part_a(annotator: str) -> tuple[list[KGItem], dict]:
+    """Part A items and their (cached) annotations."""
+    items = load_items()
+    spec = load_annotators([annotator])[annotator]
+    res = asyncio.run(_run(ShortKG(spec, CacheStore(CACHE, SHORT_VERSION)), "kg", items, f"pilot-{annotator}"))
+    return items, res
+
+
+def _text(item: KGItem, spans) -> str:
+    a, b = spans[0]
+    return " ".join(item.tokens[a:b])
+
+
+def _norm_words(s: str) -> list[str]:
+    from .windows import tokenize
+    return [w.lower() for w in tokenize(s) if any(c.isalnum() for c in w)]
+
+
+def _contains(sentence: str, mention: str) -> bool:
+    s, m = _norm_words(sentence), _norm_words(mention)
+    return bool(m) and any(s[i:i + len(m)] == m for i in range(len(s) - len(m) + 1))
+
+
+def bases(items, res, n: int) -> list[tuple[KGItem, dict, str, str, int]]:
+    """Up to one plain fact per text: positive, asserted, the author's, both
+    arguments named (not participants) in one sentence. Spread over domains."""
+    by = defaultdict(list)
+    for it in items:
+        r = res.get(it.id)
+        if r is None or not r.ok:
+            continue
+        p, k = r.payload, len(it.participants)
+        for f in p["facts"]:
+            if (f["polarity"], f["modality"], f["holder"]) != ("positive", "asserted", -1):
+                continue
+            if f["head"] < k or f["tail"] < k:
+                continue
+            hs, ts = p["entities"][f["head"] - k]["spans"], p["entities"][f["tail"] - k]["spans"]
+            for j, (s, e) in enumerate(it.sentence_spans):
+                h = [x for x in hs if s <= x[0] < e]
+                t = [x for x in ts if s <= x[0] < e]
+                if h and t:
+                    by[it.domain].append((it, f, _text(it, h), _text(it, t), j))
+                    break
+            else:
+                continue
+            break
+    per = max(1, n // max(len(by), 1))
+    return [x for d in sorted(by) for x in by[d][:per]][:n]
+
+
+def variants(annotator: str, n: int) -> int:
+    items, res = part_a(annotator)
+    picked = bases(items, res, n)
+    spec = load_annotators([annotator])[annotator]
+    cache = CacheStore(CACHE, SHORT_VERSION)
+    reqs = []
+    for it, f, head, tail, j in picked:
+        s, e = it.sentence_spans[j]
+        sentence = " ".join(it.tokens[s:e])
+        desc = next(r["description"] for r in it.relations if r["name"] == f["relation"])
+        q = KGItem(**{**it.__dict__})
+        q.id = f"{it.id}:var:{f['head']}-{f['tail']}-{f['relation']}"
+        q.layers = {**it.layers, "var_prompt": var_user(sentence, head, f["relation"], desc, tail),
+                    "base": [sentence, head, f["relation"], tail]}
+        reqs.append(q)
+    rw = asyncio.run(_run(Rewriter(spec, cache), "kgvar", reqs, f"rewrite-{annotator}"))
+    from .windows import tokenize
+    out, var_items, bad = [], [], Counter()
+    for q in reqs:
+        r = rw.get(q.id)
+        if r is None or not r.ok:
+            bad["rewrite failed"] += 1
+            continue
+        sentence, head, rel, tail = q.layers["base"]
+        for kind in VAR_KINDS:
+            v = r.payload.get(kind)
+            if not v:
+                bad[f"{kind}: missing"] += 1
+                continue
+            if not (_contains(v["sentence"], head) and _contains(v["sentence"], tail)):
+                bad[f"{kind}: mention changed"] += 1
+                continue
+            toks = tokenize(v["sentence"])
+            vi = KGItem(id=f"{q.id}:{kind}", tokens=toks, sentence_spans=[[0, len(toks)]], speakers=None,
+                        participants=[], types=q.types, relations=q.relations, domain=q.domain,
+                        layers={"kind": kind, "head": head, "tail": tail, "relation": rel,
+                                "source": v["source"]})
+            var_items.append(vi)
+    ann = asyncio.run(_run(ShortKG(spec, cache), "kg", var_items, f"variants-{annotator}"))
+    agree, c = Counter(), Counter()
+    for vi in var_items:
+        kind, L = vi.layers["kind"], vi.layers
+        c[kind] += 1
+        r = ann.get(vi.id)
+        if r is None or not r.ok:
+            agree[f"{kind}:failed"] += 1
+            continue
+        p = r.payload
+
+        def name(i):  # no participants here, so entity ids index p["entities"]
+            if i < 0:
+                return ""
+            a, b = p["entities"][i]["spans"][0]
+            return " ".join(vi.tokens[a:b])
+
+        def same(x, y):
+            return bool(x) and bool(y) and (_contains(x, y) or _contains(y, x))
+
+        hit = [f for f in p["facts"] if f["relation"] == L["relation"]
+               and same(name(f["head"]), L["head"]) and same(name(f["tail"]), L["tail"])]
+        if not hit:
+            agree[f"{kind}:fact missing"] += 1
+            continue
+        f = hit[0]
+        ok = (f["polarity"], f["modality"]) == VAR_EXPECT[kind]
+        if kind == "reported" and ok and L["source"]:
+            ok = same(name(f["holder"]), L["source"])
+        agree[f"{kind}:{'agree' if ok else 'disagree'}"] += 1
+    print(f"{len(reqs)} base facts, {len(var_items)} rewrites kept; dropped: {dict(bad)}")
+    print(f"{'kind':13s} {'n':>4s} {'agree':>6s} {'disagree':>8s} {'missing':>7s}")
+    tot = Counter()
+    for kind in VAR_KINDS:
+        a, d, m = agree[f"{kind}:agree"], agree[f"{kind}:disagree"], agree[f"{kind}:fact missing"]
+        tot.update({"n": c[kind], "a": a, "d": d, "m": m})
+        print(f"{kind:13s} {c[kind]:4d} {a / max(c[kind], 1):6.0%} {d / max(c[kind], 1):8.0%} {m / max(c[kind], 1):7.0%}")
+    print(f"{'ALL':13s} {tot['n']:4d} {tot['a'] / max(tot['n'], 1):6.0%} {tot['d'] / max(tot['n'], 1):8.0%} "
+          f"{tot['m'] / max(tot['n'], 1):7.0%}")
+    (OUT / "variants.json").write_text(json.dumps([{**vi.__dict__} for vi in var_items]))
+    return 0
+
+
+def check(annotator: str, judge: str, n_recall: int = 100, n_judge_facts: int = 300) -> int:
+    """Precision by the judge on part A facts; recall against a second,
+    stronger annotator on ``n_recall`` texts, with its extra facts judged too,
+    so 'missed' means a supported fact the teacher left out."""
+    from .prompt_tune import Judge, _match, judge_prompt
+    items, res = part_a(annotator)
+    cache = CacheStore(CACHE, SHORT_VERSION)
+    jspec = load_annotators([judge])[judge]
+    # second annotator on a fixed, domain-balanced sample
+    by = defaultdict(list)
+    for it in items:
+        by[it.domain].append(it)
+    sample = [it for d in sorted(by) for it in by[d][:max(1, n_recall // len(by))]]
+    res2 = asyncio.run(_run(ShortKG(jspec, cache), "kg", sample, f"second-{judge}"))
+    jitems, meta, nf = [], [], 0
+    for it in items:
+        r = res.get(it.id)
+        if r is None or not r.ok or not r.payload["facts"] or nf >= n_judge_facts:
+            continue
+        j = KGItem(**{**it.__dict__}); j.id = f"{it.id}:judge"
+        j.layers = {"judge_prompt": judge_prompt(it, r.payload)}
+        jitems.append(j); meta.append(("teacher", it, r.payload["facts"])); nf += len(r.payload["facts"])
+    extra = {}
+    for it in sample:
+        r, r2 = res.get(it.id), res2.get(it.id)
+        if r is None or r2 is None or not r.ok or not r2.ok:
+            continue
+        p, p2, k = r.payload, r2.payload, len(it.participants)
+        m = _match([{tuple(s) for s in e["spans"]} for e in p2["entities"]],
+                   [{tuple(s) for s in e["spans"]} for e in p["entities"]])
+        idx = lambda x: x if x < k else (None if m.get(x - k) is None else m[x - k] + k)
+        mine = {(f["head"], f["tail"], f["relation"]) for f in p["facts"]}
+        only = [f for f in p2["facts"] if (idx(f["head"]), idx(f["tail"]), f["relation"]) not in mine]
+        extra[it.id] = (len(p2["facts"]) - len(only), len(only))
+        if only:
+            j = KGItem(**{**it.__dict__}); j.id = f"{it.id}:judge2"
+            j.layers = {"judge_prompt": judge_prompt(it, {**p2, "facts": only})}
+            jitems.append(j); meta.append(("second-only", it, only))
+    jres = asyncio.run(_run(Judge(jspec, cache), "kgjudge", jitems, f"judge-{judge}"))
+    sup = Counter()
+    for j, (who, it, facts) in zip(jitems, meta):
+        r = jres.get(j.id)
+        if r is None or not r.ok:
+            continue
+        sup[f"{who}:judged"] += len(facts)
+        sup[f"{who}:supported"] += sum(1 for i in range(len(facts)) if r.payload.get(i, False))
+    prec = sup["teacher:supported"] / max(sup["teacher:judged"], 1)
+    both = sum(a for a, _ in extra.values())
+    teacher_in_sample = sum(len(res[i].payload["facts"]) for i in extra)
+    real_miss = sup["second-only:supported"]
+    recall = (teacher_in_sample * prec) / max(teacher_in_sample * prec + real_miss, 1e-9)
+    print(f"judged precision of the teacher: {prec:.1%} ({sup['teacher:judged']} facts)")
+    print(f"second annotator on {len(extra)} texts: {both} shared facts, "
+          f"{sum(b for _, b in extra.values())} only theirs, of which {real_miss} judged supported")
+    print(f"estimated teacher recall: {recall:.1%}")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("cmd", choices=["dry", "pilot", "variants", "check"])
+    ap.add_argument("--texts", type=int, default=500)
+    ap.add_argument("--bases", type=int, default=100)
+    ap.add_argument("--annotator", default="sol61")
+    ap.add_argument("--judge", default="astra")
+    args = ap.parse_args()
+    sampler = ShortSampler(SchemaSampler(load_bank()))
+    if args.cmd == "dry":
+        return dry(args.texts, sampler)
+    if args.cmd == "pilot":
+        return pilot(args.annotator)
+    if args.cmd == "variants":
+        return variants(args.annotator, args.bases)
+    return check(args.annotator, args.judge)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -344,12 +344,31 @@ KGJUDGE_SCHEMA = _envelope("fact_verdicts", {
 })
 
 
+KGVAR_KINDS = ["negated", "reported", "planned", "desired", "questioned", "hypothetical"]
+KGVAR_SCHEMA = _envelope("fact_rewrites", {
+    "variants": _array_of(
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": KGVAR_KINDS},
+                "sentence": {"type": "string", "description": "the rewritten sentence"},
+                "source": {"type": "string",
+                           "description": "for 'reported': the mention of who claims it, as written; else ''"},
+            },
+            "required": ["kind", "sentence", "source"], "additionalProperties": False,
+        },
+        "One rewrite per kind.",
+    ),
+})
+
+
 SCHEMAS = {
     # The real kg schema is built per window (annotate/kg.py); this default
     # only lets the shared request builder start before it is replaced.
     "kg": kg_schema(["entity"], ["related to"]),
     "bankmerge": BANKMERGE_SCHEMA,
     "kgjudge": KGJUDGE_SCHEMA,
+    "kgvar": KGVAR_SCHEMA,
     "discover": DISCOVER_SCHEMA,
     "cls": CLS_SCHEMA,
     "sentiment": SENTIMENT_SCHEMA,
@@ -371,6 +390,7 @@ PAYLOAD_KEY = {
     "dep": "arcs", "srl": "tags", "rel": "triples",
     "cls": "labels", "sentiment": "sentiment", "keywords": "keywords",
     "discover": "relations", "bankmerge": "relations", "kg": "knowledge", "kgjudge": "verdicts",
+    "kgvar": "variants",
 }
 
 

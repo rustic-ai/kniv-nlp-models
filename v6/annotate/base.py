@@ -148,6 +148,18 @@ def validate_payload(layer: str, payload: object, n: int,
         return {int(v["fact"]): bool(v["supported"]) for v in payload
                 if isinstance(v, dict) and "fact" in v and "supported" in v}, None, None
 
+    if layer == "kgvar":
+        if not isinstance(payload, list):
+            return None, "variants is not a list", "parse"
+        from ..schemas import KGVAR_KINDS
+        out = {}
+        for v in payload:
+            if (isinstance(v, dict) and v.get("kind") in KGVAR_KINDS
+                    and isinstance(v.get("sentence"), str) and v["sentence"].strip()):
+                out.setdefault(v["kind"], {"sentence": v["sentence"].strip(),
+                                           "source": str(v.get("source") or "").strip()})
+        return out, None, None
+
     if layer == "bankmerge":
         if not isinstance(payload, list) or not payload:
             return None, "relations is empty or not a list", "parse"
