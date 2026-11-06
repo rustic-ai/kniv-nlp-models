@@ -918,11 +918,48 @@ SYSTEM["kgsyn"] = (
 )
 
 
-def syn_requests(n: int, base: SchemaSampler) -> list[KGItem]:
+# Name hints. Without them the generator reuses a few names (the 10k run:
+# "Mara Ellison" heads 1,517 of 38k facts, "Harbor..." companies everywhere,
+# 21% distinct heads), which would teach a name prior instead of reading.
+# Each request gets its own random names to use; values are left to the model.
+FIRST = ("Amara Bilal Chen Dario Elif Farah Goran Hana Ines Jomo Kaito Lucia Mateo Nia Oren Priya "
+         "Quinn Rafael Sana Tomas Uma Viktor Wen Ximena Yusuf Zara Anouk Bao Cyrus Dalia Emeka Freya "
+         "Gael Hiroshi Ilse Jun Kofi Leila Malik Noor Olga Pavel Rania Soren Thandi Ugo Valeria Wiktor "
+         "Yara Zeynep Aiko Bruno Chiara Dmitri Esra Femi Greta Hamid Isla Jasper Kemal Lina Mihai Nadia "
+         "Omar Paula Rhea Sami Tove Vikram Wanjiru Yosef Zoltan Ama Bjorn Carmen Deniz").split()
+LAST = ("Okafor Lindqvist Ferreira Nakamura Haddad Kowalski Mensah Duarte Varga Ozturk Bianchi Petrov "
+        "Achebe Sato Moreau Novak Ibrahim Castillo Larsen Kumar Abara Reyes Tanaka Dubois Horvat Aydin "
+        "Rossi Nwosu Eriksen Mehta Szabo Alvarez Kim Fischer Banda Lopes Yilmaz Costa Ivanova Mwangi "
+        "Schmidt Takahashi Silva Popescu Rahman Jensen Morales Hoang Kariuki Weber Oyelaran Fontaine "
+        "Bauer Delgado Kaur Lund Ortega Park Sorensen Zhou Adeyemi Vasquez").split()
+STEM = ("Alder Basalt Cinder Delta Ember Fjord Garnet Helio Indigo Juniper Kestrel Lumen Meridian Nimbus "
+        "Onyx Pinnacle Quartz Rivet Sable Tundra Umber Vertex Willow Xylo Yarrow Zephyr Brook Cobalt "
+        "Drift Echo Flint Grove Halcyon Iris Jet Kiln Lattice Maple North Orbit Pebble Quill Ridge Sprout "
+        "Tidal Vale Wren Arc Beacon Crest Dune Fern Glint Hive Ingot Kite Loom Moss Nova Opal Prism").split()
+ORG_SUFFIX = ("Labs Group Systems Partners Analytics Logistics Health Bank Foods Energy Robotics Media "
+              "Capital Works Studio Networks Pharma Freight Retail Software").split()
+PRODUCT_NOUN = "Pro Go Mini Max Air One Plus Lite Hub Box Pad Dock Cam Pod Kit Desk Flow Sync".split()
+PLACES = ("Lagos Porto Tallinn Medellin Osaka Kraków Nairobi Bergen Leeds Valencia Hanoi Accra Lyon "
+          "Tucson Gdańsk Pune Adelaide Montréal Izmir Cluj Recife Aarhus Graz Busan Kumasi Halifax Bilbao "
+          "Brno Mysuru Cork Kazan Durban Fukuoka Utrecht Quito Salzburg Tampere Rosario Kigali Malmö").split()
+
+
+def name_hints(rng) -> str:
+    pick = lambda xs, k: list(rng.choice(xs, k, replace=False))
+    people = [f"{f} {l}" for f, l in zip(pick(FIRST, 3), pick(LAST, 3))]
+    orgs = [f"{a}{b.lower()} {s}" if rng.random() < 0.5 else f"{a} {s}"
+            for a, b, s in zip(pick(STEM, 3), pick(STEM, 3), pick(ORG_SUFFIX, 3))]
+    products = [f"{a} {n}" for a, n in zip(pick(STEM, 2), pick(PRODUCT_NOUN, 2))]
+    return ("Names to use where the passage needs them (use only what fits; invent any others in the "
+            f"same spirit): people {', '.join(people)}; organizations {', '.join(orgs)}; products "
+            f"{', '.join(products)}; places {', '.join(pick(PLACES, 3))}.")
+
+
+def syn_requests(n: int, base: SchemaSampler, start: int = 0, hints: bool = False) -> list[KGItem]:
     by = {r["name"]: r for r in base.relations}
     out = []
     names = sorted(SCENARIOS)
-    for i in range(n):
+    for i in range(start, start + n):
         rng = _rng(f"syn:{i}")
         sc = names[i % len(names)]
         values, others = SCENARIOS[sc]
@@ -937,7 +974,10 @@ def syn_requests(n: int, base: SchemaSampler) -> list[KGItem]:
         for r in chosen:
             mark = " [LIST]" if r in LIST_HINT else ""
             lines.append(f"- {r}{mark}: {by[r]['description']}")
-        out.append(KGItem(id=f"syn{i:04d}:{sc}:{'|'.join(chosen)}", tokens=[], sentence_spans=[],
+        if hints:
+            lines.append(name_hints(_rng(f"synhint:{i}")))
+        sid = f"synh{i:05d}" if hints else f"syn{i:04d}"     # unhinted ids as in the 10k run (its cache)
+        out.append(KGItem(id=f"{sid}:{sc}:{'|'.join(chosen)}", tokens=[], sentence_spans=[],
                           speakers=None, participants=[], types=[], relations=[], domain=sc,
                           layers={"syn_prompt": "\n".join(lines), "relations": chosen, "style": style}))
     return out
@@ -949,7 +989,7 @@ class Synthesizer(KGAnnotator):
                 {"role": "user", "content": item.layers["syn_prompt"] + self._json_hint(layer)}]
 
 
-def synth(annotator: str, n: int) -> int:
+def synth(annotator: str, n: int, start: int = 0, hints: bool = False) -> int:
     """Pilot of the synthetic value and list set: generate ``n`` passages,
     annotate each blind with the round-2 prompt against its scenario's
     relations plus distractors, and score how many written facts the teacher
@@ -960,7 +1000,7 @@ def synth(annotator: str, n: int) -> int:
     by = {r["name"]: r for r in base.relations}
     spec = teacher_spec(annotator)
     cache = store("y1")
-    reqs = syn_requests(n, base)
+    reqs = syn_requests(n, base, start, hints)
     gen = asyncio.run(_run(Synthesizer(spec, cache), "kgsyn", reqs, f"synth-gen-{annotator}"))
     items, bad = [], Counter()
     for q in reqs:
@@ -1129,6 +1169,8 @@ def main() -> int:
     ap.add_argument("--concurrency", type=int, default=None, help="override the annotators' concurrency cap")
     ap.add_argument("--shard", default="0/1", help="rank: i/n, this process ranks every n-th text from i")
     ap.add_argument("--threads", type=int, default=0, help="rank: onnxruntime threads per process")
+    ap.add_argument("--start", type=int, default=0, help="synth: first request index")
+    ap.add_argument("--name-hints", action="store_true", help="synth: give each request its own random names")
     ap.add_argument("--round", type=int, default=1, choices=[1, 2, 3, 4])
     ap.add_argument("--split", default="train", choices=["train", "dev"], help="dry / rank: corpus split")
     ap.add_argument("--release", default="release/ultrabert-380m", help="rank: the v7 model that ranks")
@@ -1147,9 +1189,10 @@ def main() -> int:
         return effort_compare(args.annotator, args.judge, args.efforts.split(","))
     if args.cmd == "synth":
         global OUT
-        OUT = RUNS_DIR / ("kg-short-synth-r4" if ROUND == 4 else "kg-short-synth")
+        OUT = RUNS_DIR / ("kg-short-synth" if ROUND < 4 else
+                          "kg-short-synth-r4h" if args.name_hints else "kg-short-synth-r4")
         OUT.mkdir(parents=True, exist_ok=True)
-        return synth(args.annotator, args.texts)
+        return synth(args.annotator, args.texts, args.start, args.name_hints)
     if args.cmd == "rank":
         i, n = (int(x) for x in args.shard.split("/"))
         return rank(args.texts, args.release, (i, n), args.threads)
