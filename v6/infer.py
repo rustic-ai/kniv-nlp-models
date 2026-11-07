@@ -183,6 +183,10 @@ class Extractor:
         b["rel_label_emb"] = self.model.label_embeddings(enc["input_ids"].to(self.device),
                                                          enc["attention_mask"].to(self.device))
         b["rel_label_cols"] = torch.tensor(cols, device=self.device)
+        if self.model.early_fusion:
+            from .train.kdata import fuse_rows
+            b["rel_fuse_ids"], b["rel_fuse_mask"] = [
+                v.to(self.device) for v in fuse_rows(self.tok, [r["name"] for r in relations])]
         o = self.model(b, relation_only=True)
         lg = o["relation"].float().cpu().numpy()
         facts = []

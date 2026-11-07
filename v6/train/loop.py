@@ -696,6 +696,9 @@ def main() -> int:
     ap.add_argument("--attn-implementation", choices=["eager", "sdpa"],
                     help="override the encoder's attention implementation (eager: the marker "
                          "pass can read attention maps on Ettin/ModernBERT)")
+    ap.add_argument("--early-fusion", type=int, default=0, metavar="TOKENS",
+                    help="append up to TOKENS of the schema's relation names to the marker-pass "
+                         "text (v8 W5 ablation); 0: off")
     ap.add_argument("--last-attn-only", action="store_true",
                     help="with eager attention: every layer runs sdpa except the last, whose "
                          "attention map the marker pass reads (less memory, faster)")
@@ -939,7 +942,8 @@ def main() -> int:
                     srl_pred_hidden=args.srl_pred_hidden, srl_ctx=args.srl_ctx,
                     ner_lstm=args.ner_lstm, rel_xattn_layers=args.rel_xattn_layers,
                     coref_adapter=args.coref_adapter,
-                    last_attn_only=args.last_attn_only).to(device)
+                    last_attn_only=args.last_attn_only,
+                    early_fusion=args.early_fusion).to(device)
     if args.coref_adapter and spec.grad_checkpointing:
         raise SystemExit("--coref-adapter needs --grad-checkpointing off")
     init_relation = args.init_relation or "drop"
@@ -1213,6 +1217,7 @@ def main() -> int:
                                  "rel_xattn_layers": args.rel_xattn_layers,
                                  "coref_adapter": args.coref_adapter,
                                  "last_attn_only": args.last_attn_only,
+                                 "early_fusion": args.early_fusion,
                                  "word_pool": args.word_pool,
                                  "attr_head": args.attr_head,
                                  "kg_holdout": hold_ids,

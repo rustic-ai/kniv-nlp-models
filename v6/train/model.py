@@ -1046,8 +1046,13 @@ class V6Model(nn.Module):
                  word_pool: str = "first", attr_head: bool = False,
                  srl_pred_hidden: int = 0, srl_ctx: int = 0, linker: int = 0,
                  ner_lstm: int = 0, rel_xattn_layers: int = 2, coref_adapter: int = 0,
-                 last_attn_only: bool = False):
+                 last_attn_only: bool = False, early_fusion: int = 0):
         super().__init__()
+        # Early fusion (v8 W5 ablation): up to ``early_fusion`` tokens of the
+        # schema's relation names appended to each item's marker-pass text,
+        # so text and labels attend to each other; only the text positions
+        # are kept after the pass. 0: off.
+        self.early_fusion = int(early_fusion)
         # Word vectors: the first subword (v6), or the mean of all of a word's
         # subwords -- for tokenizers that split words often, with little in
         # the first piece (UltraBERT's BPE: ``re|authorized``).
@@ -1386,12 +1391,46 @@ class V6Model(nn.Module):
             raise RuntimeError("last_attn_only: the last layer gave no attention map")
         return out.last_hidden_state, att
 
+    def _fused_input(self, batch: dict):
+        """The marker text with the schema's relation names after it (early
+        fusion): per item, the names of its own schema (``rel_label_known``;
+        every column without it), in column order -- shuffled in training --
+        until ``early_fusion`` tokens. The text keeps its positions."""
+        ids, mask = batch["rm_input_ids"], batch["rm_attention_mask"]
+        fi, fm = batch["rel_fuse_ids"], batch["rel_fuse_mask"].bool()
+        rows = [fi[k][fm[k]] for k in range(fi.size(0))]
+        known = batch.get("rel_label_known")
+        seqs = []
+        for b in range(ids.size(0)):
+            n = int(mask[b].sum())
+            ks = (list(range(len(rows))) if known is None
+                  else known[b].nonzero().flatten().tolist())
+            if self.training:
+                ks = [ks[i] for i in torch.randperm(len(ks)).tolist()]
+            lab, used = [], 0
+            for k in ks:
+                if used + len(rows[k]) > self.early_fusion:
+                    break
+                lab.append(rows[k]); used += len(rows[k])
+            seqs.append(torch.cat([ids[b, :n]] + lab))
+        T = max(ids.size(1), max(len(x) for x in seqs))
+        new = ids.new_zeros(ids.size(0), T)
+        nm = mask.new_zeros(ids.size(0), T)
+        for b, x in enumerate(seqs):
+            new[b, :len(x)] = x
+            nm[b, :len(x)] = 1
+        return new, nm
+
     def _marker_pass(self, batch: dict):
         """The marker pass, through the relation adapter when there is one:
-        last hidden layer and last-layer attention."""
+        last hidden layer and last-layer attention (text positions only)."""
         if self.rel_lora is not None:
             self.rel_lora.on = True
         try:
+            if self.early_fusion and "rel_fuse_ids" in batch:
+                T = batch["rm_input_ids"].size(1)
+                seq, att = self._encode_with_attn(*self._fused_input(batch))
+                return seq[:, :T], att[:, :, :T, :T]
             return self._encode_with_attn(batch["rm_input_ids"], batch["rm_attention_mask"])
         finally:
             if self.rel_lora is not None and not self.rel_lora.sticky:

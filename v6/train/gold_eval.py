@@ -109,7 +109,8 @@ def model_from_checkpoint(ck: dict, device) -> tuple:
                     ner_lstm=cfg.get("ner_lstm", 0),
                     rel_xattn_layers=cfg.get("rel_xattn_layers", 2),
                     coref_adapter=cfg.get("coref_adapter", 0),
-                    last_attn_only=cfg.get("last_attn_only", False))
+                    last_attn_only=cfg.get("last_attn_only", False),
+                    early_fusion=cfg.get("early_fusion", 0))
     model.load_state_dict(ck["model"])          # strict: a mismatch raises
     model.to(device).eval()
     tok = AutoTokenizer.from_pretrained(spec.hf_id)
@@ -523,6 +524,9 @@ def run_phase2(model, feats: list[dict], tok, device, batch: int = 4,
         ids = cols if cols is not None else [r["id"] for r in load_bank()["relations"]
                                               if r["source"] == "redocred"]
         label_cols = torch.tensor(ids, device=device)
+        from .kdata import fuse_rows
+        fuse = [v.to(device) for v in fuse_rows(tok, [load_bank()["relations"][c]["name"]
+                                                       for c in ids])]
     for k in range(0, len(order), batch):
         idx = order[k:k + batch]
         b = {n: v.to(device) for n, v in collate([feats[i] for i in idx],
@@ -530,6 +534,7 @@ def run_phase2(model, feats: list[dict], tok, device, batch: int = 4,
         if label_emb is not None:
             b["rel_label_emb"] = label_emb
             b["rel_label_cols"] = label_cols     # the hybrid routes columns by bank id
+            b["rel_fuse_ids"], b["rel_fuse_mask"] = fuse
         o = model(b, predict=False, predict_heads=True)
         # A positive bias on the dummy "no antecedent" column links less
         # (calibration.json coref_link_bias, chosen on GUM dev).

@@ -58,6 +58,20 @@ def label_text(rel: dict, mode: str = "name_desc", rng=None) -> str:
     return f"relation: {name}. {rel['description']}"
 
 
+def fuse_rows(tok, names: list[str], max_len: int = 8):
+    """Early fusion (``V6Model.early_fusion``): each relation's name as a row
+    of token ids led by the separator, padded -- ``[K, L]`` ids and mask.
+    The model appends an item's rows to its marker-pass text."""
+    import torch
+    sep = tok.sep_token_id if tok.sep_token_id is not None else tok.eos_token_id
+    rows = [[sep] + tok(n, add_special_tokens=False, truncation=True,
+                        max_length=max_len)["input_ids"] for n in names]
+    L = max(len(r) for r in rows)
+    pad = tok.pad_token_id
+    return (torch.tensor([r + [pad] * (L - len(r)) for r in rows]),
+            torch.tensor([[1] * len(r) + [0] * (L - len(r)) for r in rows]))
+
+
 class LabelCollator:
     def __init__(self, tok, bank: dict, train: bool, seed: int = 13,
                  min_labels: int = 16, max_labels: int = 96,
@@ -150,6 +164,7 @@ class LabelCollator:
             known = torch.zeros(len(per), len(cols))                       # [B, K]
             for b, sc in enumerate(per):
                 known[b] = torch.as_tensor(np.isin(cols, sc), dtype=known.dtype)
+            batch["rel_label_known"] = known.bool()
             pk = known[batch["pair_batch"]]                                # [P, K]
             new = old[:, 1 + ct] * pk
             none = (new.sum(1, keepdim=True) == 0).to(new.dtype)
@@ -176,6 +191,8 @@ class LabelCollator:
         batch["rel_label_ids"] = torch.tensor([x + [pad] * (L - len(x)) for x in ids])
         batch["rel_label_mask"] = torch.tensor([[1] * len(x) + [0] * (L - len(x)) for x in ids])
         batch["rel_label_cols"] = torch.as_tensor(cols)
+        batch["rel_fuse_ids"], batch["rel_fuse_mask"] = fuse_rows(
+            self.tok, [self.rels[c]["name"] for c in cols])
         if "attr_rel" in batch:                  # fact attributes: their relation's column
             where = {int(c): j for j, c in enumerate(cols)}
             batch["attr_col"] = torch.as_tensor([where.get(int(r), -1)
