@@ -695,6 +695,10 @@ def main() -> int:
     ap.add_argument("--last-attn-only", action="store_true",
                     help="with eager attention: every layer runs sdpa except the last, whose "
                          "attention map the marker pass reads (less memory, faster)")
+    ap.add_argument("--eval-batch-size", type=int, default=None,
+                    help="items per dev batch (relation documents get a quarter). Default: "
+                         "twice --batch-size, at most 16. Dev batches have no token budget, so "
+                         "a large item cap must not reach them")
     ap.add_argument("--no-prefetch", action="store_true",
                     help="build micro-batches on the main thread (default: a background thread "
                          "builds the next ones while the GPU runs)")
@@ -1125,6 +1129,7 @@ def main() -> int:
                             eps=1e-6, fused=device.type == "cuda")
 
     micro = spec.batch_size
+    eval_bs = args.eval_batch_size or min(micro * 2, 16)
     if args.probe and args.max_batch_tokens:
         # Worst cases among the batches training will actually form: the
         # largest attention (items x longest^2), the most entity pairs, the
@@ -1378,7 +1383,7 @@ def main() -> int:
 
                 if step % args.eval_every == 0 or step == total:
                     rs.status(state="evaluating")
-                    r = evaluate(model, dev, vocab, tok.pad_token_id, device, amp, micro * 2,
+                    r = evaluate(model, dev, vocab, tok.pad_token_id, device, amp, eval_bs,
                                  rel_gold=rd_dev, label_coll=label_coll_dev,
                                  label_coll_zs=label_coll_zs, span_gold=span_dev,
                                  extra_rel=extra_dev, gold_dev=gold_dev_items,
