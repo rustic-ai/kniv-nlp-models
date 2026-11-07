@@ -669,6 +669,10 @@ def main() -> int:
     ap.add_argument("--kg-spans-only", default="",
                     help="comma-separated --kg-data sources used for their typed spans only "
                          "(relation labels dropped), e.g. trex")
+    ap.add_argument("--kg-no-spans", default="",
+                    help="comma-separated --kg-data sources whose typed spans are left out (their "
+                         "relations kept), so the span head keeps the types it trained on, "
+                         "e.g. short,short_pairs,synth")
     ap.add_argument("--type-hier", type=float, default=0.0,
                     help="share of Few-NERD training items whose type schema also lists the coarse "
                          "parents (person beside politician): the specific type stays the answer, "
@@ -887,6 +891,8 @@ def main() -> int:
                 # T-REx) left out, so it widens the span head's types without
                 # pulling the relation head toward them.
                 feats = [{k: v for k, v in f.items() if k != "rm"} | {"rel": None} for f in feats]
+            if src in args.kg_no_spans.split(","):
+                feats = [{k: v for k, v in f.items() if k != "ents"} for f in feats]
             w = float(n)
             if w < 1:                      # a fixed random fraction of the source
                 rng = np.random.default_rng([args.seed, len(src)])

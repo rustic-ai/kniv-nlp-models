@@ -143,6 +143,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--run", default="deberta-v3-large-p2-zs-v62-ftr")
     ap.add_argument("--questions", type=int, default=150)
+    ap.add_argument("--unseen-offset", type=float,
+                    help="override the run's calibrated new-relation offset")
     ap.add_argument("--max-answer-words", type=int, default=5)
     ap.add_argument("--dataset", choices=["longmemeval", "locomo"], default="longmemeval")
     ap.add_argument("--release", default=None,
@@ -163,6 +165,8 @@ def main() -> int:
     else:
         from ..infer import Extractor
         ex = Extractor(args.run)
+        if args.unseen_offset is not None:
+            ex.unseen_offset = args.unseen_offset
         import v6.train.span_eval as se
         se.DESCRIBE = True                    # the span head's trained text format
     rels = [{"name": n, "description": d} for n, d in RELATIONS]

@@ -184,6 +184,12 @@ def bootstrap(a: np.ndarray, b: np.ndarray, n: int = 2000, seed: int = 13):
     return float(f1(a)[2] - f1(b)[2]), float(np.percentile(d, 2.5)), float(np.percentile(d, 97.5))
 
 
+def half(it: dict) -> int:
+    """Short-dev half: 0 = the half the refitted offset is chosen on."""
+    import hashlib
+    return hashlib.sha1(it["id"].encode()).digest()[0] % 2
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--runs", required=True, help="comma-separated; the last is the baseline")
@@ -193,52 +199,94 @@ def main() -> int:
     ap.add_argument("--device")
     ap.add_argument("--local", type=Path)
     ap.add_argument("--sweep", action="store_true", help="F1 against the new-relation offset")
+    ap.add_argument("--refit", action="store_true",
+                    help="also choose each run's new-relation offset on half the short dev "
+                         "(gold entities) and score the other half and CoNLL04 at it")
+    ap.add_argument("--cache", type=Path, help="candidate facts per run: read if there, else written")
     args = ap.parse_args()
+    import pickle
     from ..infer import Extractor
 
     sets = {"conll04": load_conll04, "short_dev": load_short_dev}
     data = {s: sets[s](args.limit) for s in args.sets.split(",")}
     out_dir = RUNS_DIR / "heldout-zs" / time.strftime("%Y%m%d-%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
-    counts: dict = {}
-    summary: dict = {}
-    for run in args.runs.split(","):
+    runs = args.runs.split(",")
+    modes = args.modes.split(",")
+    rows: dict = {}
+    deployed: dict = {}
+    for run in runs:
+        cp = args.cache / f"{run}.pkl" if args.cache else None
+        if cp and cp.exists():
+            deployed[run], rows[run] = pickle.loads(cp.read_bytes())
+            print(f"{run}: candidates from {cp}", flush=True)
+            continue
         ex = Extractor(run, device=args.device, local=args.local)
-        dep = ex.unseen_offset
+        deployed[run] = dep = ex.unseen_offset
         ex.rel_offsets = {k: v + SHIFT for k, v in ex.rel_offsets.items()}
         ex.unseen_offset = dep - SHIFT
         ex.top = max(ex.top, 4)
+        rows[run] = {}
         for s, items in data.items():
-            for mode in args.modes.split(","):
+            for mode in modes:
                 t0 = time.time()
-                rows = predict(ex, items, mode)
-                c = np.array([score_item(r, mode) for r in rows])
-                counts[(run, s, mode)] = c
-                p, r, f = f1(c)
-                summary[f"{run}|{s}|{mode}"] = {"p": p, "r": r, "f1": f, "n": len(items),
-                                                "unseen_offset": dep}
-                print(f"{run} {s} {mode}: F1 {f:.3f} P {p:.3f} R {r:.3f} "
-                      f"({len(items)} texts, {time.time() - t0:.0f}s)", flush=True)
-                if args.sweep:
-                    best = None
-                    for d in np.round(np.arange(-4.0, 4.01, 0.25), 2):
-                        cc = np.array([score_item(x, mode, d) for x in rows])
-                        fd = f1(cc)[2]
-                        best = max(best or (fd, d), (fd, d))
-                        print(f"  unseen_offset {dep + d:+.2f}: F1 {fd:.3f}", flush=True)
-                    summary[f"{run}|{s}|{mode}"]["sweep_best"] = {"f1": best[0],
-                                                                  "unseen_offset": dep + best[1]}
+                rows[run][(s, mode)] = predict(ex, items, mode)
+                print(f"{run} {s} {mode}: predicted ({len(items)} texts, "
+                      f"{time.time() - t0:.0f}s)", flush=True)
         del ex
-    runs = args.runs.split(",")
+        if cp:
+            cp.parent.mkdir(parents=True, exist_ok=True)
+            cp.write_bytes(pickle.dumps((deployed[run], rows[run])))
+
+    def counts(run, s, mode, delta=0.0, part=None):
+        return np.array([score_item(r, mode, delta) for r in rows[run][(s, mode)]
+                         if part is None or half(r["item"]) == part])
+
+    summary: dict = {}
+    for run in runs:
+        dep = deployed[run]
+        for s in data:
+            for mode in modes:
+                p, r, f = f1(counts(run, s, mode))
+                summary[f"{run}|{s}|{mode}"] = {"p": p, "r": r, "f1": f, "unseen_offset": dep}
+                print(f"{run} {s} {mode}: F1 {f:.3f} P {p:.3f} R {r:.3f} (offset {dep:+.2f})")
+                if args.sweep:
+                    for d in np.round(np.arange(-4.0, 4.01, 0.25), 2):
+                        print(f"  unseen_offset {dep + d:+.2f}: "
+                              f"F1 {f1(counts(run, s, mode, d))[2]:.3f}")
+    deltas = {r: 0.0 for r in runs}
+    if args.refit and "short_dev" in data:
+        print("\nrefit: offset chosen on short-dev half 0 (gold entities), scored on half 1 "
+              "and CoNLL04")
+        for run in runs:
+            grid = np.round(np.arange(-4.0, 4.01, 0.25), 2)
+            fs = [f1(counts(run, "short_dev", "gold", d, part=0))[2] for d in grid]
+            deltas[run] = float(grid[int(np.argmax(fs))])
+            off = deployed[run] + deltas[run]
+            summary[f"{run}|refit"] = {"unseen_offset": off, "search_f1": max(fs)}
+            print(f"{run}: unseen_offset {off:+.2f} (search half F1 {max(fs):.3f})")
+            for s in data:
+                for mode in modes:
+                    part = 1 if s == "short_dev" else None
+                    p, r, f = f1(counts(run, s, mode, deltas[run], part))
+                    summary[f"{run}|{s}|{mode}|refit"] = {"p": p, "r": r, "f1": f}
+                    print(f"  {s}{' half 1' if part else ''} {mode}: F1 {f:.3f} P {p:.3f} R {r:.3f}")
     if len(runs) > 1:
         base = runs[-1]
-        print(f"\npaired bootstrap against {base} (F1 difference, 95% interval)")
-        for run in runs[:-1]:
-            for s in data:
-                for mode in args.modes.split(","):
-                    d, lo, hi = bootstrap(counts[(run, s, mode)], counts[(base, s, mode)])
-                    summary[f"{run}-vs-{base}|{s}|{mode}"] = {"diff": d, "lo": lo, "hi": hi}
-                    print(f"  {run} {s} {mode}: {d:+.3f} [{lo:+.3f}, {hi:+.3f}]")
+        for tag, use in (("deployed offsets", False), ("refitted offsets", args.refit)):
+            if not use and tag != "deployed offsets":
+                continue
+            print(f"\npaired bootstrap against {base}, {tag} (F1 difference, 95% interval)")
+            for run in runs[:-1]:
+                for s in data:
+                    for mode in modes:
+                        part = 1 if use and s == "short_dev" else None
+                        a = counts(run, s, mode, deltas[run] if use else 0.0, part)
+                        b = counts(base, s, mode, deltas[base] if use else 0.0, part)
+                        d, lo, hi = bootstrap(a, b)
+                        summary[f"{run}-vs-{base}|{s}|{mode}|{tag}"] = {"diff": d, "lo": lo, "hi": hi}
+                        print(f"  {run} {s}{' half 1' if part else ''} {mode}: "
+                              f"{d:+.3f} [{lo:+.3f}, {hi:+.3f}]")
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=1))
     print(f"written to {out_dir}")
     return 0
