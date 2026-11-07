@@ -87,6 +87,33 @@ def f1(gold: list[set], pred: list[set]) -> dict:
     return {"p": pr, "r": rc, "f1": 2 * pr * rc / max(pr + rc, 1e-12), "gold": ng}
 
 
+def _counts(gold: list[set], pred: list[set]) -> np.ndarray:
+    return np.array([[len(g & p), len(p), len(g)] for g, p in zip(gold, pred)], dtype=float)
+
+
+def _f1c(c: np.ndarray) -> float:
+    tp, np_, ng = c[..., 0], c[..., 1], c[..., 2]
+    return 2 * tp / np.maximum(np_ + ng, 1e-12)
+
+
+def paired(gold: dict, pa: dict, pb: dict, singles: list[str], mean_of: list[str],
+           n: int = 2000, seed: int = 0) -> dict:
+    """Micro F1 difference per set (and for the mean over ``mean_of``),
+    resampling sentences with replacement, the same draw for both runs."""
+    rng = np.random.default_rng(seed)
+    draws = {}
+    for s in singles + mean_of:
+        ca, cb = _counts(gold[s], pa[s]), _counts(gold[s], pb[s])
+        idx = rng.integers(0, len(ca), size=(n, len(ca)))
+        draws[s] = (100 * (_f1c(ca.sum(0)) - _f1c(cb.sum(0))),
+                    100 * (_f1c(ca[idx].sum(1)) - _f1c(cb[idx].sum(1))))
+    out = {s: (d, *np.percentile(bs, [2.5, 97.5])) for s, (d, bs) in draws.items()}
+    pt = np.mean([draws[s][0] for s in mean_of])
+    bs = np.mean([draws[s][1] for s in mean_of], axis=0)
+    out[f"crossner mean of {len(mean_of)}"] = (pt, *np.percentile(bs, [2.5, 97.5]))
+    return {k: tuple(float(x) for x in v) for k, v in out.items()}
+
+
 @torch.no_grad()
 def kniv_predict(model, tok, spec, vocab, device, items: list[dict], labels: list[str],
                  batch: int = 16, offset: float = 0.0, describe=None) -> list[set]:
@@ -136,6 +163,8 @@ def main() -> int:
                          "other sets at it; written into the run's calibration record")
     ap.add_argument("--describe", action="store_true",
                     help="give kniv 'a <name>' as each type's description (its trained format)")
+    ap.add_argument("--paired", action="store_true",
+                    help="paired bootstrap over sentences, first run minus last run")
     args = ap.parse_args()
     global DESCRIBE
     DESCRIBE = args.describe
@@ -149,6 +178,7 @@ def main() -> int:
     out = RUNS_DIR / "span-eval" / time.strftime("%Y%m%d-%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
     results: dict[str, dict] = {}
+    preds: dict[str, dict] = {}
     if args.gliner:
         spec = {"model": args.gliner_model, "threshold": args.threshold,
                 "sets": {n: {"labels": labels[n], "items": [{"tokens": it["tokens"]} for it in s]}
@@ -178,9 +208,9 @@ def main() -> int:
                 r = json.loads(rec.read_text()); r["span_offset"] = off
                 r["span_offset_note"] = f"chosen on {c} (describe={DESCRIBE})"
                 rec.write_text(json.dumps(r, indent=1))
-        results[run] = {n: f1(gold[n], kniv_predict(model, tok, spec_, vocab, device, s, labels[n],
-                                                    offset=off))
-                        for n, s in sets.items()}
+        preds[run] = {n: kniv_predict(model, tok, spec_, vocab, device, s, labels[n], offset=off)
+                      for n, s in sets.items()}
+        results[run] = {n: f1(gold[n], preds[run][n]) for n in sets}
         if args.calibrate_on:
             results[run]["_span_offset"] = off
         del model
@@ -191,6 +221,13 @@ def main() -> int:
               " ".join(f"{d} {r[f'crossner_{d}']['f1']:.4f}" for d in DOMAINS)
               + f" | mean of {len(held)} {cn:.4f}",
               flush=True)
+    if args.paired and len(preds) >= 2:
+        a, b = list(preds)[0], list(preds)[-1]
+        held = [f"crossner_{d}" for d in DOMAINS if f"crossner_{d}" != args.calibrate_on]
+        results["_paired"] = paired(gold, preds[a], preds[b], ["fewnerd"], held)
+        print(f"paired bootstrap, {a} - {b} (F1 points, 95% interval):")
+        for k, (d, lo, hi) in results["_paired"].items():
+            print(f"  {k}: {d:+.2f} [{lo:+.2f}, {hi:+.2f}]")
     (out / "results.json").write_text(json.dumps(results, indent=1))
     print(f"written to {out}")
     return 0
