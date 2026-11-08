@@ -1161,6 +1161,9 @@ def main() -> int:
     ap.add_argument("--no-xattn", action="store_true",
                     help="v6.2 zero-shot head: switch the label cross-attention off, to measure "
                          "what it adds")
+    ap.add_argument("--reuse", type=Path, metavar="DIR",
+                    help="take a run's results from DIR/<run>.json (an earlier gold_eval output) "
+                         "when it holds every requested benchmark, instead of evaluating it again")
     args = ap.parse_args()
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else
                                           "mps" if torch.backends.mps.is_available() else "cpu"))
@@ -1169,6 +1172,14 @@ def main() -> int:
     results = {}
     for run in args.runs.split(","):
         t0 = time.time()
+        prev = args.reuse / f"{run}.json" if args.reuse else None
+        if prev and prev.exists():
+            saved = json.loads(prev.read_text())
+            want = args.benchmarks.split(",")
+            if all(b in saved["results"] for b in want):
+                results[run] = {b: saved["results"][b] for b in want}
+                print(f"{run}: results reused from {prev}", flush=True)
+                continue
         model, tok, spec, vocab, best = load_run(run, args.repo, device, args.local)
         cal = apply_calibration(model, run, vocab, args.repo, local=bool(args.local),
                                 entity_coref=args.entity_coref)

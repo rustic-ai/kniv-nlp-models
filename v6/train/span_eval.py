@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pickle
 import subprocess
 import time
 from collections import Counter
@@ -165,6 +166,9 @@ def main() -> int:
                     help="give kniv 'a <name>' as each type's description (its trained format)")
     ap.add_argument("--paired", action="store_true",
                     help="paired bootstrap over sentences, first run minus last run")
+    ap.add_argument("--cache", type=Path, metavar="DIR",
+                    help="keep each run's predictions in DIR and reuse them when the run, "
+                         "calibration set, Few-NERD size and --describe match")
     args = ap.parse_args()
     global DESCRIBE
     DESCRIBE = args.describe
@@ -193,6 +197,17 @@ def main() -> int:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else
                                           "mps" if torch.backends.mps.is_available() else "cpu"))
     for run in [r for r in args.runs.split(",") if r]:
+        key = (run, args.calibrate_on, args.fewnerd, DESCRIBE)
+        cf = args.cache / f"{run}.pkl" if args.cache else None
+        if cf and cf.exists():
+            c_ = pickle.loads(cf.read_bytes())
+            if c_["key"] == key:
+                preds[run] = c_["preds"]
+                results[run] = {n: f1(gold[n], preds[run][n]) for n in sets}
+                if args.calibrate_on:
+                    results[run]["_span_offset"] = c_["offset"]
+                print(f"{run}: predictions reused from {cf}", flush=True)
+                continue
         model, tok, spec_, vocab, _ = load_run(run, args.repo, device, args.local)
         off = 0.0
         if args.calibrate_on:
@@ -213,6 +228,9 @@ def main() -> int:
         results[run] = {n: f1(gold[n], preds[run][n]) for n in sets}
         if args.calibrate_on:
             results[run]["_span_offset"] = off
+        if cf:
+            cf.parent.mkdir(parents=True, exist_ok=True)
+            cf.write_bytes(pickle.dumps({"key": key, "preds": preds[run], "offset": off}))
         del model
     for who, r in results.items():
         held = [d for d in DOMAINS if f"crossner_{d}" != args.calibrate_on]
