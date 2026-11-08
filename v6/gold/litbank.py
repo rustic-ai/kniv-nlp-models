@@ -31,8 +31,13 @@ def download(limit_docs: int | None = None) -> list[Path]:
     have = sorted(LITBANK_DIR.glob("*.conll"))
     if limit_docs and len(have) >= limit_docs:
         return have[:limit_docs]
-    with urllib.request.urlopen(LISTING, timeout=30) as r:
-        names = [f["name"] for f in json.load(r) if f["name"].endswith(".conll")]
+    try:
+        with urllib.request.urlopen(LISTING, timeout=30) as r:
+            names = [f["name"] for f in json.load(r) if f["name"].endswith(".conll")]
+    except OSError:
+        if not have:
+            raise
+        names = [h.name for h in have]      # listing unreachable: use the local copy
     names.sort()
     if limit_docs:
         names = names[:limit_docs]
