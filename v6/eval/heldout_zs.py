@@ -8,9 +8,15 @@ calibration (``calibration.json``), in two modes:
 - ``gold``: the gold entities are given, so only the relation step is scored;
   a fact is right when its head entity, relation and tail entity are.
 - ``e2e``: the model finds the entities itself (typed by the set's entity
-  types); a predicted fact is right when some mention of its head and of its
+  types, through the zero-shot span head); a predicted fact is right when some mention of its head and of its
   tail equals (case-insensitive) a mention of a gold fact's head and tail,
   with the same relation. Each gold fact is matched once.
+- ``e2e_ent`` (diagnostic): as ``e2e`` but with the entity-mention head
+  trained on Re-DocRED (no types), to tell the span head's misses from the
+  relation step's.
+
+End-to-end modes also print entity mention F1 and the share of gold facts
+whose two arguments were both found, the relation step's ceiling.
 
 CoNLL04 is never trained on (its relations are not in the label bank, so all
 five go through the new-relation path; ``kg_short`` drops training texts that
@@ -121,6 +127,8 @@ def predict(ex, items: list[dict], mode: str) -> list[dict]:
         if mode == "gold":
             ents = [{"type": e["type"], "mentions": sorted(tuple(s) for s in e["spans"])}
                     for e in it["entities"]]
+        elif mode == "e2e_ent":
+            ents = ex._entities(w, None)
         else:
             ents = ex._entities(w, [t["name"] for t in it["types"]])
         nodes, facts = ex._relations(w, ents, list(it["relations"]), ex.top)
@@ -139,7 +147,8 @@ def predict(ex, items: list[dict], mode: str) -> list[dict]:
         for f in facts:
             cand.append({"key": (keys[f["head"]], f["relation"], keys[f["tail"]]),
                          "m": f["margin"] - SHIFT, "unseen": f["relation"] not in known})
-        out.append({"cand": cand, "gold": it["facts"], "item": it})
+        out.append({"cand": cand, "gold": it["facts"], "item": it,
+                    "ents": [(e.get("type"), [tuple(m) for m in e["mentions"]]) for e in ents]})
     return out
 
 
@@ -166,6 +175,29 @@ def score_item(row: dict, mode: str, delta: float = 0.0) -> tuple[int, int, int]
                 tp += 1
                 break
     return tp, len(seen), len(gm)
+
+
+def entity_stats(rows: list[dict]) -> dict:
+    """Where the end-to-end loss starts: the predicted entities against the
+    gold ones, before any relation is decided. ``mention``: exact spans,
+    type ignored; ``typed``: span and type; ``reach``: gold facts whose head
+    and tail both have a mention among the predicted entities (case-
+    insensitive text, as ``score_item`` matches), the relation step's ceiling."""
+    m = np.zeros(3)
+    t = np.zeros(3)
+    reach = np.zeros(2)
+    for r in rows:
+        it = r["item"]
+        gs = {(a, b) for e in it["entities"] for a, b in e["spans"]}
+        gt = {(e["type"], a, b) for e in it["entities"] for a, b in e["spans"]}
+        ps = {m_ for _, ms in r["ents"] for m_ in ms}
+        pt = {(ty, a, b) for ty, ms in r["ents"] for a, b in ms}
+        m += [len(ps & gs), len(ps), len(gs)]
+        t += [len(pt & gt), len(pt), len(gt)]
+        texts = {" ".join(it["tokens"][a:b]).lower() for a, b in ps}
+        for f in r["gold"]:
+            reach += [bool(_mentions(it, f["head"]) & texts and _mentions(it, f["tail"]) & texts), 1]
+    return {"mention": f1(m), "typed": f1(t), "reach": reach[0] / max(reach[1], 1)}
 
 
 def f1(c: np.ndarray) -> tuple[float, float, float]:
@@ -250,6 +282,12 @@ def main() -> int:
                 p, r, f = f1(counts(run, s, mode))
                 summary[f"{run}|{s}|{mode}"] = {"p": p, "r": r, "f1": f, "unseen_offset": dep}
                 print(f"{run} {s} {mode}: F1 {f:.3f} P {p:.3f} R {r:.3f} (offset {dep:+.2f})")
+                if mode != "gold" and "ents" in rows[run][(s, mode)][0]:
+                    es = entity_stats(rows[run][(s, mode)])
+                    summary[f"{run}|{s}|{mode}|entities"] = es
+                    print(f"  entities: mention F1 {es['mention'][2]:.3f} (P {es['mention'][0]:.3f} "
+                          f"R {es['mention'][1]:.3f}), typed F1 {es['typed'][2]:.3f}, "
+                          f"gold facts with both arguments found {es['reach']:.3f}")
                 if args.sweep:
                     for d in np.round(np.arange(-4.0, 4.01, 0.25), 2):
                         print(f"  unseen_offset {dep + d:+.2f}: "
