@@ -235,6 +235,9 @@ def main() -> int:
                     help="also choose each run's new-relation offset on half the short dev "
                          "(gold entities) and score the other half and CoNLL04 at it")
     ap.add_argument("--cache", type=Path, help="candidate facts per run: read if there, else written")
+    ap.add_argument("--span-boost", type=float,
+                    help="typed entities: also propose the entity-mention head's spans, margin "
+                         "raised by this (overrides calibration.json's span_boost)")
     args = ap.parse_args()
     import pickle
     from ..infer import Extractor
@@ -253,7 +256,7 @@ def main() -> int:
             deployed[run], rows[run] = pickle.loads(cp.read_bytes())
             print(f"{run}: candidates from {cp}", flush=True)
             continue
-        ex = Extractor(run, device=args.device, local=args.local)
+        ex = Extractor(run, device=args.device, local=args.local, span_boost=args.span_boost)
         deployed[run] = dep = ex.unseen_offset
         ex.rel_offsets = {k: v + SHIFT for k, v in ex.rel_offsets.items()}
         ex.unseen_offset = dep - SHIFT

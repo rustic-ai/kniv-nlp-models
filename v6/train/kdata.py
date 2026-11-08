@@ -417,17 +417,29 @@ class TypeCollator:
         return batch
 
 
-def decode_spans(logits: torch.Tensor, batch: dict,
-                 offset: float = 0.0) -> list[list[tuple[int, int, int]]]:
+def decode_spans(logits: torch.Tensor, batch: dict, offset: float = 0.0,
+                 proposals: list[set] | None = None,
+                 boost: float = 0.0) -> list[list[tuple[int, int, int]]]:
     """Greedy flat decoding: per item, spans whose best type beats the
     threshold, highest margin first, skipping any that overlap one taken.
-    ``(start, end_exclusive, bank type id)``."""
+    ``(start, end_exclusive, bank type id)``.
+
+    ``proposals``: per item, ``(start, end)`` spans another detector found
+    (the entity-mention head); their margin is raised by ``boost`` before the
+    same greedy pass, so the span head still types them and still competes
+    with them. ``boost`` 0 is plain decoding; a large one keeps every
+    proposal the span head can represent."""
     if len(logits) == 0:
         return []
     # ``offset``: a span is kept when its best margin exceeds it (calibrated
     # for type names the head never trained on, like the label path's).
     margin = logits[:, 1:] - logits[:, :1] - offset
     best, j = margin.max(1)
+    if proposals is not None and boost:
+        sb, ss, se = (batch[k].tolist() for k in ("span_batch", "span_start", "span_end"))
+        hit = torch.tensor([(s_, e_) in proposals[b_] for b_, s_, e_ in zip(sb, ss, se)],
+                           dtype=torch.bool)
+        best = best + boost * hit.to(best.dtype)
     cols = batch["type_label_cols"]
     out: dict[int, list] = {}
     taken: dict[int, np.ndarray] = {}

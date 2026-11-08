@@ -40,7 +40,7 @@ UNSEEN_ID = 10 ** 6          # columns the bank does not know: never routed to t
 class Extractor:
     def __init__(self, run: str = "deberta-v3-large-p2-zs-v62-ftr", device=None,
                  local: Path | None = None, zs_offset: float | None = None,
-                 span_offset: float | None = None):
+                 span_offset: float | None = None, span_boost: float | None = None):
         from .train.gold_eval import HF_REPO, load_run
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else
                                               "mps" if torch.backends.mps.is_available() else "cpu"))
@@ -55,6 +55,9 @@ class Extractor:
         self.model.zs_offset = float(zs_offset if zs_offset is not None else cal.get("offset", 0.0))
         self.span_offset = float(span_offset if span_offset is not None
                                  else cal.get("span_offset", 0.0))
+        # Typed entities: the entity-mention head's spans also proposed to
+        # the span head, their margin raised by this (None: span head alone).
+        self.span_boost = span_boost if span_boost is not None else cal.get("span_boost")
         # How coreference groups mentions into entities, chosen per run on
         # Re-DocRED dev (gold_eval redocred_dev_oracle).
         self.entity_coref = cal.get("entity_coref", "all")
@@ -106,7 +109,7 @@ class Extractor:
             from .train.span_eval import kniv_predict
             pred = kniv_predict(self.model, self.tok, self.spec, self.vocab, self.device,
                                 [{"tokens": tokens[:W], "spans": []}], types, batch=1,
-                                offset=self.span_offset)[0]
+                                offset=self.span_offset, boost=self.span_boost)[0]
             ner = []
             for s, e in sp:
                 tags = ["O"] * (e - s)

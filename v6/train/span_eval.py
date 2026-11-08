@@ -116,9 +116,26 @@ def paired(gold: dict, pa: dict, pb: dict, singles: list[str], mean_of: list[str
 
 
 @torch.no_grad()
+def mention_proposals(o: dict, b: dict) -> list[set]:
+    """Per item, the spans the entity-mention head (trained on Re-DocRED,
+    untyped) finds: BIO Viterbi over each item's words."""
+    from .data import ENT_TAGS
+    from .gold_eval import bio_constraints, viterbi
+    from ..entities import bio_spans
+    allowed, start = bio_constraints(ENT_TAGS)
+    lp = torch.log_softmax(o["ent"].float(), -1).cpu().numpy()
+    n = b["word_mask"].sum(1).tolist()
+    return [{(a, e) for _, a, e in bio_spans([ENT_TAGS[x] for x in viterbi(lp[i, :int(n[i])],
+                                                                          allowed, start)])}
+            for i in range(len(n))]
+
+
 def kniv_predict(model, tok, spec, vocab, device, items: list[dict], labels: list[str],
-                 batch: int = 16, offset: float = 0.0, describe=None) -> list[set]:
-    """``describe``: type name -> description (default: ``--describe``'s)."""
+                 batch: int = 16, offset: float = 0.0, describe=None,
+                 boost: float | None = None) -> list[set]:
+    """``describe``: type name -> description (default: ``--describe``'s).
+    ``boost``: also propose the entity-mention head's spans, their margin
+    raised by ``boost`` (``kdata.decode_spans``); None: the span head alone."""
     from .data import blank_window, collate
     from .kdata import TypeCollator, decode_spans, span_targets
     # kniv's span head trained on "entity type: <name>. <description>"; a
@@ -143,8 +160,9 @@ def kniv_predict(model, tok, spec, vocab, device, items: list[dict], labels: lis
         b = coll(collate([feats[i] for i in idx], tok.pad_token_id))
         b = {n: v.to(device) for n, v in b.items() if hasattr(v, "to")}
         o = model(b, relation_only=True)
+        props = mention_proposals(o, b) if boost is not None and o.get("ent") is not None else None
         for j, spans in enumerate(decode_spans(o["span"].float().cpu(), {n: v.cpu() for n, v in b.items()},
-                                          offset=offset)):
+                                          offset=offset, proposals=props, boost=boost or 0.0)):
             out[idx[j]] = {(s, e, labels[t]) for s, e, t in spans}
     return out
 
