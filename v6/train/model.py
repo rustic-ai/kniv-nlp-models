@@ -1046,7 +1046,7 @@ class V6Model(nn.Module):
                  word_pool: str = "first", attr_head: bool = False,
                  srl_pred_hidden: int = 0, srl_ctx: int = 0, linker: int = 0,
                  ner_lstm: int = 0, rel_xattn_layers: int = 2, coref_adapter: int = 0,
-                 last_attn_only: bool = False, early_fusion: int = 0):
+                 last_attn_only: bool = False, early_fusion: int = 0, ent_adapter: int = 0):
         super().__init__()
         # Early fusion (v8 W5 ablation): up to ``early_fusion`` tokens of the
         # schema's relation names appended to each item's marker-pass text,
@@ -1197,7 +1197,15 @@ class V6Model(nn.Module):
         # plain pass (B = 0).
         self.coref_lora = (RelationAdapter(self.encoder, coref_adapter)
                            if phase2 and coref_adapter else None)
-        # Schema-conditioned entity spans, read off the plain pass.
+        # Entity spans through their own adapter (v8): the span head (and the
+        # linker's word vectors) read a second encoder pass, so typed-entity
+        # finding can adapt the encoder while the linguistic heads and the
+        # entity-mention head keep the plain pass bit-identical. Starts as the
+        # plain pass (B = 0).
+        self.ent_lora = (RelationAdapter(self.encoder, ent_adapter)
+                         if phase2 and ent_adapter else None)
+        # Schema-conditioned entity spans, read off the plain pass (or the
+        # entity adapter's pass).
         self.span = None
         if span_head:
             if rel_head not in ("label", "zs"):
@@ -1334,11 +1342,31 @@ class V6Model(nn.Module):
                 self.rel_lora.on = False
         return tuple(F.layer_norm(h, h.shape[-1:]) for h in out.hidden_states)
 
+    def _ent_layers(self, batch: dict):
+        """The entity adapter's encoder pass, every other adapter off (needs
+        gradient checkpointing off, as ``_coref_layers``)."""
+        others = [a for a in (self.rel_lora, self.legacy_lora, self.label_lora, self.coref_lora)
+                  if a is not None]
+        prev = [a.on for a in others]
+        for a in others:
+            a.on = False
+        self.ent_lora.on = True
+        try:
+            out = self.encoder(input_ids=batch["input_ids"],
+                               attention_mask=batch["attention_mask"],
+                               output_hidden_states=True)
+        finally:
+            self.ent_lora.on = False
+            for a, on in zip(others, prev):
+                a.on = on
+        return tuple(F.layer_norm(h, h.shape[-1:]) for h in out.hidden_states)
+
     def _coref_layers(self, batch: dict):
         """The coreference adapter's encoder pass, with every other adapter
         off. Not safe under gradient checkpointing (the switch is off again
         by the time backward recomputes the forward)."""
-        others = [a for a in (self.rel_lora, self.legacy_lora, self.label_lora) if a is not None]
+        others = [a for a in (self.rel_lora, self.legacy_lora, self.label_lora, self.ent_lora)
+                  if a is not None]
         prev = [a.on for a in others]
         for a in others:
             a.on = False
@@ -1555,14 +1583,18 @@ class V6Model(nn.Module):
         if self.ent is not None:
             o["ent"] = self.ent(self._words(plain_layers, "ent", first))
             o["_anchor"] = o["ent"].sum() * 0.0
-        if self.linker is not None or self.emit_link_words:
-            o["link_words"] = self._words(plain_layers, "ent_span" if "ent_span" in self.mix
+        want_span = self.span is not None and "span_batch" in batch
+        want_link = self.linker is not None or self.emit_link_words
+        ent_layers = (self._ent_layers(batch) if self.ent_lora is not None and (want_span or want_link)
+                      else plain_layers)
+        if want_link:
+            o["link_words"] = self._words(ent_layers, "ent_span" if "ent_span" in self.mix
                                           else "ent", first)
-        if self.span is not None and "span_batch" in batch:
+        if want_span:
             temb = batch.get("type_label_emb")
             if temb is None:
                 temb = self.label_embeddings(batch["type_label_ids"], batch["type_label_mask"])
-            o["span"] = self.span(self._words(plain_layers, "ent_span", first), batch, temb)
+            o["span"] = self.span(self._words(ent_layers, "ent_span", first), batch, temb)
             o["_anchor"] = o["span"].sum() * 0.0
         if "rm_input_ids" in batch and bool(batch["rm_ok"].all()):
             seq, att = self._marker_pass(batch)

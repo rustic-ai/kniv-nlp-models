@@ -109,6 +109,7 @@ def model_from_checkpoint(ck: dict, device) -> tuple:
                     ner_lstm=cfg.get("ner_lstm", 0),
                     rel_xattn_layers=cfg.get("rel_xattn_layers", 2),
                     coref_adapter=cfg.get("coref_adapter", 0),
+                    ent_adapter=cfg.get("ent_adapter", 0),
                     last_attn_only=cfg.get("last_attn_only", False),
                     early_fusion=cfg.get("early_fusion", 0))
     model.load_state_dict(ck["model"])          # strict: a mismatch raises

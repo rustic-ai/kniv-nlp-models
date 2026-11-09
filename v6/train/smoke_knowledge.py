@@ -397,6 +397,38 @@ def main() -> int:
     check("fact attribute loss is finite and reaches the attribute head (bf16)",
           isinstance(A.attr, FactAttrHead) and torch.isfinite(La["fact_attr"][0]) and ga
           and La["fact_attr"][1] == n_attr, f"fact_attr {La['fact_attr'][0].item():.3f} over {La['fact_attr'][1]}")
+    # 12. v8: the entity adapter -- a span-only encoder pass
+    E = V6Model(spec.hf_id, sizes, phase2=True, rel_adapter=8, rel_markers=True, rel_head="zs",
+                legacy_relation=True, span_head=True, label_adapter=4, legacy_rank=4,
+                ent_adapter=4).eval()
+    miss, unexp = E.load_state_dict(Z.state_dict(), strict=False)
+    Z.eval(); no_dropout(E); no_dropout(Z)
+    with torch.no_grad():
+        oz, oe = Z(zt, relation_only=True), E(zt, relation_only=True)
+    d0 = float((oz["span"] - oe["span"]).abs().max())
+    check("entity adapter: only ent_lora is new, and at B = 0 the span logits equal the plain pass's",
+          all(k.startswith("ent_lora.") for k in miss) and not unexp and d0 < 1e-5, f"max |diff| {d0:.1e}")
+    E.train(); no_dropout(E)
+    for n, prm in E.named_parameters():
+        prm.requires_grad = n.startswith(("ent_lora.", "span.", "mix.ent_span."))
+    with torch.no_grad():
+        for prm in E.ent_lora.B.values():
+            prm.normal_(0, 0.02)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        oe = E(zt, relation_only=True)
+        Le = losses(oe, zt)
+    Le["ent_span"][0].backward()
+    ge = any(p.grad is not None and float(p.grad.abs().sum()) > 0 for n, p in E.named_parameters()
+             if n.startswith("ent_lora."))
+    E.eval()
+    with torch.no_grad():
+        oz, oe = Z(zt, relation_only=True), E(zt, relation_only=True)
+    same_ent = torch.equal(oz["ent"], oe["ent"])
+    same_rel = float((oz["relation"] - oe["relation"]).abs().max()) < 1e-5
+    moved = float((oz["span"] - oe["span"]).abs().max()) > 1e-4
+    check("entity adapter: span loss reaches ent_lora (bf16); the mention head and relations "
+          "keep the plain pass, only the span logits move",
+          ge and same_ent and same_rel and moved, f"ent_span {Le['ent_span'][0].item():.3f}")
     print("all knowledge-layer smoke checks passed")
     return 0
 
