@@ -96,7 +96,9 @@ class Extractor:
 
     # ── entities ─────────────────────────────────────────────────────
     @torch.no_grad()
-    def _entities(self, w: dict, types: list[str] | None):
+    def _entities(self, w: dict, types: list | None):
+        """``types``: the caller's entity types, ``{"name", "description"?}``
+        (bare names also accepted); None: the frozen DocRED entity head."""
         from .entities import build_entities
         from .train.data import ENT_TAGS
         from .train.gold_eval import bio_constraints, phase2_window, run_phase2, viterbi
@@ -107,9 +109,12 @@ class Extractor:
         span_type: dict[tuple[int, int], str] = {}
         if types:
             from .train.span_eval import kniv_predict
+            types = [t if isinstance(t, dict) else {"name": t} for t in types]
+            desc = {t["name"]: t.get("description") or "" for t in types}
             pred = kniv_predict(self.model, self.tok, self.spec, self.vocab, self.device,
-                                [{"tokens": tokens[:W], "spans": []}], types, batch=1,
-                                offset=self.span_offset, boost=self.span_boost)[0]
+                                [{"tokens": tokens[:W], "spans": []}], [t["name"] for t in types],
+                                batch=1, offset=self.span_offset, describe=desc.get,
+                                boost=self.span_boost)[0]
             ner = []
             for s, e in sp:
                 tags = ["O"] * (e - s)
@@ -132,7 +137,7 @@ class Extractor:
             link = Linker(self.model, tokens, sp, o["link_words"], o["coref"], self.link_threshold)
         _, vertex = build_entities(tokens, [list(x) for x in sp], ner,
                                    [[list(m) for m in c] for c in o["coref"]],
-                                   coref=self.entity_coref, link=link)
+                                   coref=self.entity_coref, link=link, min_entities=1)
         ents = []
         for v in vertex or []:
             ms = sorted({(sp[m["sent_id"]][0] + m["pos"][0], sp[m["sent_id"]][0] + m["pos"][1])
@@ -204,7 +209,7 @@ class Extractor:
 
     def extract(self, text: str | None = None, turns=None, relations: list[dict] = (),
                 entity_types: list[dict] | None = None, top: int | None = None) -> list[dict]:
-        types = [t["name"] for t in entity_types] if entity_types else None
+        types = list(entity_types) if entity_types else None
         out = []
         for w in self.windows(text, turns):
             ents = self._entities(w, types)

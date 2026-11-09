@@ -130,7 +130,7 @@ def predict(ex, items: list[dict], mode: str) -> list[dict]:
         elif mode == "e2e_ent":
             ents = ex._entities(w, None)
         else:
-            ents = ex._entities(w, [t["name"] for t in it["types"]])
+            ents = ex._entities(w, it["types"])
         nodes, facts = ex._relations(w, ents, list(it["relations"]), ex.top)
         first = {tuple(m): i for i, e in enumerate(ents) for m in e["mentions"]}
 

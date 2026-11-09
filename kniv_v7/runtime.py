@@ -579,7 +579,8 @@ class Kniv:
             ner = [[ENT_TAGS[x] for x in viterbi(lp[s:min(e, W)], al, st)] if s < W else None
                    for s, e in sp]
         _, vertex = build_entities(tokens, [list(x) for x in sp], ner,
-                                   [[list(m) for m in c] for c in coref], coref=self.entity_coref)
+                                   [[list(m) for m in c] for c in coref], coref=self.entity_coref,
+                                   min_entities=1)
         ents = []
         for v in vertex or []:
             ms = sorted({(sp[m["sent_id"]][0] + m["pos"][0], sp[m["sent_id"]][0] + m["pos"][1])

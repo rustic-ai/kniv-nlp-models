@@ -72,7 +72,7 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
                    ner_by_sentence: list[list[str] | None],
                    coref_chains: list[list[list[int]]] | None,
                    coref: str = "all", partial_names: bool = False, link=None,
-                   link_merge=None):
+                   link_merge=None, min_entities: int = 2):
     """Return ``(sents, vertexSet)`` (entities as lists of mentions), or ``(None, None)``.
 
     ``coref``: how coreference chains group the entity mentions -- ``all``
@@ -86,8 +86,10 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
     the name rules. ``link_merge``: a function from the typed spans and the
     rules' groups to coarser groups.
 
-    ``None`` when fewer than two entities survive — a relation needs a pair,
-    and a window with one entity is not evidence of anything.
+    ``None`` when fewer than ``min_entities`` survive. The corpus and
+    training keep the default 2 (a relation needs a pair, and a window with
+    one entity is not evidence of anything); inference passes 1, so a
+    window's only entity is still returned (and pairs with a speaker).
     """
     spans: list[tuple[str, int, int]] = []
     for si, (s, e) in enumerate(sentence_spans):
@@ -100,7 +102,7 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
             # Coarse types (from the entity head) pass through as is.
             spans.append((ty if ty in COARSE_TYPES else TYPE_MAP.get(ty, "MISC"),
                           s + a, s + b))
-    if len(spans) < 2:
+    if len(spans) < max(min_entities, 1):
         return None, None
 
     if link is not None:
@@ -207,6 +209,6 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
                              "sent_id": si, "type": ty})
         if mentions:
             vertex.append(mentions)
-    if len(vertex) < 2:
+    if len(vertex) < max(min_entities, 1):
         return None, None
     return sents, vertex
