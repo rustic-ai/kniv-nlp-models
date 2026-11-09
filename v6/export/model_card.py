@@ -233,6 +233,7 @@ MODELS = {
 }
 
 V71_DATE = "2026-11-03"
+V711_DATE = "2026-11-09"
 
 # v7.1 per model: LitBank coreference (v7.0 -> v7.1), end-to-end speed-up at 500
 # words (fp32, INT8), and the model-specific changes.
@@ -347,7 +348,7 @@ knowledge against a schema you supply at inference time.
 |---|---|
 | developed by | Dragonscale ([{org}](https://huggingface.co/{org})) |
 | model type | multi-task transformer encoder |
-| version | kniv v7.1 (`{run}`), {v71_date}; v7.0 {date} |
+| version | kniv v7.1.1 (`{run}`), {v711_date}; v7.1 {v71_date}; v7.0 {date} |
 | base model | [{base}](https://huggingface.co/{base}) |
 | parameters | {params} |
 | input | up to 512 words per window ({window} subwords) |
@@ -511,6 +512,13 @@ at run time (see GUIDE.md).
 
 ## Changelog
 
+**v7.1.1 ({v711_date}).** A runtime fix; the weights, graphs and scores are unchanged.
+A window's only entity was dropped: the entity grouping step returned nothing
+below two entities. A text with one entity of the requested types gave no
+entities, and a conversation turn such as "I live in Berlin." gave no fact
+pairing the speaker with Berlin. The entity is now kept. To get v7.1 back,
+download with `revision="v7.1"`.
+
 **v7.1 ({v71_date}).** The trained weights are unchanged{v71_weights}; the outputs change as below.
 To get v7.0 back, download with `revision="v7.0"`.
 
@@ -611,7 +619,7 @@ def write(model: str, out: Path) -> None:
                        org=ORG, repo=m["repo"], choose=m["choose"], github=GITHUB,
                        window=m["window"], base_licence=m["base_licence"], hn=m["hn"], int8_speed=m["int8_speed"], int8_how=m.get("int8_how", ""), int8_drop=m["int8_drop"],
                        about=m["about"].format(org=ORG, other=m["other"], choose=m["choose"]),
-                       date=m["date"], v71_date=V71_DATE, v71=v71_notes(model), v71_weights=" apart from the entity-type prior" if V71[model][4] == "flat" else "", missed=m["missed"], limits=m["limits"], int8_note=m["int8_note"],
+                       date=m["date"], v71_date=V71_DATE, v711_date=V711_DATE, v71=v71_notes(model), v71_weights=" apart from the entity-type prior" if V71[model][4] == "flat" else "", missed=m["missed"], limits=m["limits"], int8_note=m["int8_note"],
                        qs_note=m["qs_note"], size=m["size"], family=family(model),
                        lme0=s["lme"][0], lme1=s["lme"][1],
                        lme2=s["lme"][2], lme3=s["lme"][3],
