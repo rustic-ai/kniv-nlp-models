@@ -813,7 +813,7 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
     """
     import torch
     cb, ch, cs, ce, cc, cok = [], [], [], [], [], []
-    eb, et, me, ms, mx = [], [], [], [], []
+    eb, et, me, ms, mx, ml = [], [], [], [], [], []
     pb, ph, pt, plab, pev = [], [], [], [], []
     kd_p, kd_r, kd_m, kd_scored = [], [], [], []    # relation distillation (kd_teacher)
     ap, ar, apol, amod, ahold, atime = [], [], [], [], [], []
@@ -835,6 +835,7 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
             eb.append(b); et.append(int(r["types"][k]))
             for a, z in spans:
                 me.append(ent_base + k); ms.append(int(a)); mx.append(int(z))
+                ml.append(bool(x.get("link_ok")))      # gold entity groups (--link-aux)
         n_rel = max(n_rel or 0, x["_n_rel"])  # teacher items index the whole label bank
         lab = {}
         for h, tl, k in r["triples"]:
@@ -872,7 +873,7 @@ def _collate_phase2(items: list[dict], _unused=None) -> dict:
            "coref_cluster": torch.tensor(cc, dtype=L), "coref_ok": torch.tensor(cok),
            "ent_batch": torch.tensor(eb, dtype=L), "ent_type": torch.tensor(et, dtype=L),
            "men_ent": torch.tensor(me, dtype=L), "men_start": torch.tensor(ms, dtype=L),
-           "men_end": torch.tensor(mx, dtype=L),
+           "men_end": torch.tensor(mx, dtype=L), "men_link": torch.tensor(ml, dtype=torch.bool),
            "pair_batch": torch.tensor(pb, dtype=L), "pair_h": torch.tensor(ph, dtype=L),
            "pair_t": torch.tensor(pt, dtype=L)}
     if ap:

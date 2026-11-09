@@ -389,7 +389,7 @@ def _load_init(model, init: str, vocab: Vocab, relation: str = "drop",
                                                       "mix.ent.", "rel_lora.", "label_enc.",
                                                       "legacy_", "span.", "mix.ent_span.",
                                                       "label_lora.", "attr.", "coref_lora.",
-                                                      "ent_lora."))]
+                                                      "ent_lora.", "link_aux."))]
     if fresh or unexpected:
         raise SystemExit(f"--init does not fit this model: missing {fresh[:5]}, "
                          f"unexpected {unexpected[:5]}")
@@ -663,6 +663,11 @@ def main() -> int:
     ap.add_argument("--ent-adapter", type=int, default=0, metavar="R",
                     help="a rank-R LoRA for an entity-span encoder pass (span head and linker; "
                          "needs --grad-checkpointing off): the other heads keep the plain pass")
+    ap.add_argument("--link-aux", type=int, default=0, metavar="D",
+                    help="train entity grouping into the span vectors: a same-entity loss "
+                         "(head 'link', width D) over gold mention pairs of --link-sources")
+    ap.add_argument("--link-sources", default="redocred,docred_distant,trex",
+                    help="sources whose entity groups supervise --link-aux")
     ap.add_argument("--label-adapter", type=int, default=0, metavar="R",
                     help="read label texts through their own rank-R adapter (v6.2 zero-shot head)")
     ap.add_argument("--legacy-rank", type=int, default=16,
@@ -839,6 +844,9 @@ def main() -> int:
         rd_dev = (redocred_features("dev", tok, spec.max_subwords, vocab, st,
                                     markers=args.rel_markers)
                   if not args.probe else [])
+        if args.link_aux and "redocred" in args.link_sources.split(","):
+            for f in rd:
+                f["link_ok"] = True
         print("Re-DocRED: " + ", ".join(f"{k} {v:,}" for k, v in sorted(st.items()))
               + f"; train x{args.redocred_train}", flush=True)
 
@@ -900,6 +908,9 @@ def main() -> int:
                 feats = [{k: v for k, v in f.items() if k != "rm"} | {"rel": None} for f in feats]
             if src in args.kg_no_spans.split(","):
                 feats = [{k: v for k, v in f.items() if k != "ents"} for f in feats]
+            if args.link_aux and src in args.link_sources.split(","):
+                for f in feats:
+                    f["link_ok"] = True
             w = float(n)
             if w < 1:                      # a fixed random fraction of the source
                 rng = np.random.default_rng([args.seed, len(src)])
@@ -946,7 +957,7 @@ def main() -> int:
                     srl_pred_hidden=args.srl_pred_hidden, srl_ctx=args.srl_ctx,
                     ner_lstm=args.ner_lstm, rel_xattn_layers=args.rel_xattn_layers,
                     coref_adapter=args.coref_adapter, ent_adapter=args.ent_adapter,
-                    last_attn_only=args.last_attn_only,
+                    link_aux=args.link_aux, last_attn_only=args.last_attn_only,
                     early_fusion=args.early_fusion).to(device)
     if args.coref_adapter and spec.grad_checkpointing:
         raise SystemExit("--coref-adapter needs --grad-checkpointing off")
@@ -1066,7 +1077,8 @@ def main() -> int:
         for n, prm in model.named_parameters():
             prm.requires_grad = n.startswith(("encoder.", "rel_lora.", "relation.",
                                               "mix.relation.", "label_enc.", "label_lora.",
-                                              "span.", "mix.ent_span.", "attr.", "ent_lora."))
+                                              "span.", "mix.ent_span.", "attr.", "ent_lora.",
+                                              "link_aux."))
         model.plain_grad = True
         heads = RELATION_HEADS
     elif args.train_scope == "coref":
@@ -1091,7 +1103,7 @@ def main() -> int:
         # legacy path (exact Re-DocRED end to end); the span head is the
         # trainable entity path.
         trainable = ("rel_lora.", "relation.", "mix.relation.", "label_enc.",
-                     "span.", "mix.ent_span.", "label_lora.", "ent_lora.") + \
+                     "span.", "mix.ent_span.", "label_lora.", "ent_lora.", "link_aux.") + \
             (() if args.legacy_relation else ("ent.", "mix.ent."))
         for n, prm in model.named_parameters():
             prm.requires_grad = n.startswith(trainable)
@@ -1224,7 +1236,7 @@ def main() -> int:
                                  "srl_ctx": args.srl_ctx, "ner_lstm": args.ner_lstm,
                                  "rel_xattn_layers": args.rel_xattn_layers,
                                  "coref_adapter": args.coref_adapter,
-                                 "ent_adapter": args.ent_adapter,
+                                 "ent_adapter": args.ent_adapter, "link_aux": args.link_aux,
                                  "last_attn_only": args.last_attn_only,
                                  "early_fusion": args.early_fusion,
                                  "word_pool": args.word_pool,

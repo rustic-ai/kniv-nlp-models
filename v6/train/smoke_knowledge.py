@@ -429,6 +429,50 @@ def main() -> int:
     check("entity adapter: span loss reaches ent_lora (bf16); the mention head and relations "
           "keep the plain pass, only the span logits move",
           ge and same_ent and same_rel and moved, f"ent_span {Le['ent_span'][0].item():.3f}")
+    # 13. v8: entity grouping as a training signal (--link-aux)
+    from .model import link_pairs, shared_mentions
+    lk = [dict(f, link_ok=True) for f in trex]
+    lb = tc(collate(lk, tok.pad_token_id))
+    keep = ~shared_mentions(lb)
+    G = V6Model(spec.hf_id, sizes, phase2=True, rel_adapter=8, rel_markers=True, rel_head="zs",
+                span_head=True, label_adapter=4, link_aux=16)
+    G.load_state_dict(Z.state_dict(), strict=False)
+    G.train(); no_dropout(G)
+    G.plain_grad = True                      # as --train-scope knowledge-full / all train the encoder
+    item = lb["ent_batch"][lb["men_ent"]][keep]
+    pi, pj, y = link_pairs(item, lb["men_ent"][keep])
+    # Round trip: the pair targets rebuilt from the source documents' entity groups.
+    src = {}
+    for b, f in enumerate(lk):
+        for k, spans in enumerate(f["rel"]["spans"]):
+            for a, z in spans:
+                src[(b, int(a), int(z))] = k
+    key = [(int(b), int(s), int(e)) for b, s, e in zip(item, lb["men_start"][keep], lb["men_end"][keep])]
+    want = torch.tensor([float(src[key[i]] == src[key[j]]) for i, j in zip(pi.tolist(), pj.tolist())])
+    same_item = bool((item[pi] == item[pj]).all())
+    check("link targets: pairs stay inside a window and match the source entity groups",
+          same_item and torch.equal(want, y) and 0 < int(y.sum()) < len(y),
+          f"{len(y)} pairs, {int(y.sum())} same-entity")
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        og = G(lb, relation_only=True)
+        Lg = losses(og, lb)
+    Lg["link"][0].backward()
+    g_enc = any(p.grad is not None and float(p.grad.abs().sum()) > 0 for n, p in G.named_parameters()
+                if n.startswith("encoder."))
+    g_aux = any(p.grad is not None and float(p.grad.abs().sum()) > 0 for n, p in G.named_parameters()
+                if n.startswith("link_aux."))
+    check("link loss is finite in bf16 and reaches the encoder and the link head",
+          torch.isfinite(Lg["link"][0]) and Lg["link"][1] == len(y) and g_enc and g_aux,
+          f"link {Lg['link'][0].item():.3f} over {Lg['link'][1]}")
+    G.eval()
+    with torch.no_grad():
+        oe = G(lb, relation_only=True)
+    nb = tc(collate(trex, tok.pad_token_id))
+    G.train(); no_dropout(G); G.plain_grad = False
+    with torch.no_grad():
+        on = G(nb, relation_only=True)
+    check("link head is training-only, and only on --link-sources items",
+          "link" not in oe and "link" not in on and not bool(nb["men_link"].any()))
     print("all knowledge-layer smoke checks passed")
     return 0
 

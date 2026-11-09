@@ -1030,6 +1030,67 @@ class EntityLinker(nn.Module):
         return self.mlp(torch.cat([a, b, a * b, feats, self.dist(dist)], -1)).squeeze(-1)
 
 
+class LinkAux(nn.Module):
+    """Training signal for entity grouping (``--link-aux D``): are two gold
+    mentions in one window the same entity? Scored from the span vectors
+    alone ([start; end; mean] projected, then [a; b; a*b]), so the gradient
+    reaches the encoder through the vectors the deployed linker
+    (``EntityLinker``, trained afterwards with its name and coreference
+    features) reads. Not used at inference."""
+
+    def __init__(self, H: int, d: int = 256, p: float = 0.1):
+        super().__init__()
+        self.proj = nn.Sequential(nn.Linear(3 * H, d), nn.GELU(), nn.Dropout(p))
+        self.mlp = nn.Sequential(nn.Linear(3 * d, d), nn.GELU(), nn.Dropout(p), nn.Linear(d, 1))
+
+    def forward(self, mvec: torch.Tensor, pi: torch.Tensor, pj: torch.Tensor) -> torch.Tensor:
+        m = self.proj(mvec)
+        a, b = m[pi], m[pj]
+        return self.mlp(torch.cat([a, b, a * b], -1)).squeeze(-1)
+
+
+def shared_mentions(batch: dict) -> torch.Tensor:
+    """Mentions whose span is listed under more than one entity of its window
+    (T-REx does this): ambiguous as grouping targets, so left out."""
+    item = batch["ent_batch"][batch["men_ent"]]
+    key = torch.stack([item, batch["men_start"], batch["men_end"]], 1)
+    _, inv, cnt = torch.unique(key, dim=0, return_inverse=True, return_counts=True)
+    return cnt[inv] > 1
+
+
+LINK_PAIRS_MAX = 4096          # per window: every positive pair, negatives sampled to fill
+
+
+def link_pairs(men_item: torch.Tensor, men_ent: torch.Tensor, gen: torch.Generator | None = None):
+    """Mention pairs (i < j) within each window, with same-entity targets.
+    Windows over ``LINK_PAIRS_MAX`` pairs keep every positive and a random
+    sample of negatives."""
+    pi, pj = [], []
+    mi, me = men_item.tolist(), men_ent.tolist()
+    by: dict[int, list[int]] = {}
+    for k, b in enumerate(mi):
+        by.setdefault(b, []).append(k)
+    for ks in by.values():
+        if len(ks) < 2:
+            continue
+        a = torch.tensor(ks)
+        I, J = torch.triu_indices(len(ks), len(ks), 1)
+        I, J = a[I], a[J]
+        if len(I) > LINK_PAIRS_MAX:
+            same = men_ent[I] == men_ent[J]
+            pos, neg = torch.nonzero(same).squeeze(1), torch.nonzero(~same).squeeze(1)
+            room = max(LINK_PAIRS_MAX - len(pos), 0)
+            neg = neg[torch.randperm(len(neg), generator=gen)[:room]]
+            keep = torch.cat([pos, neg])
+            I, J = I[keep], J[keep]
+        pi.append(I); pj.append(J)
+    if not pi:
+        e = torch.zeros(0, dtype=torch.long)
+        return e, e, torch.zeros(0)
+    pi, pj = torch.cat(pi), torch.cat(pj)
+    return pi, pj, (men_ent[pi] == men_ent[pj]).float()
+
+
 class V6Model(nn.Module):
     tree_decode = True          # predicted heads form one tree per sentence (else argmax)
 
@@ -1046,7 +1107,8 @@ class V6Model(nn.Module):
                  word_pool: str = "first", attr_head: bool = False,
                  srl_pred_hidden: int = 0, srl_ctx: int = 0, linker: int = 0,
                  ner_lstm: int = 0, rel_xattn_layers: int = 2, coref_adapter: int = 0,
-                 last_attn_only: bool = False, early_fusion: int = 0, ent_adapter: int = 0):
+                 last_attn_only: bool = False, early_fusion: int = 0, ent_adapter: int = 0,
+                 link_aux: int = 0):
         super().__init__()
         # Early fusion (v8 W5 ablation): up to ``early_fusion`` tokens of the
         # schema's relation names appended to each item's marker-pass text,
@@ -1121,6 +1183,7 @@ class V6Model(nn.Module):
         # The entity linker (entity_link.py); it reads the plain pass's
         # entity-span vectors, which the forward then returns as link_words.
         self.linker = EntityLinker(H, d=linker, p=p) if linker else None
+        self.link_aux = LinkAux(H, d=link_aux, p=p) if phase2 and link_aux else None
         self.emit_link_words = False
         if srl_mode not in ("joint", "conditioned"):
             raise ValueError(f"srl_mode must be joint or conditioned, not {srl_mode!r}")
@@ -1584,12 +1647,26 @@ class V6Model(nn.Module):
             o["ent"] = self.ent(self._words(plain_layers, "ent", first))
             o["_anchor"] = o["ent"].sum() * 0.0
         want_span = self.span is not None and "span_batch" in batch
-        want_link = self.linker is not None or self.emit_link_words
+        want_aux = (self.link_aux is not None and self.training and "men_link" in batch
+                    and bool(batch["men_link"].any()))
+        want_link = self.linker is not None or self.emit_link_words or want_aux
         ent_layers = (self._ent_layers(batch) if self.ent_lora is not None and (want_span or want_link)
                       else plain_layers)
         if want_link:
             o["link_words"] = self._words(ent_layers, "ent_span" if "ent_span" in self.mix
                                           else "ent", first)
+        if want_aux:
+            ok = batch["men_link"] & ~shared_mentions(batch)
+            item = batch["ent_batch"][batch["men_ent"][ok]]
+            s, e = batch["men_start"][ok], batch["men_end"][ok]
+            w = o["link_words"].float()
+            cs = F.pad(w.cumsum(1), (0, 0, 1, 0))                     # [B, W+1, H]
+            mean = (cs[item, e] - cs[item, s]) / (e - s).clamp(min=1).unsqueeze(-1).to(w.dtype)
+            mvec = torch.cat([w[item, s], w[item, (e - 1).clamp(min=0)], mean], -1)
+            pi, pj, y = link_pairs(item.cpu(), batch["men_ent"][ok].cpu())
+            dev = mvec.device
+            o["link"] = self.link_aux(mvec.to(o["link_words"].dtype), pi.to(dev), pj.to(dev))
+            o["link_y"] = y.to(dev)
         if want_span:
             temb = batch.get("type_label_emb")
             if temb is None:
@@ -1780,9 +1857,9 @@ def _ce(logits: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, int]:
 
 
 PHASE2_HEADS = ("coref", "coref_span", "relation", "relation_evidence", "ent",
-                "ent_span", "relation_rank", "ent_span_rank", "fact_attr", "relation_distil")
+                "ent_span", "relation_rank", "ent_span_rank", "fact_attr", "relation_distil", "link")
 RELATION_HEADS = ("relation", "relation_evidence", "ent", "relation_kd", "ent_span",
-                  "relation_rank", "ent_span_rank", "fact_attr", "relation_distil")
+                  "relation_rank", "ent_span_rank", "fact_attr", "relation_distil", "link")
 # Fixed weights on top of the per-head loss scale: DREEAM weighs its evidence
 # term at 0.1 of the relation loss.
 # The label-ranking terms are off unless asked for (--head-weight relation_rank=0.5).
@@ -1879,6 +1956,13 @@ def phase2_losses(o: dict, batch: dict) -> dict[str, tuple[torch.Tensor, int]]:
         out["fact_attr"] = (fact_attr_loss(o["fact_attr"], tb), int(ok.sum()))
     else:
         out["fact_attr"] = (_zero(o), 0)
+    if "link" in o and len(o["link"]):
+        y = o["link_y"]
+        pos = y.sum().clamp(min=1)
+        wt = torch.where(y > 0.5, (len(y) - pos) / pos, torch.ones_like(y)).clamp(max=20)
+        out["link"] = (F.binary_cross_entropy_with_logits(o["link"].float(), y, weight=wt), len(y))
+    else:
+        out["link"] = (_zero(o), 0)
     sa = o.get("relation_sent_att")
     if sa is not None and batch["pair_ev_ok"].any():
         ok = batch["pair_ev_ok"]
