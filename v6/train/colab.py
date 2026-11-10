@@ -74,6 +74,9 @@ PIP = ["transformers==5.6.2", "huggingface_hub>=1.0", "psutil", "pyarrow",
 
 
 OURS = "kniv-v6-"      # every session this launcher creates; it touches no others
+# The accelerator to allocate. A100 is the reference for every recipe and
+# timing here; KNIV_COLAB_GPU=H100 when Colab has no A100 to give.
+GPU = os.environ.get("KNIV_COLAB_GPU", "A100")
 
 
 def session(run_name: str) -> str:
@@ -280,8 +283,8 @@ if r.returncode:
     raise SystemExit("pip failed:\n" + r.stderr[-2000:])
 import torch
 name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none"
-if "A100" not in name:
-    raise SystemExit(f"expected an A100, got {{name}}")
+if "{gpu}" not in name:
+    raise SystemExit(f"expected an {gpu}, got {{name}}")
 user = None
 if os.path.exists("/content/.hf_token"):        # only when the run mirrors to the hub
     os.chmod("/content/.hf_token", 0o600)
@@ -405,15 +408,15 @@ def prepare(sess: str, token: bool, hub_data: str | None = None) -> str:
     code, data, sha = build_bundles()
     existing = colab("sessions", check=False, quiet=True).stdout
     if sess not in existing:
-        print(f"allocating {sess} (A100)...")
-        colab("new", "-s", sess, "--gpu", "A100")
+        print(f"allocating {sess} ({GPU})...")
+        colab("new", "-s", sess, "--gpu", GPU)
     for b in (code, data):
         upload_big(sess, b, f"/content/{b.name}")
     if token:
         _upload_token(sess)
     print("setting up the VM (pip, GPU check, HF auth)...")
     vm_exec(sess, SETUP.format(repo=VM_REPO, code=f"/content/{code.name}",
-                               data=f"/content/{data.name}", pip=PIP, hub_data=hub_data or ""),
+                               data=f"/content/{data.name}", pip=PIP, hub_data=hub_data or "", gpu=GPU),
             timeout=1800)
     return sess
 
