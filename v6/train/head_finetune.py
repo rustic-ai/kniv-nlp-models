@@ -354,6 +354,7 @@ def main() -> int:
 
     @torch.no_grad()
     def score_ner(items):
+        model.ner.eval()                     # the BiLSTM head trains in train mode (loss_ner)
         tp = p_ = g_ = 0
         for k in range(0, len(items), 16):
             b = pad(items[k:k + 16], device)
@@ -369,6 +370,10 @@ def main() -> int:
 
     def loss_ner(b):
         from .model import NerLSTMHead
+        # The rest of the model stays in eval mode. A BiLSTM continued from the
+        # deployed head is a copy of an eval-mode module, and cuDNN has no LSTM
+        # backward in eval mode; a fresh head was only in train mode by default.
+        model.ner.train()
         if isinstance(model.ner, NerLSTMHead):       # needs whole sentences
             pos_p = torch.softmax(model.pos(b["pos_w"]).float(), -1).detach()
             lg = model.ner(torch.cat([b["ner_w"], pos_p], -1), b["word_ok"])
