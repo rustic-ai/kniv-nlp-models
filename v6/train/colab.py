@@ -399,11 +399,14 @@ def _upload_token(sess: str) -> None:
         os.unlink(path)
 
 
-def prepare(sess: str, token: bool, hub_data: str | None = None) -> str:
+def prepare(sess: str, token: bool, hub_data: str | None = None, gold: bool = False) -> str:
     """Bundle, allocate, upload, set up. ``token``: copy the local HF token
     to the VM -- only for a run that mirrors to the hub or reads private
     data; models are public. ``hub_data``: a ``hubdata`` manifest whose
-    prepared data and feature caches the VM downloads instead of building."""
+    prepared data and feature caches the VM downloads instead of building.
+    ``gold``: the run trains on gold sets (``--gold-data``, e.g. GUM for the
+    coreference pass), which the training bundle leaves out: the evaluation
+    bundle goes up too."""
     token = token or bool(hub_data)
     code, data, sha = build_bundles()
     existing = colab("sessions", check=False, quiet=True).stdout
@@ -414,10 +417,20 @@ def prepare(sess: str, token: bool, hub_data: str | None = None) -> str:
         upload_big(sess, b, f"/content/{b.name}")
     if token:
         _upload_token(sess)
+    if gold:
+        ev = eval_bundle()
+        upload_big(sess, ev, f"/content/{ev.name}")
     print("setting up the VM (pip, GPU check, HF auth)...")
     vm_exec(sess, SETUP.format(repo=VM_REPO, code=f"/content/{code.name}",
                                data=f"/content/{data.name}", pip=PIP, hub_data=hub_data or "", gpu=GPU),
             timeout=1800)
+    if gold:
+        vm_exec(sess, f"""
+import tarfile
+with tarfile.open("/content/{ev.name}") as t:
+    t.extractall("{VM_REPO}", filter="data")
+print("gold data unpacked")
+""")
     return sess
 
 
@@ -560,11 +573,15 @@ def _record(name: str, a, **more) -> dict:
     return rec
 
 
+def _reads_gold(extra) -> bool:
+    return any(x == "--gold-data" or x.startswith("--gold-data=") for x in extra)
+
+
 def cmd_launch(a) -> int:
     spec, name = encoders.get(a.encoder), run_name(a)
     _record(name, a, launched_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
     sess = prepare(a.session or session(name), token=bool(a.hf_repo),
-                   hub_data=getattr(a, "hub_data", None))
+                   hub_data=getattr(a, "hub_data", None), gold=_reads_gold(a.extra))
     out = f"{VM_RUNS}/{name}"
     argv = ["--encoder", spec.name, "--run-name", name, "--out", out, *a.extra]
     if a.hf_repo:
@@ -702,7 +719,7 @@ def cmd_probe(a) -> int:
     spec, name = encoders.get(a.encoder), run_name(a)
     # The token only when the probe reads the hub: --init from a run there.
     sess = prepare(a.session or session(name), token="--init" in a.extra,
-                   hub_data=a.hub_data)
+                   hub_data=a.hub_data, gold=_reads_gold(a.extra))
     out = f"{VM_RUNS}/{name}-probe"
     argv = ["--encoder", spec.name, "--out", out, "--probe", str(a.steps), *a.extra]
     code = START.format(repo=VM_REPO, out=out, argv=argv, RUN_MARKER=RUN_MARKER)
