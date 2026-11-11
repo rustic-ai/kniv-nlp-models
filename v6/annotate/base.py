@@ -149,6 +149,15 @@ def validate_payload(layer: str, payload: object, n: int,
         return {int(v["fact"]): bool(v["supported"]) for v in payload
                 if isinstance(v, dict) and "fact" in v and "supported" in v}, None, None
 
+    if layer == "kgcand":
+        from ..schemas import KGCAND_VERDICTS
+        if isinstance(payload, dict):            # a cached, already-validated payload
+            return {int(k): v for k, v in payload.items() if v in KGCAND_VERDICTS}, None, None
+        if not isinstance(payload, list):
+            return None, "verdicts is not a list", "parse"
+        return {int(v["fact"]): v["verdict"] for v in payload
+                if isinstance(v, dict) and "fact" in v and v.get("verdict") in KGCAND_VERDICTS}, None, None
+
     if layer == "kgvar":
         if not isinstance(payload, list):
             return None, "variants is not a list", "parse"

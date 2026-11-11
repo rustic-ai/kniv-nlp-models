@@ -344,6 +344,26 @@ KGJUDGE_SCHEMA = _envelope("fact_verdicts", {
 })
 
 
+KGCAND_VERDICTS = ["supported", "not_supported", "negated", "hedged"]
+KGCAND_SCHEMA = _envelope("candidate_verdicts", {
+    "verdicts": _array_of(
+        {
+            "type": "object",
+            "properties": {
+                "fact": {"type": "integer", "description": "the fact's number"},
+                "verdict": {"type": "string", "enum": KGCAND_VERDICTS,
+                            "description": "supported: stated or clearly implied, head to tail as the "
+                                           "definition reads; negated: the passage says it is not so; "
+                                           "hedged: mentioned only as possible, planned, wished, asked "
+                                           "or claimed without commitment; not_supported: otherwise"},
+            },
+            "required": ["fact", "verdict"], "additionalProperties": False,
+        },
+        "One verdict per listed fact.",
+    ),
+})
+
+
 KGVAR_KINDS = ["negated", "reported", "planned", "desired", "questioned", "hypothetical"]
 KGVAR_SCHEMA = _envelope("fact_rewrites", {
     "variants": _array_of(
@@ -404,6 +424,7 @@ SCHEMAS = {
     "kg": kg_schema(["entity"], ["related to"]),
     "bankmerge": BANKMERGE_SCHEMA,
     "kgjudge": KGJUDGE_SCHEMA,
+    "kgcand": KGCAND_SCHEMA,
     "kgvar": KGVAR_SCHEMA,
     "kgvarjudge": KGVARJUDGE_SCHEMA,
     "kgsyn": KGSYN_SCHEMA,
@@ -427,7 +448,7 @@ PAYLOAD_KEY = {
     "pos": "tags", "lemma": "lemmas", "morph": "feats",
     "dep": "arcs", "srl": "tags", "rel": "triples",
     "cls": "labels", "sentiment": "sentiment", "keywords": "keywords",
-    "discover": "relations", "bankmerge": "relations", "kg": "knowledge", "kgjudge": "verdicts",
+    "discover": "relations", "bankmerge": "relations", "kg": "knowledge", "kgjudge": "verdicts", "kgcand": "verdicts",
     "kgvar": "variants", "kgvarjudge": "verdicts", "kgsyn": "passage",
 }
 

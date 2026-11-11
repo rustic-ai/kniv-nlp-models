@@ -264,6 +264,24 @@ SYSTEM["kgjudge"] = (
 )
 
 
+SYSTEM["kgcand"] = (
+    "You check candidate facts for a passage. Each fact links two entities "
+    "(given by their mentions in the passage) by a relation with a "
+    "definition, read head to tail. Give each fact one verdict:\n"
+    "- supported: the passage states it or clearly implies it, in that "
+    "direction, and the relation's definition fits (a looser or more general "
+    "relation that is still true counts as supported);\n"
+    "- negated: the passage says it is not so (\"did not\", \"no longer\", "
+    "\"denied\");\n"
+    "- hedged: the passage mentions it only as possible, planned, wished, "
+    "asked about, or claimed by someone without commitment;\n"
+    "- not_supported: the passage does not say it, says something else, the "
+    "direction is wrong, or an argument does not fit the relation.\n"
+    "Several relations can hold for one pair; judge each fact on its own, "
+    "from the passage alone, without background knowledge."
+)
+
+
 def kg_user_message(sentences: list[str], speakers: list[str | None] | None,
                     participants: list[str], types: list[dict], relations: list[dict]) -> str:
     """One window for the ``kg`` layer: numbered sentences (with speakers in a
