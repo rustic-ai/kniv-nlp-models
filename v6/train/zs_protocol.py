@@ -73,6 +73,25 @@ def evaluate(model, tok, spec, vocab, device, splits: dict, items: list[dict]) -
     return out
 
 
+def load_items(per_relation: int = 700) -> tuple[list[dict], list[dict]]:
+    """Every FewRel instance (both splits, up to ``per_relation`` each) of the
+    label bank's unseen relations, in a fixed order; and those relations."""
+    from ..gold import fewrel
+    unseen = [r for r in load_bank()["relations"] if not r.get("train", True)]
+    code = {r["code"]: r["id"] for r in unseen}
+    per: dict[int, int] = {}
+    items = []
+    for origin in ("train", "val"):
+        for x in fewrel.load(origin):
+            rid = code.get(x["code"])
+            if rid is None or per.get(rid, 0) >= per_relation:
+                continue
+            per[rid] = per.get(rid, 0) + 1
+            items.append({"tokens": x["tokens"], "head": x["head"], "tail": x["tail"], "rel": rid,
+                          "origin": origin})
+    return items, unseen
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--runs", required=True)
@@ -82,21 +101,8 @@ def main() -> int:
     ap.add_argument("--per-relation", type=int, default=700, help="FewRel has 700 per relation")
     ap.add_argument("--device")
     args = ap.parse_args()
-    from ..gold import fewrel
-    bank = load_bank()
-    unseen = [r for r in bank["relations"] if not r.get("train", True)]
-    code = {r["code"]: r["id"] for r in unseen}
-    per: dict[int, int] = {}
-    items = []
-    for origin in ("train", "val"):
-        for x in fewrel.load(origin):
-            rid = code.get(x["code"])
-            if rid is None or per.get(rid, 0) >= args.per_relation:
-                continue
-            per[rid] = per.get(rid, 0) + 1
-            items.append({"tokens": x["tokens"], "head": x["head"], "tail": x["tail"], "rel": rid,
-                          "origin": origin})
-    ids = sorted(code.values())
+    items, unseen = load_items(args.per_relation)
+    ids = sorted(r["id"] for r in unseen)
     rng = np.random.default_rng(13)
     sizes = [m for m in (5, 10) if m < len(ids)]
     splits = {f"m={m}": [sorted(rng.choice(ids, size=m, replace=False).tolist())
