@@ -132,6 +132,9 @@ def predict(ex, items: list[dict], mode: str) -> list[dict]:
         else:
             ents = ex._entities(w, it["types"])
         nodes, facts = ex._relations(w, ents, list(it["relations"]), ex.top)
+        if getattr(ex, "merge_variants", False):    # margins carry SHIFT here
+            from ..infer import merge_variants
+            facts = merge_variants(nodes, facts, bar=SHIFT)
         first = {tuple(m): i for i, e in enumerate(ents) for m in e["mentions"]}
 
         def node_key(n: dict):

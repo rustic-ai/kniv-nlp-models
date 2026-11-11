@@ -85,6 +85,9 @@ class Extractor:
         # spans), "np" (noun phrases from the parse); see v6.mentions.
         self.proposers: tuple[str, ...] = ()
         self.nested = False      # typed entities may nest (v8 P1)
+        # With nested entities one fact comes back once per span variant
+        # ("Northwind" / "Northwind 's plant"); keep the highest-margin one (v8 M1).
+        self.merge_variants = False
 
     # ── text to windows ──────────────────────────────────────────────
     @staticmethod
@@ -227,5 +230,36 @@ class Extractor:
         for w in self.windows(text, turns):
             ents = self._entities(w, types)
             nodes, facts = self._relations(w, ents, list(relations), top or self.top)
+            if self.merge_variants:
+                facts = merge_variants(nodes, facts)
             out.append({"tokens": w["tokens"], "entities": nodes, "facts": facts})
         return out
+
+
+def _nests(a: dict, b: dict) -> bool:
+    """One node's mentions contain or lie inside the other's: by span, or by
+    text (the same words mentioned again elsewhere in the window)."""
+    if a is b:
+        return True
+    if a.get("speaker") or b.get("speaker"):
+        return False
+    if any((x0 <= y0 and y1 <= x1) or (y0 <= x0 and x1 <= y1)
+           for x0, x1 in a["spans"] for y0, y1 in b["spans"]):
+        return True
+    def inside(x, y):                      # word sequence x within word sequence y
+        return any(y[i:i + len(x)] == x for i in range(len(y) - len(x) + 1))
+    A = [m.lower().split() for m in a["mentions"]]
+    B = [m.lower().split() for m in b["mentions"]]
+    return any(inside(x, y) or inside(y, x) for x in A for y in B)
+
+
+def merge_variants(nodes: list[dict], facts: list[dict], bar: float = 0.0) -> list[dict]:
+    """Facts above ``bar`` with the same relation whose heads nest and whose
+    tails nest are one fact said with longer or shorter spans: keep the one
+    with the highest margin. Facts at or below the bar pass through."""
+    keep, out = [], [f for f in facts if f["margin"] <= bar]
+    for f in sorted((f for f in facts if f["margin"] > bar), key=lambda f: -f["margin"]):
+        if not any(g["relation"] == f["relation"] and _nests(nodes[g["head"]], nodes[f["head"]])
+                   and _nests(nodes[g["tail"]], nodes[f["tail"]]) for g in keep):
+            keep.append(f)
+    return keep + out

@@ -47,7 +47,8 @@ def main() -> int:
         name, _, b = cfg.partition(":")
         parts = name.split("+")
         ex.nested = "nest" in parts
-        ex.proposers = tuple(p for p in parts if p not in ("base", "nest"))
+        ex.merge_variants = "merge" in parts
+        ex.proposers = tuple(p for p in parts if p not in ("base", "nest", "merge"))
         ex.span_boost = float(b) if b else (boost0 if boost0 is not None else 0.0)
         for s, items in data.items():
             t0 = time.time()
