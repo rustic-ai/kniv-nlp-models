@@ -45,6 +45,33 @@ from .kdata import LabelCollator, teacher_features
 from .model import atlop_loss
 
 GRID = np.arange(-4, 6.01, 0.25)
+LABEL_SETS = ("clean", "teacher", "teacher_mask")
+
+
+def paired(M: dict, Y: list, boot: int, seed: int = 7) -> dict:
+    """Each head's dev F1 at its best dev offset, and its difference from the
+    clean-trained head with a bootstrap over texts (same resample for both)."""
+    def counts(Ms, d):
+        return np.array([[int(((m > d) & y).sum()), int((m > d).sum()), int(y.sum())]
+                         for m, y in zip(Ms, Y)])
+    def f1(c):
+        tp, p, g = c.sum(0)
+        pr, rc = tp / max(p, 1), tp / max(g, 1)
+        return 2 * pr * rc / max(pr + rc, 1e-9)
+    C, out = {}, {}
+    for k, Ms in M.items():
+        best = max(GRID, key=lambda d: f1(counts(Ms, d)))
+        C[k] = counts(Ms, best)
+        out[k] = {"f1": round(f1(C[k]), 4), "offset": float(best)}
+    rng = np.random.default_rng(seed)
+    idx = [rng.integers(0, len(Y), len(Y)) for _ in range(boot)]
+    for k in M:
+        if k == "clean":
+            continue
+        d = np.array([f1(C[k][i]) - f1(C["clean"][i]) for i in idx])
+        out[k]["diff"] = [round(out[k]["f1"] - out["clean"]["f1"], 4),
+                          round(float(np.percentile(d, 2.5)), 4), round(float(np.percentile(d, 97.5)), 4)]
+    return out
 
 
 def payload_of(it: dict, facts: list[dict]) -> dict:
@@ -87,6 +114,9 @@ def build_cache(model, tok, spec, bank, labels: list[dict], device) -> list[dict
                     "seq": seq.half().cpu(), "att": att.half().cpu(), "emb": emb.half().cpu(),
                     "b": {k: feats["clean"][k] for k in keep},
                     "y": {k: feats[k]["pair_labels"][:, 1:].bool() for k in feats}})
+        # teacher_mask: the teacher's facts, its unlabelled pairs out of the loss
+        out[-1]["y"]["teacher_mask"] = out[-1]["y"]["teacher"]
+        out[-1]["rows"] = {"teacher_mask": out[-1]["y"]["teacher"].any(1)}
         if n % 50 == 0:
             print(f"  cached {n + 1}/{len(labels)} [{time.time() - t0:.0f}s]", flush=True)
             if device.type == "mps":
@@ -141,15 +171,17 @@ def line(tag, rep):
     print(f"{tag:14s} " + " | ".join(cells), flush=True)
 
 
-def train(head0, items, lab: str, epochs: int, lr: float, accum: int, device, seed: int) -> list:
+def train(head0, items, lab: str, epochs: int, lr: float, accum: int, device, seed: int,
+          n_train: int | None = None):
     head = copy.deepcopy(head0).to(device)
     for p in head.parameters():
         p.requires_grad_(True)
     opt = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=0.01)
-    tr = [x for x in items if x["split"] == "train"]
+    tr = [x for x in items if x["split"] == "train"][:n_train]
     rng = np.random.default_rng(seed)
     hist = [{"epoch": 0, **report(head, items, device)}]
-    line(f"{lab} ep 0", {k: v for k, v in hist[-1].items() if k != "epoch"})
+    if n_train is None or n_train == len([x for x in items if x["split"] == "train"]):
+        line(f"{lab} ep 0", {k: v for k, v in hist[-1].items() if k != "epoch"})
     for ep in range(1, epochs + 1):
         head.train()
         order = rng.permutation(len(tr))
@@ -160,7 +192,13 @@ def train(head0, items, lab: str, epochs: int, lr: float, accum: int, device, se
             lg = logits_of(head, x, device)
             y = x["y"][lab].float().to(device)
             none = (y.sum(1, keepdim=True) == 0).float()
-            loss = atlop_loss(lg.float(), torch.cat([none, y], 1)) / accum
+            mask = None
+            if lab in x.get("rows", {}):
+                rows = x["rows"][lab].to(device)
+                if not bool(rows.any()):
+                    continue
+                mask = rows.float().unsqueeze(1).expand(-1, y.size(1) + 1)
+            loss = atlop_loss(lg.float(), torch.cat([none, y], 1), mask) / accum
             loss.backward()
             tot += float(loss) * accum; n += 1
             if (j + 1) % accum == 0 or j + 1 == len(order):
@@ -168,15 +206,17 @@ def train(head0, items, lab: str, epochs: int, lr: float, accum: int, device, se
                 opt.step(); opt.zero_grad()
         rep = report(head, items, device)
         hist.append({"epoch": ep, "loss": tot / max(n, 1), **rep})
-        line(f"{lab} ep {ep}", rep)
-    return hist
+        line(f"{lab} n{len(tr)} ep {ep}", rep)
+    return hist, head
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--labels", type=Path, required=True)
     ap.add_argument("--run", default="ultrabert-380m-v7b8ev")
-    ap.add_argument("--epochs", type=int, default=10)
+    ap.add_argument("--epochs", type=int, default=6)
+    ap.add_argument("--sizes", default="100,300,700", help="training texts per run (a learning curve)")
+    ap.add_argument("--boot", type=int, default=2000)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--accum", type=int, default=8)
     ap.add_argument("--seed", type=int, default=13)
@@ -199,10 +239,25 @@ def main() -> int:
     del model
     if device.type == "mps":
         torch.mps.empty_cache()
+    sizes = sorted({min(int(n), n_tr) for n in a.sizes.split(",")})
     res = {"run": a.run, "labels": str(a.labels), "epochs": a.epochs, "lr": a.lr, "accum": a.accum,
-           "texts": {"train": n_tr, "dev": len(items) - n_tr}, "positives": pos}
-    for lab in ("clean", "teacher"):
-        res[lab] = train(head0, items, lab, a.epochs, a.lr, a.accum, device, a.seed)
+           "texts": {"train": n_tr, "dev": len(items) - n_tr}, "positives": pos, "curves": {}}
+    dev = [x for x in items if x["split"] == "dev"]
+    final = {}
+    for n in sizes:
+        for lab in LABEL_SETS:
+            hist, head = train(head0, items, lab, a.epochs, a.lr, a.accum, device, a.seed, n)
+            res["curves"][f"{lab}/n{n}"] = hist
+            if n == sizes[-1]:
+                final[lab] = margins(head, dev, device)
+            del head
+    final["v7.1"] = margins(head0.to(device), dev, device)
+    res["paired"] = paired(final, [x["y"]["clean"].numpy() for x in dev], a.boot)
+    print("\nHeld-out F1 against clean labels, largest size, offset chosen on dev per head; "
+          "differences against the clean-trained head, 95% bootstrap over texts:")
+    for k, v in res["paired"].items():
+        print(f"  {k:14s} F1 {v['f1']:.3f} (offset {v['offset']:+.2f})"
+              + (f"  diff {v['diff'][0]:+.3f} [{v['diff'][1]:+.3f}, {v['diff'][2]:+.3f}]" if "diff" in v else ""))
     out = a.out or a.labels.parent / f"fit-{a.run}-{a.labels.stem}.json"
     out.write_text(json.dumps(res, indent=1))
     print(f"written {out}")
