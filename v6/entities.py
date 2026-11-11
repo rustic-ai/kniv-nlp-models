@@ -111,7 +111,7 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
                    ner_by_sentence: list[list[str] | None],
                    coref_chains: list[list[list[int]]] | None,
                    coref: str = "all", partial_names: bool = False, link=None,
-                   link_merge=None, min_entities: int = 2):
+                   link_merge=None, min_entities: int = 2, spans=None):
     """Return DocRED-format ``(sents, vertexSet)``, or ``(None, None)``.
 
     ``coref``: how coreference chains group the entity mentions -- ``all``
@@ -130,9 +130,13 @@ def build_entities(tokens: list[str], sentence_spans: list[list[int]],
     training keep the default 2 (a relation needs a pair, and a window with
     one entity is not evidence of anything); inference passes 1, so a
     window's only entity is still returned (and pairs with a speaker).
+    ``spans``: typed mention spans ``(type, start, end_exclusive)`` given
+    directly, which may nest (BIO tags cannot); ``ner_by_sentence`` is then
+    ignored.
     """
-    spans: list[tuple[str, int, int]] = []
-    for si, (s, e) in enumerate(sentence_spans):
+    given = spans
+    spans: list[tuple[str, int, int]] = list(given or [])
+    for si, (s, e) in enumerate(sentence_spans if given is None else []):
         tags = ner_by_sentence[si] if si < len(ner_by_sentence) else None
         if not tags:
             continue

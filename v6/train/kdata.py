@@ -419,7 +419,7 @@ class TypeCollator:
 
 def decode_spans(logits: torch.Tensor, batch: dict, offset: float = 0.0,
                  proposals: list[set] | None = None,
-                 boost: float = 0.0) -> list[list[tuple[int, int, int]]]:
+                 boost: float = 0.0, nested: bool = False) -> list[list[tuple[int, int, int]]]:
     """Greedy flat decoding: per item, spans whose best type beats the
     threshold, highest margin first, skipping any that overlap one taken.
     ``(start, end_exclusive, bank type id)``.
@@ -428,7 +428,9 @@ def decode_spans(logits: torch.Tensor, batch: dict, offset: float = 0.0,
     (the entity-mention head); their margin is raised by ``boost`` before the
     same greedy pass, so the span head still types them and still competes
     with them. ``boost`` 0 is plain decoding; a large one keeps every
-    proposal the span head can represent."""
+    proposal the span head can represent. ``nested``: a span may sit inside
+    or around one already taken (never cross it), as fact arguments do
+    ("189" in "189 empirical studies")."""
     if len(logits) == 0:
         return []
     # ``offset``: a span is kept when its best margin exceeds it (calibrated
@@ -447,10 +449,16 @@ def decode_spans(logits: torch.Tensor, batch: dict, offset: float = 0.0,
         if best[i] <= 0:
             break
         b = int(batch["span_batch"][i]); s = int(batch["span_start"][i]); e = int(batch["span_end"][i])
-        t = taken.setdefault(b, np.zeros(int(batch["word_mask"].size(1)) + 1, dtype=bool))
-        if t[s:e].any():
-            continue
-        t[s:e] = True
+        if nested:
+            iv = taken.setdefault(b, [])
+            if any((a < s < z < e) or (s < a < e < z) or (a == s and z == e) for a, z in iv):
+                continue
+            iv.append((s, e))
+        else:
+            t = taken.setdefault(b, np.zeros(int(batch["word_mask"].size(1)) + 1, dtype=bool))
+            if t[s:e].any():
+                continue
+            t[s:e] = True
         out.setdefault(b, []).append((s, e, int(cols[j[i]])))
     return [sorted(out.get(b, [])) for b in range(int(batch["word_mask"].size(0)))]
 

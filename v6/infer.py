@@ -81,6 +81,10 @@ class Extractor:
         from .label_bank import load as load_bank
         self.bank_ids = {r["name"]: r["id"] for r in load_bank()["relations"]}
         self.frozen_path = True
+        # Extra mention proposals for typed entities (v8 P1): "ner" (OntoNotes
+        # spans), "np" (noun phrases from the parse); see v6.mentions.
+        self.proposers: tuple[str, ...] = ()
+        self.nested = False      # typed entities may nest (v8 P1)
 
     # ── text to windows ──────────────────────────────────────────────
     @staticmethod
@@ -114,7 +118,9 @@ class Extractor:
             pred = kniv_predict(self.model, self.tok, self.spec, self.vocab, self.device,
                                 [{"tokens": tokens[:W], "spans": []}], [t["name"] for t in types],
                                 batch=1, offset=self.span_offset, describe=desc.get,
-                                boost=self.span_boost)[0]
+                                boost=self.span_boost,
+                                extra=self._proposals(tokens[:W], sp, o) if self.proposers else None,
+                                nested=self.nested)[0]
             ner = []
             for s, e in sp:
                 tags = ["O"] * (e - s)
@@ -135,9 +141,12 @@ class Extractor:
         if getattr(self.model, "linker", None) is not None and o.get("link_words") is not None:
             from .train.entity_link import Linker
             link = Linker(self.model, tokens, sp, o["link_words"], o["coref"], self.link_threshold)
+        given = None
+        if types and self.nested:
+            given = [("MISC", a, b) for (a, b) in sorted(span_type)]
         _, vertex = build_entities(tokens, [list(x) for x in sp], ner,
                                    [[list(m) for m in c] for c in o["coref"]],
-                                   coref=self.entity_coref, link=link, min_entities=1)
+                                   coref=self.entity_coref, link=link, min_entities=1, spans=given)
         ents = []
         for v in vertex or []:
             ms = sorted({(sp[m["sent_id"]][0] + m["pos"][0], sp[m["sent_id"]][0] + m["pos"][1])
@@ -146,6 +155,10 @@ class Extractor:
             ents.append({"type": max(set(ty), key=ty.count) if ty else v[0].get("type"),
                          "mentions": ms})
         return ents
+
+    def _proposals(self, tokens, sp, o) -> list[set]:
+        from .mentions import propose
+        return [propose(tokens, sp, o, self.vocab, self.proposers)]
 
     # ── relations ────────────────────────────────────────────────────
     @torch.no_grad()

@@ -568,7 +568,11 @@ def run_phase2(model, feats: list[dict], tok, device, batch: int = 4,
                       "ent": (torch.log_softmax(o["ent"][j, :W].float(), -1).cpu().numpy()
                               if "ent" in o else None),
                       "link_words": (o["link_words"][j, :W].float().cpu()
-                                     if "link_words" in o else None)}
+                                     if "link_words" in o else None),
+                      # the parse (heads: 0 = root, else word index + 1), for mention proposals
+                      "pos": o["pos"][j, :W].argmax(-1).cpu().numpy() if "pos" in o else None,
+                      "dep_head": o["rel_head"][j, :W].cpu().numpy() if "rel_head" in o else None,
+                      "dep_rel": o["rel"][j, :W].argmax(-1).cpu().numpy() if "rel" in o else None}
             if keep_pairs and "relation" in o:
                 sel = torch.as_tensor(pair_b == j, device=device)
                 out[i]["pair"] = model.relation._pair[sel].half().cpu().numpy()

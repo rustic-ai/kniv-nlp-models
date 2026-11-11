@@ -132,10 +132,13 @@ def mention_proposals(o: dict, b: dict) -> list[set]:
 
 def kniv_predict(model, tok, spec, vocab, device, items: list[dict], labels: list[str],
                  batch: int = 16, offset: float = 0.0, describe=None,
-                 boost: float | None = None) -> list[set]:
+                 boost: float | None = None, extra: list[set] | None = None,
+                 nested: bool = False) -> list[set]:
     """``describe``: type name -> description (default: ``--describe``'s).
     ``boost``: also propose the entity-mention head's spans, their margin
-    raised by ``boost`` (``kdata.decode_spans``); None: the span head alone."""
+    raised by ``boost`` (``kdata.decode_spans``); None: the span head alone.
+    ``extra``: per item, more proposed ``(start, end)`` spans (``v6.mentions``),
+    raised by the same boost."""
     from .data import blank_window, collate
     from .kdata import TypeCollator, decode_spans, span_targets
     # kniv's span head trained on "entity type: <name>. <description>"; a
@@ -161,8 +164,11 @@ def kniv_predict(model, tok, spec, vocab, device, items: list[dict], labels: lis
         b = {n: v.to(device) for n, v in b.items() if hasattr(v, "to")}
         o = model(b, relation_only=True)
         props = mention_proposals(o, b) if boost is not None and o.get("ent") is not None else None
+        if extra is not None and boost is not None:
+            props = [(props[j] if props else set()) | extra[i] for j, i in enumerate(idx)]
         for j, spans in enumerate(decode_spans(o["span"].float().cpu(), {n: v.cpu() for n, v in b.items()},
-                                          offset=offset, proposals=props, boost=boost or 0.0)):
+                                          offset=offset, proposals=props, boost=boost or 0.0,
+                                          nested=nested)):
             out[idx[j]] = {(s, e, labels[t]) for s, e, t in spans}
     return out
 
