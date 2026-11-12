@@ -145,8 +145,10 @@ def judge_prompt(it: dict, facts: list[dict]) -> str:
 
 
 class CandJudge(KGAnnotator):
+    prompt = "kgcand"            # "kgcand2": the stricter c2 judge
+
     def build_messages(self, layer: str, item) -> list[dict]:
-        return [{"role": "system", "content": SYSTEM["kgcand"]},
+        return [{"role": "system", "content": SYSTEM[self.prompt]},
                 {"role": "user", "content": item.layers["judge_prompt"] + self._json_hint(layer)}]
 
 

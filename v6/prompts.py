@@ -282,6 +282,72 @@ SYSTEM["kgcand"] = (
 )
 
 
+# Stricter judge (c2): a hand check of 200 c1 verdicts found about a quarter
+# of "supported" facts degenerate -- an argument that is a verb phrase, a
+# fragment or a whole clause, a tautology, or a relation that only loosely
+# fits. Same verdicts and output; kgcand (c1) stays as it was for the labels
+# already built on it.
+SYSTEM["kgcand2"] = (
+    "You check candidate facts for a passage. Each fact links two entities "
+    "(given by their mentions in the passage) by a relation with a "
+    "definition, read head to tail. Give each fact one verdict:\n"
+    "- supported: the passage states it or clearly implies it, in that "
+    "direction, and the relation's definition fits;\n"
+    "- negated: the passage says it is not so (\"did not\", \"no longer\", "
+    "\"denied\");\n"
+    "- hedged: the passage mentions it only as possible, planned, wished, "
+    "asked about, or claimed by someone without commitment;\n"
+    "- not_supported: anything else.\n"
+    "A fact is not_supported when any of these holds:\n"
+    "- an argument is not a mention of the kind of thing the relation needs: "
+    "a verb or action phrase where an entity is needed, a fragment of a "
+    "name or number, a whole clause, or a span that also swallows other "
+    "entities;\n"
+    "- it is empty or circular: an argument restates the other (\"our use\" "
+    "uses \"trademarks\" from \"our use of trademarks\"; \"two pillars\" "
+    "has property \"two\");\n"
+    "- the relation only loosely fits: its definition must describe what the "
+    "passage says about these two arguments, not merely a topical "
+    "association;\n"
+    "- it needs background knowledge the passage does not give, or the "
+    "direction is wrong.\n"
+    "A more general relation that is still exactly true of the two arguments "
+    "counts as supported. Several relations can hold for one pair; judge "
+    "each fact on its own, from the passage alone."
+)
+
+
+# c3: c2 rejected long but proper noun phrases ("third parties to supply
+# components") and lost a third of the true facts; only broken or circular
+# arguments are rejected here.
+SYSTEM["kgcand3"] = (
+    "You check candidate facts for a passage. Each fact links two entities "
+    "(given by their mentions in the passage) by a relation with a "
+    "definition, read head to tail. Give each fact one verdict:\n"
+    "- supported: the passage states it or clearly implies it, in that "
+    "direction, and the relation's definition fits (a looser or more general "
+    "relation that is still true of the two arguments counts as supported);\n"
+    "- negated: the passage says it is not so (\"did not\", \"no longer\", "
+    "\"denied\");\n"
+    "- hedged: the passage mentions it only as possible, planned, wished, "
+    "asked about, or claimed by someone without commitment;\n"
+    "- not_supported: the passage does not say it, says something else, the "
+    "direction is wrong, or an argument does not fit the relation.\n"
+    "An argument may be a long noun phrase (\"third parties that supply "
+    "components\"); that is fine. A fact is not_supported when an argument "
+    "is broken or empty:\n"
+    "- a cut-off fragment of a name, phrase or number, or a run of several "
+    "separate values or entities read as one;\n"
+    "- a bare word that names nothing in context (\"performance\", "
+    "\"outstanding\", \"a\");\n"
+    "- circular: one argument just restates the other (\"our use\" uses "
+    "\"trademarks\" from \"our use of trademarks\"; \"two pillars\" has "
+    "property \"two\"; \"the company\" has part \"our work\").\n"
+    "Several relations can hold for one pair; judge each fact on its own, "
+    "from the passage alone, without background knowledge."
+)
+
+
 def kg_user_message(sentences: list[str], speakers: list[str | None] | None,
                     participants: list[str], types: list[dict], relations: list[dict]) -> str:
     """One window for the ``kg`` layer: numbered sentences (with speakers in a

@@ -123,14 +123,19 @@ def build(run: str):
     return d, rows
 
 
-def judge(run: str, judge_name: str) -> int:
+PROMPTS = {"c1": "kgcand", "c2": "kgcand2", "c3": "kgcand3"}
+
+
+def judge(run: str, judge_name: str, version: str = "c1", only: set | None = None) -> int:
     from ..annotate.base import CacheStore
     from ..annotate.kg import KGItem
-    from ..kg_judge import VERSION, CandJudge, _run
+    from ..kg_judge import CandJudge, _run
     from ..kg_teacher import CACHE
     d, rows = build(run)
     spec = load_annotators([judge_name])[judge_name]
     items = []
+    if only is not None:
+        rows = [(it, f) for it, f in rows if it["id"] in only]
     for it, facts in rows:
         if not facts:
             continue
@@ -140,7 +145,9 @@ def judge(run: str, judge_name: str) -> int:
         q.layers = {"judge_prompt": judge_prompt(it, facts)}
         items.append(q)
     print(f"{len(rows)} texts, {sum(len(f) for _, f in rows)} facts, {len(items)} calls", flush=True)
-    res = asyncio.run(_run(CandJudge(spec, CacheStore(CACHE, VERSION)), items, f"m1-{judge_name}"))
+    ann = CandJudge(spec, CacheStore(CACHE, version))
+    ann.prompt = PROMPTS[version]
+    res = asyncio.run(_run(ann, items, f"m1-{judge_name}-{version}"))
     out = []
     for it, facts in rows:
         r = res.get(f"{it['id']}:m1:{run}")
@@ -148,8 +155,10 @@ def judge(run: str, judge_name: str) -> int:
         out.append({"id": it["id"], "judged": bool(v) or not facts,
                     "facts": [{"key": [sorted(f["key"][0]), f["key"][1], sorted(f["key"][2])],
                                "src": f["src"], "verdict": v.get(n)} for n, f in enumerate(facts)]})
-    (OUT / f"labels-{run}-{judge_name}.json").write_text(json.dumps({"configs": list(d["preds"]),
-                                                                     "texts": out}))
+    tag = "" if version == "c1" else f"-{version}"
+    tag += "-handcheck" if only is not None else ""
+    (OUT / f"labels-{run}-{judge_name}{tag}.json").write_text(json.dumps({"configs": list(d["preds"]),
+                                                                          "texts": out}))
     print(Counter(f["verdict"] for t in out for f in t["facts"]))
     return 0
 
@@ -174,8 +183,12 @@ def _groups(facts: list[dict]) -> list[list[dict]]:
     return out
 
 
-def score(run: str, judge_name: str, boot: int = 2000, merge: bool = False) -> int:
-    L = json.loads((OUT / f"labels-{run}-{judge_name}.json").read_text())
+def labels_path(run: str, judge_name: str, version: str = "c1"):
+    return OUT / f"labels-{run}-{judge_name}{'' if version == 'c1' else '-' + version}.json"
+
+
+def score(run: str, judge_name: str, boot: int = 2000, merge: bool = False, version: str = "c1") -> int:
+    L = json.loads(labels_path(run, judge_name, version).read_text())
     cfgs, texts = L["configs"], [t for t in L["texts"] if t["judged"]]
     if merge:      # count a fact once however many span variants of it were predicted
         for t in texts:
@@ -227,18 +240,20 @@ def score(run: str, judge_name: str, boot: int = 2000, merge: bool = False) -> i
         print(f"  {c}: precision {a[0] - b[0]:+.3f} [{np.percentile(dp, 2.5):+.3f}, "
               f"{np.percentile(dp, 97.5):+.3f}]; F1 {a[2] - b[2]:+.3f} [{np.percentile(df, 2.5):+.3f}, "
               f"{np.percentile(df, 97.5):+.3f}]")
-    (OUT / f"score-{run}-{judge_name}{'-merged' if merge else ''}.json").write_text(json.dumps(res, indent=1, default=float))
+    (OUT / f"score-{run}-{judge_name}{'' if version == 'c1' else '-' + version}"
+           f"{'-merged' if merge else ''}.json").write_text(json.dumps(res, indent=1, default=float))
     return 0
 
 
-def rescore(run: str, judge_name: str, tag: str, base_tag: str, boot: int = 2000) -> int:
+def rescore(run: str, judge_name: str, tag: str, base_tag: str, boot: int = 2000,
+            version: str = "c1") -> int:
     """Score another predictions file (``predict --tag``) against the judged
     facts without new judge calls: valid when its predictions are a subset of
     the judged ones (e.g. the variant merge keeps one of each judged group).
     Each prediction takes the verdict of the judged fact with the same
     mentions, else of one sharing a mention (as the judge pass matched);
     recall counts the variant groups found against the pooled ones."""
-    L = json.loads((OUT / f"labels-{run}-{judge_name}.json").read_text())
+    L = json.loads(labels_path(run, judge_name, version).read_text())
     texts = L["texts"]
     files = {base_tag: None, tag: None}
     res = {}
@@ -290,13 +305,40 @@ def rescore(run: str, judge_name: str, tag: str, base_tag: str, boot: int = 2000
         print(f"  {k}: precision {x[0] - y[0]:+.3f} [{np.percentile(d[:, 0], 2.5):+.3f}, "
               f"{np.percentile(d[:, 0], 97.5):+.3f}]; F1 {x[2] - y[2]:+.3f} "
               f"[{np.percentile(d[:, 1], 2.5):+.3f}, {np.percentile(d[:, 1], 97.5):+.3f}]")
-    (OUT / f"rescore-{run}{tag}.json").write_text(json.dumps(out, indent=1, default=float))
+    (OUT / f"rescore-{run}{tag}{'' if version == 'c1' else '-' + version}.json").write_text(json.dumps(out, indent=1, default=float))
+    return 0
+
+
+def agree(run: str, judge_name: str, version: str) -> int:
+    """A judge's verdicts on the hand-checked sample against the hand labels
+    (``hand-check.json``: 200 facts, half judged expressed by c1)."""
+    H = json.loads((OUT / "hand-check.json").read_text())["facts"]
+    tag = "" if version == "c1" else f"-{version}-handcheck"
+    L = json.loads((OUT / f"labels-{run}-{judge_name}{tag}.json").read_text())
+    by = {t["id"]: t for t in L["texts"]}
+    c = Counter()
+    for h in H:
+        t = by.get(h["id"])
+        f = next((f for f in t["facts"] if f["key"] == h["key"]), None) if t else None
+        if f is None or f["verdict"] is None:
+            c["missing"] += 1
+            continue
+        j = f["verdict"] in POSITIVE
+        c[(h["hand_expressed"], j)] += 1
+        c[("half", h["i"] < 100, h["hand_expressed"], j)] += 1
+    for name, sel in (("all", None), ("first half", True), ("second half", False)):
+        g = (lambda a, b: c[(a, b)]) if sel is None else (lambda a, b: c[("half", sel, a, b)])
+        tp, fp, fn, tn = g(True, True), g(False, True), g(True, False), g(False, False)
+        n = tp + fp + fn + tn
+        print(f"{version} {name:11s}: {n} facts | agreement {(tp + tn) / max(n, 1):.3f} | "
+              f"judge 'expressed' right {tp / max(tp + fp, 1):.3f} ({tp}/{tp + fp}) | "
+              f"hand-expressed found {tp / max(tp + fn, 1):.3f} ({tp}/{tp + fn})")
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=["predict", "judge", "score", "rescore"])
+    ap.add_argument("cmd", choices=["predict", "judge", "score", "rescore", "agree"])
     ap.add_argument("--run", default="ultrabert-380m-v7b8ev")
     ap.add_argument("--short", type=int, default=300)
     ap.add_argument("--configs", default="base,ner+np:1,ner+np+nest:2")
@@ -304,15 +346,22 @@ def main() -> int:
     ap.add_argument("--tag", default="", help="predict / rescore: suffix of the predictions file")
     ap.add_argument("--base-tag", default="-merge", help="rescore: the file whose first config is the baseline")
     ap.add_argument("--merge", action="store_true", help="span variants of one fact count once")
+    ap.add_argument("--version", default="c1", choices=list(PROMPTS), help="judge prompt")
+    ap.add_argument("--handcheck", action="store_true",
+                    help="judge: only the texts of the hand-checked sample (hand-check.json)")
     a = ap.parse_args()
     if a.cmd == "predict":
         predict(a.run, a.short, a.configs.split(","), a.tag)
         return 0
     if a.cmd == "judge":
-        return judge(a.run, a.judge)
+        only = ({x["id"] for x in json.loads((OUT / "hand-check.json").read_text())["facts"]}
+                if a.handcheck else None)
+        return judge(a.run, a.judge, a.version, only)
+    if a.cmd == "agree":
+        return agree(a.run, a.judge, a.version)
     if a.cmd == "rescore":
-        return rescore(a.run, a.judge, a.tag, a.base_tag)
-    return score(a.run, a.judge, merge=a.merge)
+        return rescore(a.run, a.judge, a.tag, a.base_tag, version=a.version)
+    return score(a.run, a.judge, merge=a.merge, version=a.version)
 
 
 if __name__ == "__main__":
