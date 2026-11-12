@@ -374,6 +374,8 @@ def main() -> int:
         predict(a.run, a.short, a.configs.split(","), a.tag, a.set)
         return 0
     a.run = set_key(a.run, a.set)      # every later step reads files by slice
+    if a.tag and a.cmd in ("judge", "score"):
+        a.run += a.tag                 # a tagged predictions file judged as its own set
     if a.cmd == "judge":
         only = ({x["id"] for x in json.loads((OUT / "hand-check.json").read_text())["facts"]}
                 if a.handcheck else None)
