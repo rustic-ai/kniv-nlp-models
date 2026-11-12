@@ -77,10 +77,14 @@ class LabelCollator:
                  min_labels: int = 16, max_labels: int = 96,
                  exclude_holdout: bool = False, only_holdout: bool = False,
                  sources: tuple[str, ...] = ("redocred",), text_modes=None,
-                 unlabelled_keep: float | None = None, exclude_ids=(), only_ids=None):
+                 unlabelled_keep: float | None = None, exclude_ids=(), only_ids=None,
+                 para: dict | None = None):
         self.tok, self.train = tok, train
         self.unlabelled_keep = unlabelled_keep
         self.text_modes = tuple(text_modes or TEXT_MODES)
+        # Generated names (D2, ``label_para.json``): per relation id, [name,
+        # description or None]; text mode "para" draws one.
+        self.para = {int(k): v for k, v in (para or {}).items()}
         self.rels = bank["relations"]
         self.rng = np.random.default_rng(seed)
         self.min_labels, self.max_labels = min_labels, max_labels
@@ -117,6 +121,15 @@ class LabelCollator:
             self._tok_cache[text] = self.tok(text, truncation=True,
                                              max_length=LABEL_MAX_SUBWORDS)["input_ids"]
         return self._tok_cache[text]
+
+    def _text(self, c: int, mode: str) -> str:
+        if mode == "para":
+            opts = self.para.get(c)
+            if not opts:
+                return label_text(self.rels[c], "name_desc", self.rng)
+            name, desc = opts[int(self.rng.integers(len(opts)))]
+            return f"relation: {name}. {desc}" if desc else f"relation: {name}"
+        return label_text(self.rels[c], mode, self.rng)
 
     def schema_of(self, schema) -> np.ndarray:
         if schema is None:
@@ -183,8 +196,8 @@ class LabelCollator:
             batch["pair_labels"] = torch.cat([none, new], 1) * (~drop).unsqueeze(1)
             batch["pair_label_mask"] = mask
         modes, probs = zip(*self.text_modes)
-        texts = [label_text(self.rels[c], self.rng.choice(modes, p=probs) if self.train
-                            else "name_desc", self.rng) for c in cols]
+        texts = [self._text(int(c), self.rng.choice(modes, p=probs) if self.train
+                            else "name_desc") for c in cols]
         ids = [self._ids(t) for t in texts]
         from .data import label_bucket
         L = label_bucket(max(len(x) for x in ids))
@@ -249,9 +262,10 @@ def teacher_features(item, payload: dict, tok, max_subwords: int, bank: dict, n_
             continue
         h, t = keep[x["head"]], keep[x["tail"]]
         triples.append((h, t, r))
-        attrs.append({"h": h, "t": t, "r": r, "polarity": x["polarity"],
-                      "modality": x["modality"],
-                      "holder": keep.get(x["holder"], -1), "time": keep.get(x["time"], -1)})
+        if x.get("attr", True):    # False: a relation label whose attributes are unknown
+            attrs.append({"h": h, "t": t, "r": r, "polarity": x["polarity"],
+                          "modality": x["modality"],
+                          "holder": keep.get(x["holder"], -1), "time": keep.get(x["time"], -1)})
         sents = [j for j in x["evidence"] if j < f["_S"] and spans[j][0] < W]
         if sents:
             ev.setdefault((h, t), set()).update(sents)
@@ -478,13 +492,17 @@ def _corpus():
 KNOWLEDGE_FILES = {"fewrel": "fewrel_rel.json", "fewnerd": "fewnerd_spans.json",
                    "docred_distant": "docred_distant_rel.json", "pretrain": "kg_pretrain.json",
                    "trex": "kg_trex.json", "short": "kg_short.json", "short_pairs": "kg_short.json",
-                   "synth": "kg_short.json"}
+                   "synth": "kg_short.json", "short_d1": "kg_short_d1.json",
+                   "concepts": "kg_d2_concepts.json", "forms": "kg_d3_forms.json"}
 # The short-text teacher's sources (``kg_short export``): natural 1-3
 # sentence texts (train / dev), minimal-pair rewrites, synthetic value and
 # list passages. Synthetic passages are featurised SYNTH_DRAWS times, each
 # with its own draw of names and values (``name_swap``), so no name or value
 # repeats often enough to become a prior.
-SHORT_SPLITS = {"short": None, "short_pairs": "pairs", "synth": "synth"}
+SHORT_SPLITS = {"short": None, "short_pairs": "pairs", "synth": "synth",
+                # v8 Phase 3 (``v6.phase3_data``): D1's judged labels on the short
+                # training texts, D2's concept passages, D3's forms.
+                "short_d1": "train", "concepts": "train", "forms": "train"}
 SYNTH_DRAWS = 4
 # Unlabelled pairs of a partial source kept as negatives, per source: FewRel
 # labels one pair per sentence and says nothing of the others.
@@ -495,7 +513,10 @@ UNLABELLED_KEEP = {"teacher": 0.5, "docred_distant": 0.5, "fewrel": 0.0, "pretra
                    # short texts are labelled exhaustively within their schema
                    # (recall 0.82 against a second annotator; synthetic 0.94 + the
                    # written facts the teacher missed)
-                   "short": 0.8, "short_pairs": 0.8, "synth": 0.9}
+                   "short": 0.8, "short_pairs": 0.8, "synth": 0.9,
+                   # D1 judged every candidate near the bar: an unlabelled pair is
+                   # one the judge rejected or the model put well below it
+                   "short_d1": 1.0, "concepts": 0.9, "forms": 0.8}
 
 
 def _digest(path):

@@ -44,7 +44,7 @@ from pathlib import Path
 from .config import DATA_DIR
 
 BANK_PATH = DATA_DIR / "v6-corpus" / "label_bank.json"
-VERSION = 7
+VERSION = 8
 N_HOLDOUT = 20
 N_FEWREL_EXTRA = 7          # FewRel training relations added to the zero-shot holdout (v7)
 TREX_MIN_FACTS = 50         # a T-REx property joins the bank with >= 50 aligned facts
@@ -161,6 +161,12 @@ def _fewrel_extra(relations: list[dict]) -> list[str]:
 # Version 7 (v8): the general entity types the short-text teacher annotates
 # against (``kg_short``). person / organization / location / activity are
 # already in the bank and keep their entries; the rest are appended.
+# Version 8: business and legal relations no source had, taught by D2's
+# passages written to order (``v6.d2_labels``, plan r2 section 7).
+V8_RELATIONS = {
+    "sued": "The head person or organization brought a lawsuit or legal claim against the tail.",
+    "fined by": "The head was ordered to pay a fine or monetary penalty by the tail authority or court.",
+}
 GENERAL_SHORT_TYPES = [{"name": n, "description": d, "source": "general-short"} for n, d in [
     ("person", "a human being, named or described ('my sister', 'the CEO')"),
     ("organization", "a company, institution, team, government body or other group"),
@@ -177,9 +183,9 @@ GENERAL_SHORT_TYPES = [{"name": n, "description": d, "source": "general-short"} 
 
 
 def extend(bank: dict) -> dict:
-    """Versions 6 and 7 on top of a version 5 bank (idempotent): the standard
+    """Versions 6 to 8 on top of a version 5 bank (idempotent): the standard
     zero-shot holdout, T-REx's properties, Wikidata classes as types; then
-    the general short-text types."""
+    the general short-text types and version 8's relations."""
     rels, types = bank["relations"], bank["entity_types"]
     extra = set(_fewrel_extra(rels)) if bank.get("version", 0) < 6 else set()
     for r in rels:
@@ -223,6 +229,12 @@ def extend(bank: dict) -> dict:
         if t["name"].lower() not in tnames:
             types.append({"id": len(types), **t, "aliases": [], "mergeable": True, "temporal": False})
             tnames.add(t["name"].lower())
+    for name, desc in V8_RELATIONS.items():
+        if name.lower() not in names:
+            rels.append({"id": len(rels), "name": name, "description": desc, "aliases": [],
+                         "source": "v8", "code": None, "holdout": False, "train": True,
+                         "category": "business", "domains": {}, "inverse": None})
+            names.add(name.lower())
     if len({r["name"] for r in rels}) != len(rels) or len({t["name"] for t in types}) != len(types):
         raise RuntimeError("two labels share a name")
     bank["version"] = VERSION

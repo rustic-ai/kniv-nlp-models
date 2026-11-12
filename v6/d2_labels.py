@@ -79,10 +79,7 @@ CONCEPTS = [
     "bound by", "must comply with", "grants license to", "licensed to", "defendant", "penalty",
     "industry", "brand",
 ]
-NEW = {
-    "sued": "The head person or organization brought a lawsuit or legal claim against the tail.",
-    "fined by": "The head was ordered to pay a fine or monetary penalty by the tail authority or court.",
-}
+from .label_bank import V8_RELATIONS as NEW      # noqa: E402  (the bank holds the definitions)
 # "legal counsel of" was in the pilot; M2's clean set has Wikidata's "legal
 # counsel" (P1593), so it is left out of D2 to keep M2 zero-shot.
 STYLES = ["a news sentence", "a press release", "a work email", "an excerpt from an annual report",

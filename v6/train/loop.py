@@ -562,6 +562,9 @@ def main() -> int:
     ap.add_argument("--label-pass", choices=["plain", "adapter"], default="plain",
                     help="read label texts with the plain frozen encoder (only the label "
                          "projection learns) or through the relation adapter")
+    ap.add_argument("--label-para", type=float, default=0.0, metavar="SHARE",
+                    help="share of training label texts drawn from D2's generated names "
+                         "(data/v6-corpus/label_para.json, v6.phase3_data), out of name_desc's")
     ap.add_argument("--label-text", choices=["mixed", "canonical"], default="mixed",
                     help="training label texts: mixed (name / name+description / alias) "
                          "or canonical (name+description only, as at evaluation)")
@@ -985,10 +988,19 @@ def main() -> int:
         from ..label_bank import load as load_bank
         from .kdata import LabelCollator
         bank = load_bank()
+        para, modes = None, ([("name_desc", 1.0)] if args.label_text == "canonical" else None)
+        if args.label_para:
+            # D2's generated names as a share of the label texts, taken from
+            # the canonical name-and-description share.
+            from .kdata import TEXT_MODES, _corpus
+            para = json.loads((_corpus() / "label_para.json").read_text())
+            modes = [(m, p - args.label_para if m == "name_desc" else p) for m, p in TEXT_MODES]
+            modes.append(("para", args.label_para))
+            assert all(p >= 0 for _, p in modes), "--label-para above the name_desc share"
+            print(f"label texts: {modes}; generated names for {len(para)} relations", flush=True)
         label_coll = LabelCollator(tok, bank, train=True, seed=args.seed,
                                    exclude_holdout=args.label_holdout, exclude_ids=hold_ids,
-                                   text_modes=([("name_desc", 1.0)] if args.label_text == "canonical"
-                                               else None))
+                                   text_modes=modes, para=para)
         if args.hard_negatives:
             label_coll.siblings = relation_siblings(model, tok, device, bank, args.hard_negatives)
             print(f"hard negatives: {args.hard_negatives} siblings per relation, e.g. " + "; ".join(
