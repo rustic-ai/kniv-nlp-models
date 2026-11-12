@@ -1,9 +1,11 @@
 """D2 (v8 plan r2): open labels -- other names for bank relations, and
 business and legal text for the concepts M4 found missing or unlearned.
 
-    uv run python -m v6.d2_labels para [--limit 50]       # ten names per relation
+    uv run python -m v6.d2_labels para [--limit 50]       # ten names per relation (P4's 50)
+    uv run python -m v6.d2_labels para --all              # every trained bank relation
     uv run python -m v6.d2_labels p4file                  # generated names in P4's file format
     uv run python -m v6.d2_labels concepts --per 2        # passages written to order, annotated blind
+    uv run python -m v6.d2_labels concepts --per 40       # the full set
 
 **Names** (``para``). P4: a reworded name and definition costs 3.4 F1 on
 short text, a terse name with no definition 9.6 (CoNLL04 16.7), and the loss
@@ -72,6 +74,10 @@ CONCEPTS = [
     "competes with", "partnership with", "merged into", "acquires", "subsidiary of", "regulated by",
     "external auditor", "advises", "licenses", "settled", "subcontractor of", "distributed by",
     "convicted of", "employed by", "headquartered in", "owned by",
+    # the full run adds these
+    "officer of", "investor", "funder", "owner of", "issued by", "liable to", "owes", "payable to",
+    "bound by", "must comply with", "grants license to", "licensed to", "defendant", "penalty",
+    "industry", "brand",
 ]
 NEW = {
     "sued": "The head person or organization brought a lawsuit or legal claim against the tail.",
@@ -109,10 +115,15 @@ def _bank_names() -> dict[str, dict]:
     return {r["name"]: r for r in load_bank()["relations"]}
 
 
-def para(limit: int | None, annotator: str) -> int:
+def para(limit: int | None, annotator: str, every: bool = False) -> int:
+    """``every``: all trained bank relations (never-trained ones stay out, so
+    the zero-shot holdouts keep their names unseen); else P4's 50."""
+    from .eval.m2_unseen import CONLL04, CROSSRE
     bank = _bank_names()
     p4 = json.loads(P4.read_text())
-    names = list(p4["short"])[:limit] if limit else list(p4["short"])
+    names = [n for n, r in bank.items() if r.get("train", True)] if every else list(p4["short"])
+    names = names[:limit] if limit else names
+    evalnames = {" ".join(x.lower().split()) for x in CONLL04 + CROSSRE}
     hand = set()
     for part in ("short", "conll04"):
         for v in p4[part].values():
@@ -145,6 +156,8 @@ def para(limit: int | None, annotator: str) -> int:
                 flags.append("P4 hand name")
             if v["name"] in m2:
                 flags.append("M2 relation name")
+            if v["name"] in evalnames:
+                flags.append("CoNLL04 or CrossRE name")
             rows.append({**v, "flags": flags})
             c[v["style"]] += 1
             for f in flags:
@@ -152,12 +165,13 @@ def para(limit: int | None, annotator: str) -> int:
         out[n] = rows
         c["relations"] += 1
         c["short of 5+5"] += sum(1 for s in ("described", "terse") if sum(v["style"] == s for v in rows) < 5)
-    (OUT / "paraphrases.json").write_text(json.dumps(out, indent=1))
+    dest = OUT / ("paraphrases-all.json" if every else "paraphrases.json")
+    dest.write_text(json.dumps(out, indent=1))
     print(dict(c))
     words = [len(v["name"].split()) for rows in out.values() for v in rows if v["style"] == "terse"]
     if words:
         print(f"terse names: mean {sum(words) / len(words):.1f} words")
-    print(f"-> {OUT / 'paraphrases.json'}")
+    print(f"-> {dest}")
     return 0
 
 
@@ -184,6 +198,8 @@ def p4file() -> int:
 def concept_requests(per: int) -> tuple[list[KGItem], dict[str, str]]:
     bank = _bank_names()
     desc = {**{n: bank[n].get("description", "") for n in CONCEPTS}, **NEW}
+    clash = [n for n in desc if n in m2_names()]
+    assert not clash, f"concepts named like an M2 relation: {clash}"
     names = sorted(desc)
     reqs = []
     for i, n in enumerate(names):
@@ -206,7 +222,9 @@ def concepts(per: int, annotator: str) -> int:
     from .windows import tokenize
     bank = _bank_names()
     reqs, desc = concept_requests(per)
-    spec, cache = ks.teacher_spec(annotator), ks.CacheStore(ks.CACHE, VERSION)
+    # the cache is keyed by item id: the full run's schemas draw distractors
+    # from a longer list than the pilot's, so it keeps its own responses
+    spec, cache = ks.teacher_spec(annotator), ks.CacheStore(ks.CACHE, VERSION if per <= 2 else "d2b")
     OUT.mkdir(parents=True, exist_ok=True)
     ks.OUT = OUT
     gen = asyncio.run(ks._run(ks.Synthesizer(spec, cache), "kgsyn", reqs, f"concept-gen-{annotator}"))
@@ -283,7 +301,8 @@ def concepts(per: int, annotator: str) -> int:
         wanted = set(it.layers["gold"][i]["relation"] for i in range(len(it.layers["gold"])))
         c["teacher facts outside the written ones"] += sum(1 for _, rel, _ in pred if rel not in wanted)
         rows.append(ks._record(d, {**p, "facts": facts}, style=it.layers["style"], target=it.layers["target"]))
-    (OUT / "concepts.json").write_text(json.dumps(rows))
+    dest = OUT / ("concepts.json" if per <= 2 else f"concepts-per{per}.json")
+    dest.write_text(json.dumps(rows))
     print(f"{len(reqs)} requests, {len(items)} passages kept; {dict(c)}")
     print(f"{'relation':22s} {'written':>7s} {'recovered':>9s}  in bank")
     for n in sorted(per_c, key=lambda n: per_c[n]["recovered"] / max(per_c[n]["written"], 1)):
@@ -295,7 +314,7 @@ def concepts(per: int, annotator: str) -> int:
         tot.update(cc)
     print(f"{'ALL':22s} {tot['written']:7d} {tot['recovered'] / max(tot['written'], 1):9.0%}")
     print("\n".join(examples))
-    print(f"-> {OUT / 'concepts.json'} ({len(rows)} passages)")
+    print(f"-> {dest} ({len(rows)} passages)")
     return 0
 
 
@@ -305,9 +324,10 @@ def main() -> int:
     ap.add_argument("--limit", type=int)
     ap.add_argument("--per", type=int, default=2, help="concepts: passages per concept")
     ap.add_argument("--annotator", default="sol61")
+    ap.add_argument("--all", action="store_true", help="para: every trained bank relation")
     a = ap.parse_args()
     if a.cmd == "para":
-        return para(a.limit, a.annotator)
+        return para(a.limit, a.annotator, a.all)
     if a.cmd == "p4file":
         return p4file()
     return concepts(a.per, a.annotator)

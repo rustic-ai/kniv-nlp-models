@@ -20,8 +20,9 @@ found the forms that fail are mostly others: denials, "never", "no longer",
   ``kg_short variants``;
 - **labels set by kind**, as ``kg_short.export_short`` does for the pairs:
   the target fact gets the kind's polarity and modality, added if the teacher
-  missed it. The conventions are M3's: a denial by the head (or its company)
-  and "never" / "no longer" are negative and asserted; "might" is
+  missed it. A denial by the head (or its company) is negative and reported,
+  the head holding it (decided 2026-11-12: the writer does not vouch for a
+  denial); "never" / "no longer" are negative and asserted; "might" is
   hypothetical; a rumour is reported with no holder; "expected to" is planned.
 
 Output: ``v6/runs/d3-forms/pairs.json`` in ``kg_short.json``'s pair record
@@ -54,7 +55,7 @@ AGENT = re.compile(r"person|organi[sz]ation|company|politician|athlete|actor|mus
                    r"scholar|scientist|government|party|team|band|director|soldier|business|firm|agency|"
                    r"corporation|club|university|school", re.I)
 VERSION = "d3a"
-EXPECT = {"denied": ("negative", "asserted"), "never": ("negative", "asserted"),
+EXPECT = {"denied": ("negative", "reported"), "never": ("negative", "asserted"),
           "no_longer": ("negative", "asserted"), "might": ("positive", "hypothetical"),
           "rumoured": ("positive", "reported"), "expected": ("positive", "planned")}
 assert set(EXPECT) == set(KGVAR4_KINDS)
@@ -230,12 +231,13 @@ def run(n: int, annotator: str, judge: str, agents: bool = False) -> int:
                     continue
                 agree = (f["polarity"], f["modality"]) == (pol, mod)
                 c[f"{kind}: teacher agrees" if agree else f"{kind}: label set by kind"] += 1
-                f = {**f, "polarity": pol, "modality": mod, "holder": -1 if kind == "rumoured" else f["holder"]}
+                holder = {"rumoured": -1, "denied": h}.get(kind, f["holder"])
+                f = {**f, "polarity": pol, "modality": mod, "holder": holder}
                 fixed = True
             facts.append(f)
         if not fixed:
             facts.append({"head": h, "tail": t, "relation": L["relation"], "polarity": pol, "modality": mod,
-                          "holder": -1, "time": -1, "evidence": [0]})
+                          "holder": h if kind == "denied" else -1, "time": -1, "evidence": [0]})
             c[f"{kind}: fact added (teacher missed it)"] += 1
         c[f"{kind}: kept"] += 1
         rows.append(ks._record(d, {**p, "facts": facts}, kind=kind, base=L["base"]))

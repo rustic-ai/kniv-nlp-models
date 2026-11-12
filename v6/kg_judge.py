@@ -190,7 +190,10 @@ def build(runs: list[str], n_train: int, n_dev: int, offset: int = 0,
     return out
 
 
-PROMPTS = {"c1": "kgcand", "c2": "kgcand2", "c3": "kgcand3"}
+# The cache is keyed by item id, so a sample judged against another candidate
+# set needs its own version: "c3b" is c3's prompt for D1's first 700 texts,
+# which P0 judged against three runs' candidates.
+PROMPTS = {"c1": "kgcand", "c2": "kgcand2", "c3": "kgcand3", "c3b": "kgcand3"}
 
 
 def judge(runs: list[str], judge_name: str, n_train: int, n_dev: int, limit: int | None,
@@ -265,7 +268,7 @@ def main() -> int:
     ap.add_argument("--train", type=int, default=300)
     ap.add_argument("--dev", type=int, default=100)
     ap.add_argument("--limit", type=int)
-    ap.add_argument("--version", default=VERSION, choices=["c1", "c2", "c3"], help="judge prompt")
+    ap.add_argument("--version", default=VERSION, choices=sorted(PROMPTS), help="judge prompt")
     ap.add_argument("--labels", type=Path)
     ap.add_argument("--n", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
