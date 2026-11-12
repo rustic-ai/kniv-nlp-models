@@ -700,10 +700,28 @@ def word_ends(first: np.ndarray, n: int) -> np.ndarray:
     return end
 
 
+# Round the encoder's sequence length up to a multiple of this (0: off). The
+# MPS backend keeps compiled kernels for every input shape it sees, so a long
+# run of single windows of different lengths grows without bound (about 24 MB
+# per new shape on UltraBERT-380M); padded positions are masked, so outputs
+# do not change. The extractor and attr_finetune set it on MPS.
+SEQ_BUCKET = 0
+
+
+def _bucket(n: int, step: int | None = None) -> int:
+    step = SEQ_BUCKET if step is None else (step if SEQ_BUCKET else 0)
+    return -(-n // step) * step if step else n
+
+
+def label_bucket(n: int) -> int:
+    """Label texts (at most 48 subwords) are bucketed by 16 when SEQ_BUCKET is on."""
+    return _bucket(n, 16)
+
+
 def collate(items: list[dict], pad_id: int):
     import torch
     B = len(items)
-    T = max(len(x["input_ids"]) for x in items)
+    T = _bucket(max(len(x["input_ids"]) for x in items))
     W = max(len(x["first_subword"]) for x in items)
     S = max(len(x["sent_whole"]) for x in items)
     C = items[0]["cls"].shape[1]
@@ -773,7 +791,7 @@ def _collate_markers(items: list[dict], pad_id: int) -> dict:
     the order ``_collate_phase2`` lays mentions out (``-1``: past the limit,
     or a window without markers)."""
     import torch
-    T = max(len(x["rm"]["ids"]) for x in items if "rm" in x)
+    T = _bucket(max(len(x["rm"]["ids"]) for x in items if "rm" in x))
     ids = torch.full((len(items), T), pad_id, dtype=torch.long)
     mask = torch.zeros(len(items), T, dtype=torch.long)
     tsent = torch.full((len(items), T), -1, dtype=torch.long)

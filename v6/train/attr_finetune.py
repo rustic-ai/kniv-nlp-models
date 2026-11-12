@@ -192,6 +192,9 @@ def main() -> int:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else
                                           "mps" if torch.backends.mps.is_available() else "cpu"))
     model, tok, spec, vocab, best = load_run(args.run, HF_REPO, device)
+    if device.type == "mps":
+        from . import data as _data
+        _data.SEQ_BUCKET = _data.SEQ_BUCKET or 64          # see data.SEQ_BUCKET
     if model.attr is None:
         raise SystemExit(f"{args.run} has no attribute head")
     model.eval()

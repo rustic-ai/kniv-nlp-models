@@ -186,7 +186,8 @@ class LabelCollator:
         texts = [label_text(self.rels[c], self.rng.choice(modes, p=probs) if self.train
                             else "name_desc", self.rng) for c in cols]
         ids = [self._ids(t) for t in texts]
-        L = max(len(x) for x in ids)
+        from .data import label_bucket
+        L = label_bucket(max(len(x) for x in ids))
         pad = self.tok.pad_token_id
         batch["rel_label_ids"] = torch.tensor([x + [pad] * (L - len(x)) for x in ids])
         batch["rel_label_mask"] = torch.tensor([[1] * len(x) + [0] * (L - len(x)) for x in ids])
@@ -409,7 +410,8 @@ class TypeCollator:
         batch["span_labels"] = torch.tensor(np.asarray(lab).reshape(-1, K))
         batch["span_label_mask"] = torch.tensor(np.asarray(msk).reshape(-1, K))
         ids = [self._ids(type_text(self.types[c])) for c in cols]
-        Lm = max((len(x) for x in ids), default=1)
+        from .data import label_bucket
+        Lm = label_bucket(max((len(x) for x in ids), default=1))
         pad = self.tok.pad_token_id
         batch["type_label_ids"] = torch.tensor([x + [pad] * (Lm - len(x)) for x in ids]).reshape(len(ids), Lm)
         batch["type_label_mask"] = torch.tensor([[1] * len(x) + [0] * (Lm - len(x)) for x in ids]).reshape(len(ids), Lm)

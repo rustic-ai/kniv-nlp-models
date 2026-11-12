@@ -45,6 +45,9 @@ class Extractor:
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else
                                               "mps" if torch.backends.mps.is_available() else "cpu"))
         self.model, self.tok, self.spec, self.vocab, _ = load_run(run, HF_REPO, self.device, local)
+        if self.device.type == "mps":
+            from .train import data as _data
+            _data.SEQ_BUCKET = _data.SEQ_BUCKET or 64      # see data.SEQ_BUCKET
         cal = {}
         if local is not None and (Path(local) / run / "calibration.json").exists():
             cal = json.loads((Path(local) / run / "calibration.json").read_text())
@@ -198,7 +201,9 @@ class Extractor:
                                   participants=parts[:n_part])
         b = collate([f], self.tok.pad_token_id)
         texts = [label_text(r) for r in relations]
-        enc = self.tok(texts, padding=True, truncation=True, max_length=48, return_tensors="pt")
+        from .train import data as _data
+        enc = self.tok(texts, padding=True, truncation=True, max_length=48, return_tensors="pt",
+                       pad_to_multiple_of=16 if _data.SEQ_BUCKET else None)
         # The frozen ATLOP path answers Re-DocRED's relations in prose; it was
         # trained on Wikipedia, before speaker tags, so in a conversation every
         # relation goes to the label path.
