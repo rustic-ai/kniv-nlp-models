@@ -40,6 +40,15 @@ from ..schemas import MODALITIES, POLARITIES
 from .heldout_zs import _lit
 
 HAND = DATA_DIR / "v6-eval" / "p5_negation.json"
+
+
+def heldout_base(text_id: str) -> bool:
+    """One fifth of the short training texts, with every minimal-pair rewrite
+    of them, held out of the attribute-head retrain (``attr_finetune
+    --sources``) so ``--heldout`` scores texts it never saw."""
+    import hashlib
+    base = text_id.split(":var:")[0].split("#")[0]
+    return int(hashlib.sha1(base.encode()).hexdigest(), 16) % 5 == 0
 KIND_EXPECT = {"negated": ("negative", "asserted"), "reported": ("positive", "reported"),
                "planned": ("positive", "planned"), "desired": ("positive", "desired"),
                "questioned": ("positive", "questioned"), "hypothetical": ("positive", "hypothetical")}
@@ -96,7 +105,7 @@ def score_fact(ex, tokens, sentence_spans, ents, relations, target):
             "modality": torch.softmax(a["modality"][0], -1).cpu().numpy().tolist()}
 
 
-def load_pairs(per_kind: int, seed: int = 13) -> list[dict]:
+def load_pairs(per_kind: int, seed: int = 13, heldout: bool = False) -> list[dict]:
     """Rewrites (teacher label = the kind's expected one) and, per base fact,
     its evidence sentence as the asserted control."""
     from ..label_bank import load as load_bank
@@ -106,6 +115,8 @@ def load_pairs(per_kind: int, seed: int = 13) -> list[dict]:
     by_kind = defaultdict(list)
     for x in d["pairs"]:
         b, rest = x["id"].split(":var:")
+        if heldout and not heldout_base(b):
+            continue
         key, kind = rest.rsplit(":", 1)
         if kind not in KIND_EXPECT:
             continue
@@ -199,13 +210,18 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--run", default="ultrabert-380m-v7b8ev")
     ap.add_argument("--per-kind", type=int, default=300)
+    ap.add_argument("--local", action="store_true",
+                    help="checkpoint from data/v6-eval/checkpoints (not uploaded)")
+    ap.add_argument("--heldout", action="store_true",
+                    help="only pairs whose base text the attribute retrain held out")
     ap.add_argument("--device")
     a = ap.parse_args()
     from ..infer import Extractor
-    ex = Extractor(a.run, device=a.device)
+    from ..train.gold_eval import CKPT_DIR
+    ex = Extractor(a.run, device=a.device, local=CKPT_DIR if a.local else None)
     if getattr(ex.model, "attr", None) is None:
         raise SystemExit(f"{a.run} has no fact-attribute head")
-    items = load_hand() + load_pairs(a.per_kind)
+    items = load_hand() + load_pairs(a.per_kind, heldout=a.heldout)
     print(f"{a.run}: {len(items)} statements; unseen_offset {ex.unseen_offset:+.2f}", flush=True)
     rows, skipped, t0 = [], 0, time.time()
     for n, it in enumerate(items):

@@ -46,7 +46,9 @@ class Extractor:
                                               "mps" if torch.backends.mps.is_available() else "cpu"))
         self.model, self.tok, self.spec, self.vocab, _ = load_run(run, HF_REPO, self.device, local)
         cal = {}
-        if local is None:
+        if local is not None and (Path(local) / run / "calibration.json").exists():
+            cal = json.loads((Path(local) / run / "calibration.json").read_text())
+        elif local is None:
             try:
                 from huggingface_hub import hf_hub_download
                 cal = json.loads(Path(hf_hub_download(HF_REPO, f"{run}/calibration.json")).read_text())
