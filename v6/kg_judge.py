@@ -178,12 +178,16 @@ def build(runs: list[str], n_train: int, n_dev: int) -> list[tuple[str, dict, li
     return out
 
 
-def judge(runs: list[str], judge_name: str, n_train: int, n_dev: int, limit: int | None) -> int:
+PROMPTS = {"c1": "kgcand", "c2": "kgcand2", "c3": "kgcand3"}
+
+
+def judge(runs: list[str], judge_name: str, n_train: int, n_dev: int, limit: int | None,
+          version: str = VERSION) -> int:
     rows = build(runs, n_train, n_dev)
     if limit:
         rows = rows[:limit // 2] + [r for r in rows if r[0] == "dev"][:limit - limit // 2]
     spec = load_annotators([judge_name])[judge_name]
-    cache = CacheStore(CACHE, VERSION)
+    cache = CacheStore(CACHE, version)
     items = []
     for split, it, facts in rows:
         if not facts:
@@ -195,7 +199,9 @@ def judge(runs: list[str], judge_name: str, n_train: int, n_dev: int, limit: int
         items.append(q)
     print(f"{len(rows)} texts, {sum(len(f) for _, _, f in rows)} facts to judge, "
           f"{len(items)} calls (cached ones are free)", flush=True)
-    res = asyncio.run(_run(CandJudge(spec, cache), items, f"judge-{judge_name}-{VERSION}"))
+    ann = CandJudge(spec, cache)
+    ann.prompt = PROMPTS[version]
+    res = asyncio.run(_run(ann, items, f"judge-{judge_name}-{version}"))
     labels, c = [], Counter()
     for split, it, facts in rows:
         r = res.get(f"{it['id']}:cand")
@@ -206,7 +212,9 @@ def judge(runs: list[str], judge_name: str, n_train: int, n_dev: int, limit: int
             if "teacher" in f["src"]:
                 c[f"{split}:teacher:{f['verdict']}"] += 1
         labels.append({"split": split, "id": it["id"], "facts": facts, "judged": bool(v)})
-    tag = f"labels-{judge_name}-{VERSION}" + (f"-limit{limit}" if limit else "")
+    tag = f"labels-{judge_name}-{version}" + (f"-limit{limit}" if limit else "")
+    if version != VERSION and (n_train, n_dev) != (SAMPLE, SAMPLE * 3 // 7):
+        tag += f"-t{n_train}d{n_dev}"
     (OUT / f"{tag}.json").write_text(json.dumps(labels))
     for split in ("train", "dev"):
         tot = sum(v for k, v in c.items() if k.startswith(f"{split}:") and k.count(":") == 1)
@@ -242,6 +250,7 @@ def main() -> int:
     ap.add_argument("--train", type=int, default=300)
     ap.add_argument("--dev", type=int, default=100)
     ap.add_argument("--limit", type=int)
+    ap.add_argument("--version", default=VERSION, choices=["c1", "c2", "c3"], help="judge prompt")
     ap.add_argument("--labels", type=Path)
     ap.add_argument("--n", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
@@ -251,7 +260,7 @@ def main() -> int:
         make_cands(runs)
         return 0
     if a.cmd == "judge":
-        return judge(runs, a.judge, a.train, a.dev, a.limit)
+        return judge(runs, a.judge, a.train, a.dev, a.limit, a.version)
     return show(a.labels, a.n, a.seed)
 
 

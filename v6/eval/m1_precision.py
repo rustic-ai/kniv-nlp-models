@@ -53,9 +53,27 @@ def _configure(ex, cfg: str, boost0):
     ex.span_boost = float(b) if b else (boost0 if boost0 is not None else 0.0)
 
 
-def predict(run: str, n: int, configs: list[str], tag: str = "") -> None:
+def load_set(name: str, n: int) -> list[dict]:
+    """Texts of one M1 slice, as ``heldout_zs`` items."""
+    if name == "short":
+        return hz.load_short_dev(n)
+    if name == "conll04":
+        return hz.load_conll04(n)
+    if name == "m4":            # complete expected facts: m4_business scores it without a judge
+        from .m4_business import load
+        items = load()
+        return items[:n] if n else items
+    raise ValueError(name)
+
+
+def set_key(run: str, name: str) -> str:
+    """File key: the short-dev slice keeps the original names."""
+    return run if name == "short" else f"{run}-{name}"
+
+
+def predict(run: str, n: int, configs: list[str], tag: str = "", set_name: str = "short") -> None:
     from ..infer import Extractor
-    items = hz.load_short_dev(n)
+    items = load_set(set_name, n)
     ex = Extractor(run)
     boost0, dep = ex.span_boost, ex.unseen_offset
     ex.rel_offsets = {k: v + hz.SHIFT for k, v in ex.rel_offsets.items()}
@@ -69,7 +87,7 @@ def predict(run: str, n: int, configs: list[str], tag: str = "") -> None:
         margins[cfg] = [{c["key"]: max(c["m"], -1e9) for c in r["cand"] if c["m"] > 0} for r in rows]
         print(f"{cfg}: {sum(map(len, preds[cfg]))} predicted facts on {len(items)} texts", flush=True)
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / f"preds-{run}{tag}.pkl").write_bytes(pickle.dumps({"run": run, "items": items, "preds": preds,
+    (OUT / f"preds-{set_key(run, set_name)}{tag}.pkl").write_bytes(pickle.dumps({"run": run, "items": items, "preds": preds,
                                                                       "margins": margins}))
 
 
@@ -340,7 +358,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("cmd", choices=["predict", "judge", "score", "rescore", "agree"])
     ap.add_argument("--run", default="ultrabert-380m-v7b8ev")
-    ap.add_argument("--short", type=int, default=300)
+    ap.add_argument("--short", type=int, default=300, help="texts in the slice (0: all)")
+    ap.add_argument("--set", default="short", choices=["short", "conll04", "m4"],
+                    help="M1 slice: short dev, CoNLL04 test, or the M4 business texts")
     ap.add_argument("--configs", default="base,ner+np:1,ner+np+nest:2")
     ap.add_argument("--judge", default="astra")
     ap.add_argument("--tag", default="", help="predict / rescore: suffix of the predictions file")
@@ -351,8 +371,9 @@ def main() -> int:
                     help="judge: only the texts of the hand-checked sample (hand-check.json)")
     a = ap.parse_args()
     if a.cmd == "predict":
-        predict(a.run, a.short, a.configs.split(","), a.tag)
+        predict(a.run, a.short, a.configs.split(","), a.tag, a.set)
         return 0
+    a.run = set_key(a.run, a.set)      # every later step reads files by slice
     if a.cmd == "judge":
         only = ({x["id"] for x in json.loads((OUT / "hand-check.json").read_text())["facts"]}
                 if a.handcheck else None)
