@@ -71,6 +71,13 @@ PARAPHRASE: dict[str, str] = {
     "P1018": "regulated by",                 # language regulatory body
     "P114": "member of",                     # airline alliance: the airline is a member of it
     "P517": "physically interacts with",     # interaction (fundamental force)
+    # the full archive (docs-rest.jsonl), read from neighbours.json on 2026-11-12
+    "P1537": "has contributing factor",      # contributing factor of: its inverse
+    "P2828": "officer of",                   # corporate officer: its inverse
+    "P703": "natural product of taxon",      # found in taxon
+    "P2852": "has phone number",             # emergency phone number
+    "P1916": "genetic association",          # gene substitution association with
+    "P943": "developed by",                  # programmer
 }
 NEG_PER_POS = 1.0
 TRAIN_CORPORA = ["kg_trex.json", "kg_pretrain.json", "docred_distant_rel.json", "redocred_rel.json",
@@ -408,17 +415,27 @@ def predict(args) -> None:
         res[w["id"]] = {(h, t): m[h, t] for h, t in want[w["id"]]}
         if (j + 1) % 25 == 0:
             print(f"{args.model}: {j + 1}/{len(wins)} windows ({time.time() - t0:.0f}s)", flush=True)
-    dest = OUT / f"preds-{tag(args.model)}{'-' + args.slice.replace('/', 'of') if args.slice else ''}.pkl"
+    dest = OUT / (f"preds-{tag(args.model)}{set_tag(args.set)}"
+                  f"{'-' + args.slice.replace('/', 'of') if args.slice else ''}.pkl")
     dest.write_bytes(pickle.dumps({"model": args.model, "bar": model.bar, "set": str(args.set),
                                    "margins": res}))
     print(f"wrote {dest} ({len(res)} windows, {time.time() - t0:.0f}s, bar {model.bar:+.2f})")
 
 
-def load_preds(spec: str) -> dict:
+def set_tag(path) -> str:
+    """'' for the provisional set (its prediction files predate the tag), else
+    '-<set file stem>'."""
+    stem = Path(path).stem
+    return "" if stem == "set-provisional" else f"-{stem}"
+
+
+def load_preds(spec: str, set_path=None) -> dict:
     paths = sorted(OUT.glob(f"preds-{tag(spec)}*.pkl"))
     out = None
     for p in paths:
         x = pickle.loads(p.read_bytes())
+        if set_path is not None and Path(x["set"]).stem != Path(set_path).stem:
+            continue
         if out is None:
             out = x
         else:
@@ -496,7 +513,7 @@ def doc_boot(tb: dict, n: int = 2000, seed: int = 13):
 def score(args) -> None:
     data = json.loads(Path(args.set).read_text())
     specs = args.models.split(",")
-    tabs = {s: item_table(data, load_preds(s)) for s in specs}
+    tabs = {s: item_table(data, load_preds(s, args.set)) for s in specs}
     keys = ("f1", "p", "r", "top1", "five_way", "auc", "neg_kept_out")
     summary = {"set": str(args.set), "provisional": data["provisional"],
                "relations": len(data["relations"]), "items": len(data["items"]),
@@ -509,7 +526,7 @@ def score(args) -> None:
         boots = [metrics(tb, i) for i in samples]
         ci = {k: [float(np.nanpercentile([b[k] for b in boots], q)) for q in (2.5, 97.5)] for k in keys}
         se = {k: float(np.nanstd([b[k] for b in boots])) for k in keys}
-        summary["models"][s] = {"bar": float(load_preds(s)["bar"]), **{k: point[k] for k in keys},
+        summary["models"][s] = {"bar": float(load_preds(s, args.set)["bar"]), **{k: point[k] for k in keys},
                                 "ci": ci, "se": se}
         print(f"{s} (bar {summary['models'][s]['bar']:+.2f}): " + ", ".join(
             f"{k} {point[k]:.3f} [{ci[k][0]:.3f}, {ci[k][1]:.3f}]" for k in keys))

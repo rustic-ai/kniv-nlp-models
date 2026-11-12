@@ -158,16 +158,35 @@ def validate_payload(layer: str, payload: object, n: int,
         return {int(v["fact"]): v["verdict"] for v in payload
                 if isinstance(v, dict) and "fact" in v and v.get("verdict") in KGCAND_VERDICTS}, None, None
 
-    if layer == "kgvar":
+    if layer in ("kgvar", "kgvar4"):
+        if isinstance(payload, dict):            # a cached, already-parsed payload
+            return payload, None, None
         if not isinstance(payload, list):
             return None, "variants is not a list", "parse"
-        from ..schemas import KGVAR_KINDS
+        from ..schemas import KGVAR4_KINDS, KGVAR_KINDS
+        kinds = KGVAR_KINDS if layer == "kgvar" else KGVAR4_KINDS
         out = {}
         for v in payload:
-            if (isinstance(v, dict) and v.get("kind") in KGVAR_KINDS
+            if (isinstance(v, dict) and v.get("kind") in kinds
                     and isinstance(v.get("sentence"), str) and v["sentence"].strip()):
                 out.setdefault(v["kind"], {"sentence": v["sentence"].strip(),
                                            "source": str(v.get("source") or "").strip()})
+        return out, None, None
+
+    if layer == "kgpara":
+        if isinstance(payload, dict):
+            payload = payload.get("names")
+        if not isinstance(payload, list):
+            return None, "names is not a list", "parse"
+        out, seen = [], set()
+        for v in payload:
+            if not isinstance(v, dict) or v.get("style") not in ("described", "terse"):
+                continue
+            name = " ".join(str(v.get("name", "")).lower().split())
+            if name and name not in seen:
+                seen.add(name)
+                out.append({"style": v["style"], "name": name,
+                            "description": str(v.get("description") or "").strip() if v["style"] == "described" else ""})
         return out, None, None
 
     if layer == "kgsyn":
@@ -179,7 +198,9 @@ def validate_payload(layer: str, payload: object, n: int,
                  if isinstance(f, dict) and all(k in f for k in ("head", "relation", "tail"))]
         return {"text": payload["text"].strip(), "facts": facts}, None, None
 
-    if layer == "kgvarjudge":
+    if layer in ("kgvarjudge", "kgvarjudge4"):
+        if isinstance(payload, dict):
+            return payload, None, None
         if not isinstance(payload, list):
             return None, "verdicts is not a list", "parse"
         return {v["kind"]: bool(v["ok"]) for v in payload

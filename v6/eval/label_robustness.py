@@ -107,12 +107,18 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--run", default="ultrabert-380m-v7b8ev")
     ap.add_argument("--device")
+    ap.add_argument("--para", type=Path, default=PARA,
+                    help="other paraphrases in the same format (D2: d2_labels p4file); 'orig' rows are shared")
     a = ap.parse_args()
-    P = json.loads(PARA.read_text())
+    P = json.loads(a.para.read_text())
     data = {"short": judged_short(), "conll04": hz.load_conll04()}
     OUT.mkdir(parents=True, exist_ok=True)
-    cache = OUT / f"rows-{a.run}.pkl"
+    tag = "" if a.para.resolve() == PARA.resolve() else f"-{a.para.stem}"
+    cache = OUT / f"rows-{a.run}{tag}.pkl"
     rows = pickle.loads(cache.read_bytes()) if cache.exists() else {}
+    base = OUT / f"rows-{a.run}.pkl"
+    if tag and base.exists():
+        rows.update({k: v for k, v in pickle.loads(base.read_bytes()).items() if k[1] == "orig"})
     todo = [(s, v) for s in data for v in VARIANTS if (s, v) not in rows]
     if todo:
         from ..infer import Extractor
@@ -171,7 +177,7 @@ def main() -> int:
             print(f"  {r:12s} " + "  ".join(f"{v} {prc[v].get(r, (0, 0))[0]:.3f}" for v in VARIANTS)
                   + f"  (gold {prc['orig'].get(r, (0, 0))[1]})")
     rep["per_relation_short"] = {v: {r: x[0] for r, x in pr[v].items()} for v in VARIANTS}
-    out = OUT / f"{a.run}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    out = OUT / f"{a.run}{tag}-{time.strftime('%Y%m%d-%H%M%S')}.json"
     out.write_text(json.dumps(rep, indent=1))
     print(f"\nwritten {out}")
     return 0

@@ -365,35 +365,48 @@ KGCAND_SCHEMA = _envelope("candidate_verdicts", {
 
 
 KGVAR_KINDS = ["negated", "reported", "planned", "desired", "questioned", "hypothetical"]
-KGVAR_SCHEMA = _envelope("fact_rewrites", {
-    "variants": _array_of(
-        {
-            "type": "object",
-            "properties": {
-                "kind": {"type": "string", "enum": KGVAR_KINDS},
-                "sentence": {"type": "string", "description": "the rewritten sentence"},
-                "source": {"type": "string",
-                           "description": "for 'reported': the mention of who claims it, as written; else ''"},
-            },
-            "required": ["kind", "sentence", "source"], "additionalProperties": False,
-        },
-        "One rewrite per kind.",
-    ),
-})
+# D3 (v8 plan r2): the forms of M3 the six kinds above do not cover.
+KGVAR4_KINDS = ["denied", "never", "no_longer", "might", "rumoured", "expected"]
 
-KGVARJUDGE_SCHEMA = _envelope("rewrite_verdicts", {
-    "verdicts": _array_of(
-        {
-            "type": "object",
-            "properties": {
-                "kind": {"type": "string", "enum": KGVAR_KINDS},
-                "ok": {"type": "boolean", "description": "true if the rewrite expresses the fact with that status"},
+
+def _kgvar_schema(kinds: list[str]) -> dict:
+    return _envelope("fact_rewrites", {
+        "variants": _array_of(
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": kinds},
+                    "sentence": {"type": "string", "description": "the rewritten sentence"},
+                    "source": {"type": "string",
+                               "description": "for 'reported': the mention of who claims it, as written; else ''"},
+                },
+                "required": ["kind", "sentence", "source"], "additionalProperties": False,
             },
-            "required": ["kind", "ok"], "additionalProperties": False,
-        },
-        "One verdict per rewrite.",
-    ),
-})
+            "One rewrite per kind.",
+        ),
+    })
+
+
+def _kgvarjudge_schema(kinds: list[str]) -> dict:
+    return _envelope("rewrite_verdicts", {
+        "verdicts": _array_of(
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": kinds},
+                    "ok": {"type": "boolean", "description": "true if the rewrite expresses the fact with that status"},
+                },
+                "required": ["kind", "ok"], "additionalProperties": False,
+            },
+            "One verdict per rewrite.",
+        ),
+    })
+
+
+KGVAR_SCHEMA = _kgvar_schema(KGVAR_KINDS)
+KGVARJUDGE_SCHEMA = _kgvarjudge_schema(KGVAR_KINDS)
+KGVAR4_SCHEMA = _kgvar_schema(KGVAR4_KINDS)
+KGVARJUDGE4_SCHEMA = _kgvarjudge_schema(KGVAR4_KINDS)
 
 KGSYN_SCHEMA = _envelope("synthetic_passage", {
     "passage": {
@@ -418,6 +431,24 @@ KGSYN_SCHEMA = _envelope("synthetic_passage", {
 })
 
 
+# D2 (v8 plan r2): other names a user might give one relation.
+KGPARA_SCHEMA = _envelope("relation_names", {
+    "names": _array_of(
+        {
+            "type": "object",
+            "properties": {
+                "style": {"type": "string", "enum": ["described", "terse"]},
+                "name": {"type": "string", "description": "the relation name, lower case"},
+                "description": {"type": "string",
+                                "description": "for 'described': a one-sentence definition; for 'terse': ''"},
+            },
+            "required": ["style", "name", "description"], "additionalProperties": False,
+        },
+        "Ten names: five described, five terse.",
+    ),
+})
+
+
 SCHEMAS = {
     # The real kg schema is built per window (annotate/kg.py); this default
     # only lets the shared request builder start before it is replaced.
@@ -427,6 +458,9 @@ SCHEMAS = {
     "kgcand": KGCAND_SCHEMA,
     "kgvar": KGVAR_SCHEMA,
     "kgvarjudge": KGVARJUDGE_SCHEMA,
+    "kgvar4": KGVAR4_SCHEMA,
+    "kgpara": KGPARA_SCHEMA,
+    "kgvarjudge4": KGVARJUDGE4_SCHEMA,
     "kgsyn": KGSYN_SCHEMA,
     "discover": DISCOVER_SCHEMA,
     "cls": CLS_SCHEMA,
@@ -450,6 +484,7 @@ PAYLOAD_KEY = {
     "cls": "labels", "sentiment": "sentiment", "keywords": "keywords",
     "discover": "relations", "bankmerge": "relations", "kg": "knowledge", "kgjudge": "verdicts", "kgcand": "verdicts",
     "kgvar": "variants", "kgvarjudge": "verdicts", "kgsyn": "passage",
+    "kgvar4": "variants", "kgvarjudge4": "verdicts", "kgpara": "names",
 }
 
 

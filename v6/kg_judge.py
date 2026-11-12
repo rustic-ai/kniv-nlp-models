@@ -43,7 +43,7 @@ UNSEEN_BAR = 1.75     # the fit diagnostic's best new-relation offset on short t
 POSITIVE = ("supported", "negated", "hedged")   # the fact is expressed: the relation step should fire
 
 
-def load_texts(split: str, n: int = SAMPLE) -> list[dict]:
+def load_texts(split: str, n: int = SAMPLE, offset: int = 0) -> list[dict]:
     from .eval import heldout_zs as hz
     from .label_bank import load as load_bank
     bank = load_bank()
@@ -52,7 +52,7 @@ def load_texts(split: str, n: int = SAMPLE) -> list[dict]:
     data = json.loads((DATA_DIR / "v6-corpus" / "kg_short.json").read_text())[split]
     random.Random(SEED).shuffle(data)
     items = []
-    for x in data[:n]:
+    for x in data[offset:offset + n]:
         p = hz._lit(x["payload"])
         items.append({
             "id": x["id"], "tokens": hz._lit(x["tokens"]), "sentence_spans": hz._lit(x["sentence_spans"]),
@@ -68,19 +68,27 @@ def load_texts(split: str, n: int = SAMPLE) -> list[dict]:
     return items
 
 
-def cands_path(run: str) -> Path:
-    return OUT / f"cands-{run}.pkl"
+def sample_tag(offset: int, n: int) -> str:
+    """'' for the P0 sample (the first SAMPLE texts), else e.g. '-o700n500'."""
+    return "" if (offset, n) == (0, SAMPLE) else f"-o{offset}n{n}"
 
 
-def make_cands(runs: list[str]) -> None:
+def cands_path(run: str, tag: str = "") -> Path:
+    return OUT / f"cands-{run}{tag}.pkl"
+
+
+def make_cands(runs: list[str], offset: int = 0, n: int = SAMPLE) -> None:
     """Every candidate on the gold entities, per run (``heldout_zs.predict``
     with the bar moved out of the way), for the train and dev samples."""
     from .eval import heldout_zs as hz
     from .infer import Extractor
-    data = {"dev": load_texts("dev"), "train": load_texts("train")}
+    tag = sample_tag(offset, n)
+    data = {"train": load_texts("train", n, offset)}
+    if not tag:
+        data["dev"] = load_texts("dev")
     OUT.mkdir(parents=True, exist_ok=True)
     for run in runs:
-        if cands_path(run).exists():
+        if cands_path(run, tag).exists():
             print(run, "cached")
             continue
         ex = Extractor(run)
@@ -89,7 +97,7 @@ def make_cands(runs: list[str]) -> None:
         ex.unseen_offset = dep - hz.SHIFT
         ex.top = 50
         rows = {s: hz.predict(ex, items, "gold") for s, items in data.items()}
-        cands_path(run).write_bytes(pickle.dumps((dep, rows)))
+        cands_path(run, tag).write_bytes(pickle.dumps((dep, rows)))
         print(run, "done", flush=True)
         del ex
 
@@ -165,11 +173,15 @@ async def _run(ann, items: list, tag: str) -> dict:
     return out
 
 
-def build(runs: list[str], n_train: int, n_dev: int) -> list[tuple[str, dict, list[dict]]]:
-    loaded = {r: pickle.loads(cands_path(r).read_bytes())[1] for r in runs}
+def build(runs: list[str], n_train: int, n_dev: int, offset: int = 0,
+          sample: int = SAMPLE) -> list[tuple[str, dict, list[dict]]]:
+    tag = sample_tag(offset, sample)
+    loaded = {r: pickle.loads(cands_path(r, tag).read_bytes())[1] for r in runs}
     out = []
     for split, n in (("train", n_train), ("dev", n_dev)):
-        texts = load_texts(split)
+        if not n:
+            continue
+        texts = load_texts(split, sample, offset) if split == "train" else load_texts(split)
         for i, it in enumerate(texts[:n]):
             rr = {r: loaded[r][split] for r in runs}
             for r in runs:
@@ -182,8 +194,8 @@ PROMPTS = {"c1": "kgcand", "c2": "kgcand2", "c3": "kgcand3"}
 
 
 def judge(runs: list[str], judge_name: str, n_train: int, n_dev: int, limit: int | None,
-          version: str = VERSION) -> int:
-    rows = build(runs, n_train, n_dev)
+          version: str = VERSION, offset: int = 0, sample: int = SAMPLE) -> int:
+    rows = build(runs, n_train, n_dev, offset, sample)
     if limit:
         rows = rows[:limit // 2] + [r for r in rows if r[0] == "dev"][:limit - limit // 2]
     spec = load_annotators([judge_name])[judge_name]
@@ -215,6 +227,9 @@ def judge(runs: list[str], judge_name: str, n_train: int, n_dev: int, limit: int
     tag = f"labels-{judge_name}-{version}" + (f"-limit{limit}" if limit else "")
     if version != VERSION and (n_train, n_dev) != (SAMPLE, SAMPLE * 3 // 7):
         tag += f"-t{n_train}d{n_dev}"
+    tag += sample_tag(offset, sample)
+    if len(runs) == 1:
+        tag += f"-{runs[0]}"
     (OUT / f"{tag}.json").write_text(json.dumps(labels))
     for split in ("train", "dev"):
         tot = sum(v for k, v in c.items() if k.startswith(f"{split}:") and k.count(":") == 1)
@@ -254,13 +269,15 @@ def main() -> int:
     ap.add_argument("--labels", type=Path)
     ap.add_argument("--n", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--offset", type=int, default=0, help="first training text of the sample (D1 pilot: 700)")
+    ap.add_argument("--sample", type=int, default=SAMPLE, help="training texts in the sample")
     a = ap.parse_args()
     runs = a.runs.split(",")
     if a.cmd == "cands":
-        make_cands(runs)
+        make_cands(runs, a.offset, a.sample)
         return 0
     if a.cmd == "judge":
-        return judge(runs, a.judge, a.train, a.dev, a.limit, a.version)
+        return judge(runs, a.judge, a.train, a.dev, a.limit, a.version, a.offset, a.sample)
     return show(a.labels, a.n, a.seed)
 
 

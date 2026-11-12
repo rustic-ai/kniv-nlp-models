@@ -177,6 +177,47 @@ def convert(files: list[Path]) -> Counter:
     return stats
 
 
+def convert_zip(archive: Path, out: Path, skip: set[str], unbanked_only: bool = True) -> Counter:
+    """``convert`` straight from the figshare archive, one member at a time,
+    into ``out`` (never ``DOCS``, the training documents): members named in
+    ``skip`` (the files already converted) are left out, and with
+    ``unbanked_only`` a document is kept only if one of its facts is on a
+    property the label bank has no code for -- the only documents the M2
+    zero-shot set can use."""
+    import zipfile
+    from ..label_bank import load as load_bank
+    codes = {r["code"] for r in load_bank()["relations"] if r.get("code")}
+    titles, grams = eval_fingerprints()
+    print(f"leak filter: {len(titles):,} titles, {len(grams):,} 10-grams", flush=True)
+    stats: Counter = Counter()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive) as z, out.open("w") as fh:
+        names = sorted(n for n in z.namelist() if n.endswith(".json") and Path(n).name not in skip)
+        stats["members"] = len(names)
+        for i, n in enumerate(names):
+            with z.open(n) as f:
+                rows = json.load(f)
+            for x in rows:
+                if x["title"].strip().lower() in titles:
+                    stats["dropped_eval_title"] += 1
+                    continue
+                d = convert_doc(x, stats)
+                if d is None:
+                    continue
+                if unbanked_only and all(p in codes for *_, p in d["facts"]):
+                    stats["dropped_no_unbanked_fact"] += 1
+                    continue
+                if _grams(_norm_words(d["tokens"])) & grams:
+                    stats["dropped_eval_overlap"] += 1
+                    stats["docs"] -= 1
+                    continue
+                fh.write(json.dumps(d) + "\n")
+                stats["written"] += 1
+            del rows
+            print(f"{i + 1}/{len(names)} {Path(n).name}: written {stats['written']:,}", flush=True)
+    return stats
+
+
 TYPES = DATA_DIR / "wikidata" / "trex_types.json"
 MIN_ENTITIES = 20          # a class becomes an entity type with >= 20 typed entities
 INTERNAL = ("wikimedia", "wikidata", "disambiguation", "category", "template", "list article")
@@ -289,6 +330,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("convert")
+    cz = sub.add_parser("convert-zip", help="the rest of the archive, for M2 (not for training)")
+    cz.add_argument("--archive", default=str(TREX / "archive" / "T-REx.zip"))
+    cz.add_argument("--out", default=str(TREX / "docs-rest.jsonl"))
+    cz.add_argument("--all-docs", action="store_true", help="keep documents with only banked facts too")
     t = sub.add_parser("types")
     t.add_argument("--min-entities", type=int, default=MIN_ENTITIES)
     e = sub.add_parser("export")
@@ -296,6 +341,9 @@ def main() -> int:
     args = ap.parse_args()
     if args.cmd == "export":
         export(args.docs)
+    if args.cmd == "convert-zip":
+        skip = set((TREX / "pick.txt").read_text().split())
+        print(json.dumps(convert_zip(Path(args.archive), Path(args.out), skip, not args.all_docs)))
     if args.cmd == "convert":
         files = sorted(RAW.glob("*.json"))
         print(json.dumps(convert(files)))
