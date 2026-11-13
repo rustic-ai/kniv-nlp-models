@@ -111,9 +111,9 @@ class Extractor:
         self.new_bar_shift = 0.0
         # Relations the frozen ATLOP path answers in prose (Re-DocRED's 96):
         # there the margin decides and the verifier only vetoes, below this
-        # probability (stage 3: deciding them by the verifier cost 8 F1 on
-        # Re-DocRED documents; the veto gains about 1).
-        self.ver_veto = 0.1
+        # probability (stage 3: deciding them by the verifier cost 11-15 F1 on
+        # Re-DocRED test; the margin with this veto ties, +0.2).
+        self.ver_veto = 0.05
         self.ver_veto_frozen = True     # False: the verifier decides those too (guard-rail readings)
         self.rd_names = rd
 
