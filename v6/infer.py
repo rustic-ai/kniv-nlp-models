@@ -106,6 +106,9 @@ class Extractor:
         # Evaluators add a constant to every offset to see all candidates;
         # they set it here so the verifier's floor stays relative to the bar.
         self.margin_shift = 0.0
+        # Plan r4 T2: the new-relation bar raised by this for relations that
+        # have no offset of their own and that the verifier does not decide.
+        self.new_bar_shift = 0.0
 
     def use_verifier(self, run: str, threshold: float = 0.5, floor: float = 3.0,
                      trained: set[str] | None = None) -> None:
@@ -277,8 +280,10 @@ class Extractor:
         o = self.model(b, relation_only=True)
         lg = o["relation"].float().cpu().numpy()
         facts = []
-        off = np.array([self.rel_offsets.get(r["name"], -self.unseen_offset) for r in relations])
         ver = self.verifier is not None and self.ver_on
+        off = np.array([self.rel_offsets[r["name"]] if r["name"] in self.rel_offsets else
+                        -self.unseen_offset - (self.new_bar_shift if not (ver and r["name"] in self.ver_trained)
+                                               else 0.0) for r in relations])
         vc, vm = [], []
         for (h, t), row in zip(zip(b["pair_h"].tolist(), b["pair_t"].tolist()), lg):
             m = row[1:] - row[0] + off
