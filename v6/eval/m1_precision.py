@@ -5,6 +5,8 @@ nested mention decoding.
     uv run python -m v6.eval.m1_precision judge
     uv run python -m v6.eval.m1_precision score [--merge]
     uv run python -m v6.eval.m1_precision rescore --tag=-merge2   # merged decode, no new calls
+    uv run python -m v6.eval.m1_precision combine --run m1p3 --runs v7.1=ultrabert-380m-v7b8ev,...
+    uv run python -m v6.eval.m1_precision equal --run m1p3 --version c3   # equal recall / precision
 
 Pilot P1 found that nested proposals from the parse find both arguments of
 far more gold facts, yet end-to-end F1 against the teacher's facts fell
@@ -354,14 +356,107 @@ def agree(run: str, judge_name: str, version: str) -> int:
     return 0
 
 
+def combine(name: str, specs: list[str], tag: str = "-n500") -> int:
+    """One predictions file with each run's base config as its own config
+    (``label=run``, baseline first), so ``judge`` and ``score`` pool and
+    pair the runs on the same texts."""
+    items, preds, margins = None, {}, {}
+    for spec in specs:
+        label, run = spec.split("=")
+        d = pickle.loads((OUT / f"preds-{run}{tag}.pkl").read_bytes())
+        if items is None:
+            items = d["items"]
+        assert [it["id"] for it in d["items"]] == [it["id"] for it in items], f"{run}: other texts"
+        preds[label], margins[label] = d["preds"]["base"], d["margins"]["base"]
+        print(f"{label}: {sum(map(len, preds[label]))} facts")
+    (OUT / f"preds-{name}.pkl").write_bytes(pickle.dumps({"run": name, "items": items,
+                                                         "preds": preds, "margins": margins}))
+    print("wrote", OUT / f"preds-{name}.pkl")
+    return 0
+
+
+def equal(run: str, judge_name: str, version: str, boot: int = 2000) -> int:
+    """Each configuration at the first one's operating point: judged precision
+    at its pooled recall and recall at its precision (each run's margin cut
+    swept over its own judged facts), a paired bootstrap at equal recall with
+    the cuts fixed on the full set, and false facts per 100 judged texts
+    ("not stated" as a rate, plan r4 section 10). Predictions are counted one
+    by one, so a fact two predictions match counts twice."""
+    P = pickle.loads((OUT / f"preds-{run}.pkl").read_bytes())
+    L = json.loads(labels_path(run, judge_name, version).read_text())
+    cfgs, texts = L["configs"], L["texts"]
+    keep = np.array([i for i, t in enumerate(texts) if t["judged"]])
+    rows = {c: [] for c in cfgs}
+    total = 0
+    for i in keep:
+        t = texts[i]
+        total += sum(f["verdict"] in POSITIVE for f in t["facts"])
+        for c in cfgs:
+            for k, m in P["margins"][c][i].items():
+                f = next((f for f in t["facts"] if c in f["src"]
+                          and _same((set(f["key"][0]), f["key"][1], set(f["key"][2])), k)), None)
+                rows[c].append((i, m, f is not None and f["verdict"] in POSITIVE))
+
+    def curve(c):
+        r = sorted(rows[c], key=lambda x: -x[1])
+        ok = np.cumsum([x[2] for x in r])
+        return np.array([x[1] for x in r]), ok / np.arange(1, len(r) + 1), ok / total
+
+    base = cfgs[0]
+    _, p0, r0 = curve(base)
+    P0, R0 = p0[-1], r0[-1]
+    print(f"{len(keep)} judged texts, pool {total}; baseline {base}: P {P0:.3f} R {R0:.3f}\n")
+    print("| run | predicted | P | R | P at base R | R at base P |\n|---|---|---|---|---|---|")
+    cuts = {}
+    for c in cfgs:
+        m, p, r = curve(c)
+        j = np.searchsorted(r, R0)
+        cuts[c] = m[min(j, len(m) - 1)]
+        p_at = f"{p[j]:.3f}" if j < len(r) else f"(max R {r[-1]:.3f})"
+        ok = np.where(p >= P0)[0]
+        print(f"| {c} | {len(m)} | {p[-1]:.3f} | {r[-1]:.3f} | {p_at} | "
+              f"{f'{r[ok].max():.3f}' if len(ok) else '-'} |")
+
+    def per_text(c, cut):
+        a = np.zeros((len(texts), 2))
+        for i, m, ok in rows[c]:
+            if m >= cut:
+                a[i] += [ok, 1]
+        return a[keep]
+
+    A = {c: per_text(c, cuts[c]) for c in cfgs}
+    rng = np.random.default_rng(13)
+    pairs = [(c, base) for c in cfgs[1:]] + [(cfgs[j], cfgs[1]) for j in range(2, len(cfgs))]
+    draws = [rng.integers(0, len(keep), len(keep)) for _ in range(boot)]
+    print("\nprecision at the baseline's recall, paired bootstrap over texts")
+    for a, b in pairs:
+        d = [A[a][ix].sum(0) for ix in draws], [A[b][ix].sum(0) for ix in draws]
+        d = [x[0] / x[1] - y[0] / y[1] for x, y in zip(*d)]
+        x, y = A[a].sum(0), A[b].sum(0)
+        print(f"  {a} - {b}: {100 * (x[0] / x[1] - y[0] / y[1]):+.1f} "
+              f"[{100 * np.percentile(d, 2.5):+.1f}, {100 * np.percentile(d, 97.5):+.1f}]")
+    print("\nfalse facts per 100 judged texts (deployed bar / at the baseline's recall)")
+    for c in cfgs:
+        dep = per_text(c, 0.0)
+        print(f"  {c}: {100 * (dep[:, 1] - dep[:, 0]).mean():.1f} / "
+              f"{100 * (A[c][:, 1] - A[c][:, 0]).mean():.1f}")
+    for a, b in pairs:
+        fa, fb = A[a][:, 1] - A[a][:, 0], A[b][:, 1] - A[b][:, 0]
+        d = [100 * (fa[ix] - fb[ix]).mean() for ix in draws]
+        print(f"  {a} - {b} at equal recall: {100 * (fa - fb).mean():+.1f} "
+              f"[{np.percentile(d, 2.5):+.1f}, {np.percentile(d, 97.5):+.1f}]")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=["predict", "judge", "score", "rescore", "agree"])
+    ap.add_argument("cmd", choices=["predict", "judge", "score", "rescore", "agree", "combine", "equal"])
     ap.add_argument("--run", default="ultrabert-380m-v7b8ev")
     ap.add_argument("--short", type=int, default=300, help="texts in the slice (0: all)")
     ap.add_argument("--set", default="short", choices=["short", "conll04", "m4"],
                     help="M1 slice: short dev, CoNLL04 test, or the M4 business texts")
     ap.add_argument("--configs", default="base,ner+np:1,ner+np+nest:2")
+    ap.add_argument("--runs", help="combine: label=run,... (baseline first), each run's --tag file")
     ap.add_argument("--judge", default="astra")
     ap.add_argument("--tag", default="", help="predict / rescore: suffix of the predictions file")
     ap.add_argument("--base-tag", default="-merge", help="rescore: the file whose first config is the baseline")
@@ -373,6 +468,10 @@ def main() -> int:
     if a.cmd == "predict":
         predict(a.run, a.short, a.configs.split(","), a.tag, a.set)
         return 0
+    if a.cmd == "combine":
+        return combine(a.run, a.runs.split(","), a.tag or "-n500")
+    if a.cmd == "equal":
+        return equal(a.run, a.judge, a.version)
     a.run = set_key(a.run, a.set)      # every later step reads files by slice
     if a.tag and a.cmd in ("judge", "score"):
         a.run += a.tag                 # a tagged predictions file judged as its own set
