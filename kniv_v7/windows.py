@@ -11,6 +11,21 @@ from dataclasses import dataclass, field
 
 _SENT_END = re.compile(r"(?<=[.!?])[\"')\]]*\s+(?=[A-Z0-9\"'(\[])")
 
+# Abbreviations a sentence does not end after (titles, months, "No.", "vs."),
+# besides single initials ("D.") and dotted acronyms ("U.S."). Ambiguous ones
+# that often do end a sentence ("Inc.", "etc.", state names) are not here.
+_NO_SPLIT = {"Mr", "Mrs", "Ms", "Dr", "Prof", "Gen", "Col", "Lt", "Sgt", "Capt", "Cmdr", "Adm",
+             "Maj", "Rep", "Sen", "Gov", "Pres", "Rev", "Hon", "St", "Mt", "Ft", "Sr", "Jr",
+             "Jan", "Feb", "Mar", "Apr", "Jun", "Jul", "Aug", "Sep", "Sept", "Oct", "Nov", "Dec",
+             "No", "Nos", "vs", "Fig", "approx", "Vol", "pp", "Ave", "Blvd"}
+# Abbreviations kept as one token with their period (the Penn Treebank and
+# CoNLL convention): the above plus company suffixes, "etc." and US states.
+_ABBREV = _NO_SPLIT | {"Inc", "Corp", "Co", "Ltd", "Bros", "etc", "Ala", "Ariz", "Ark", "Calif",
+                       "Colo", "Conn", "Del", "Fla", "Ga", "Ill", "Ind", "Kan", "Ky", "La", "Md",
+                       "Mass", "Mich", "Minn", "Miss", "Mo", "Mont", "Neb", "Nev", "Okla", "Ore",
+                       "Pa", "Tenn", "Tex", "Va", "Vt", "Wash", "Wis", "Wyo"}
+_LAST_WORD = re.compile(r"(\S+)\.$")
+
 
 _URLISH = re.compile(r"""(?:https?://|www\.)\S+|\S+@\S+\.\w+""")
 
@@ -20,7 +35,10 @@ _CLITIC = re.compile(
 
 
 _TOKEN = re.compile(r"""
-      \d+(?:[.,]\d+)*(?:%|st|nd|rd|th)?   # numbers, percents, ordinals
+      (?:[A-Za-z]\.){2,}                  # dotted acronyms: U.S., a.m., N.C.
+    | (?:""" + "|".join(sorted(_ABBREV, key=len, reverse=True)) + r""")\.(?=\s|$|[,;:)])
+    | [A-Z]\.(?=\s|$)                     # initials: "D." in "Michael D. Papagiannis"
+    | \d+(?:[.,]\d+)*(?:%|st|nd|rd|th)?   # numbers, percents, ordinals
     | \w+(?:[-']\w+)*                     # words, hyphenated, internal '
     | \.\.\.|[^\w\s]                     # ellipsis, single punctuation
 """, re.VERBOSE)
@@ -28,7 +46,8 @@ _TOKEN = re.compile(r"""
 
 def tokenize(text: str) -> list[str]:
     """Deterministic word tokenizer: clitics and contractions split off,
-    punctuation separated, URLs, emails and decimals kept whole."""
+    punctuation separated, URLs, emails, decimals, dotted acronyms, initials
+    and common abbreviations ("U.S.", "D.", "Dec.", "Inc.") kept whole."""
     out: list[str] = []
     for chunk in text.split():
         if _URLISH.fullmatch(chunk):
@@ -61,8 +80,30 @@ class Document:
             self.speakers = [None] * len(self.units)
 
 
+def _no_split_after(part: str) -> bool:
+    m = _LAST_WORD.search(part.rstrip("\"')]"))
+    if not m:
+        return False
+    w = m.group(1).lstrip("\"'([")
+    return (w in _NO_SPLIT or (len(w) == 1 and w.isupper())
+            or re.fullmatch(r"(?:[A-Za-z]\.)+[A-Za-z]", w) is not None)
+
+
 def split_sentences(text: str) -> list[str]:
-    parts = [p.strip() for p in _SENT_END.split(text) if p.strip()]
+    """Sentences end at . ! ? before a capital, digit or quote, but not after
+    a title, a month, an initial or a dotted acronym ("Michael D.
+    Papagiannis", "Dec. 13", "the U.S. Navy")."""
+    out, cur, pos = [], "", 0
+    for m in _SENT_END.finditer(text):
+        cur += text[pos:m.start()]
+        if _no_split_after(cur):
+            cur += text[m.start():m.end()]
+        else:
+            out.append(cur.strip())
+            cur = ""
+        pos = m.end()
+    cur += text[pos:]
+    parts = [p for p in out + [cur.strip()] if p]
     return parts or ([text.strip()] if text.strip() else [])
 
 
