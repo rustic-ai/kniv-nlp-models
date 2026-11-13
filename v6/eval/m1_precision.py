@@ -51,7 +51,14 @@ def _configure(ex, cfg: str, boost0):
     parts = name.split("+")
     ex.nested = "nest" in parts
     ex.merge_variants = "merge" in parts
-    ex.proposers = tuple(p for p in parts if p not in ("base", "nest", "merge"))
+    ex.proposers = tuple(p for p in parts if p not in ("base", "nest", "merge", "ver"))
+    if "ver" in parts:          # plan r4 stage 3: the run's verifier (-ver1) decides trained relations
+        if ex.verifier is None:
+            import os
+            ex.use_verifier(os.environ.get("KNIV_VERIFIER", f"{ex.run}-ver1"),
+                            threshold=float(os.environ.get("KNIV_VER_THRESHOLD", "0.5")))
+        ex.margin_shift = hz.SHIFT
+    ex.ver_on = "ver" in parts
     ex.span_boost = float(b) if b else (boost0 if boost0 is not None else 0.0)
 
 

@@ -447,6 +447,17 @@ def train(args) -> int:
     return 0
 
 
+def trained_relations() -> set[str]:
+    """Relation names in the verifier set's training split (cached beside it)."""
+    cache = _corpus() / "verifier_v1-relations.json"
+    if cache.exists():
+        return set(json.loads(cache.read_text()))
+    recs = json.loads((_corpus() / DATA).read_text())["records"]
+    names = sorted({c["rel"] for r in recs if r["split"] == "train" for c in r["cands"]})
+    cache.write_text(json.dumps(names))
+    return set(names)
+
+
 def load_verifier(run: str, device, repo: str | None = None, local: Path | None = None):
     from .gold_eval import CKPT_DIR, HF_REPO, load_run
     path = (local or CKPT_DIR) / run / "verifier.pt"

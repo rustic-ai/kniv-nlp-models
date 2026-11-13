@@ -44,6 +44,7 @@ class Extractor:
         from .train.gold_eval import HF_REPO, load_run
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else
                                               "mps" if torch.backends.mps.is_available() else "cpu"))
+        self.run = run
         self.model, self.tok, self.spec, self.vocab, _ = load_run(run, HF_REPO, self.device, local)
         if self.device.type == "mps":
             from .train import data as _data
@@ -93,6 +94,61 @@ class Extractor:
         # With nested entities one fact comes back once per span variant
         # ("Northwind" / "Northwind 's plant"); keep the highest-margin one (v8 M1).
         self.merge_variants = False
+        # v8 plan r4 V1: a fact verifier decides the relations it was trained
+        # on (candidates down to ``ver_floor`` under the bar, two per pair,
+        # kept when its probability of "expressed" reaches ``ver_threshold``);
+        # every other relation keeps the margin rule. See ``use_verifier``.
+        self.verifier = None
+        self.ver_threshold = 0.5
+        self.ver_floor = 3.0
+        self.ver_trained: set[str] = set()
+        self.ver_on = True
+        # Evaluators add a constant to every offset to see all candidates;
+        # they set it here so the verifier's floor stays relative to the bar.
+        self.margin_shift = 0.0
+
+    def use_verifier(self, run: str, threshold: float = 0.5, floor: float = 3.0,
+                     trained: set[str] | None = None) -> None:
+        """Attach the verifier trained on this extractor's run (its base must
+        be the same run: it reuses this model, frozen)."""
+        from .train.gold_eval import CKPT_DIR, HF_REPO
+        from .train.verifier import Verifier, trained_relations
+        path = CKPT_DIR / run / "verifier.pt"
+        if not path.exists():
+            from huggingface_hub import hf_hub_download
+            path = Path(hf_hub_download(HF_REPO, f"{run}/verifier.pt", local_dir=str(CKPT_DIR)))
+        ck = torch.load(path, map_location="cpu", weights_only=False)
+        m = Verifier(self.model, r=ck["rank"]).to(self.device)
+        m.ver.load_state_dict(ck["ver"]); m.head.load_state_dict(ck["head"])
+        m.eval()
+        from .label_bank import load as load_bank
+        self.verifier = m
+        self.ver_bank = {r["name"]: r for r in load_bank()["relations"]}
+        self.ver_threshold, self.ver_floor = float(threshold), float(floor)
+        self.ver_trained = set(trained) if trained is not None else trained_relations()
+
+    @torch.no_grad()
+    def _verify(self, w: dict, nodes: list[dict], spans: list, parts: list, cands: list) -> list:
+        """Probability that each candidate (head, tail, relation name) is
+        expressed (supported, negated or hedged); None where the window and
+        the candidate do not fit the verifier's input (the margin decides)."""
+        from .train.verifier import collate as vcollate, encode
+        rec = {"tokens": w["tokens"], "sentence_spans": w["sentence_spans"],
+               "speakers": w.get("sentence_speakers"), "participants": parts,
+               "entities": [[tuple(int(x) for x in m) for m in ms] for ms in spans],
+               "names": [n["text"] for n in nodes]}
+        cache: dict = {}
+        exs, idx = [], []
+        for j, (h, t, rel) in enumerate(cands):
+            e = encode(rec, {"h": h, "t": t, "rel": rel, "y": 0}, self.tok, self.ver_bank, None, None, cache=cache)
+            if e is not None:
+                exs.append(e); idx.append(j)
+        out: list[float | None] = [None] * len(cands)     # None: too long to verify
+        for i in range(0, len(exs), 16):
+            lg = self.verifier(vcollate(exs[i:i + 16], self.tok.pad_token_id, self.device))
+            for j, p in zip(idx[i:i + 16], (1 - torch.softmax(lg, -1)[:, 1]).tolist()):
+                out[j] = p
+        return out
 
     # ── text to windows ──────────────────────────────────────────────
     @staticmethod
@@ -222,12 +278,32 @@ class Extractor:
         lg = o["relation"].float().cpu().numpy()
         facts = []
         off = np.array([self.rel_offsets.get(r["name"], -self.unseen_offset) for r in relations])
+        ver = self.verifier is not None and self.ver_on
+        vc, vm = [], []
         for (h, t), row in zip(zip(b["pair_h"].tolist(), b["pair_t"].tolist()), lg):
             m = row[1:] - row[0] + off
-            for k in np.argsort(-m)[:top]:
+            order = np.argsort(-m)
+            if ver:     # trained relations: the pair's two best candidates near the bar go to the verifier
+                tr = [k for k in order if relations[k]["name"] in self.ver_trained][:2]
+                for k in tr:
+                    if m[k] - self.margin_shift > -self.ver_floor:
+                        vc.append((h, t, relations[k]["name"])); vm.append(float(m[k]))
+                order = [k for k in order if relations[k]["name"] not in self.ver_trained]
+            for k in order[:top]:
                 if m[k] > 0:
                     facts.append({"head": h, "relation": relations[k]["name"], "tail": t,
                                   "margin": round(float(m[k]), 3)})
+        if vc:
+            # A verified fact's margin is its log-odds over the threshold:
+            # positive exactly when kept, ranked by the verifier.
+            lt = float(np.log(self.ver_threshold) - np.log1p(-self.ver_threshold))
+            for (h, t, rel), m, p in zip(vc, vm, self._verify(w, nodes, spans, parts, vc)):
+                if p is not None:
+                    q = min(max(p, 1e-6), 1 - 1e-6)
+                    m = self.margin_shift + float(np.log(q) - np.log1p(-q)) - lt
+                if m > 0:
+                    facts.append({"head": h, "relation": rel, "tail": t, "margin": round(m, 3),
+                                  "p": None if p is None else round(p, 4)})
         return nodes, facts
 
     def extract(self, text: str | None = None, turns=None, relations: list[dict] = (),
