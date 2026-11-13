@@ -395,13 +395,15 @@ def combine(name: str, specs: list[str], tag: str = "-n500") -> int:
     return 0
 
 
-def equal(run: str, judge_name: str, version: str, boot: int = 2000) -> int:
+def equal(run: str, judge_name: str, version: str, boot: int = 2000, pool: list[str] | None = None) -> int:
     """Each configuration at the first one's operating point: judged precision
     at its pooled recall and recall at its precision (each run's margin cut
     swept over its own judged facts), a paired bootstrap at equal recall with
     the cuts fixed on the full set, and false facts per 100 judged texts
     ("not stated" as a rate, plan r4 section 10). Predictions are counted one
-    by one, so a fact two predictions match counts twice."""
+    by one, so a fact two predictions match counts twice. ``pool``: only facts
+    these configs (or the teacher) found count toward recall -- the frozen
+    pool; the other configs' new facts are reported apart."""
     P = pickle.loads((OUT / f"preds-{run}.pkl").read_bytes())
     L = json.loads(labels_path(run, judge_name, version).read_text())
     cfgs, texts = L["configs"], L["texts"]
@@ -410,7 +412,8 @@ def equal(run: str, judge_name: str, version: str, boot: int = 2000) -> int:
     total = 0
     for i in keep:
         t = texts[i]
-        total += sum(f["verdict"] in POSITIVE for f in t["facts"])
+        total += sum(f["verdict"] in POSITIVE for f in t["facts"]
+                     if pool is None or set(f["src"]) & (set(pool) | {"teacher"}))
         for c in cfgs:
             for k, m in P["margins"][c][i].items():
                 f = next((f for f in t["facts"] if c in f["src"]
@@ -425,6 +428,10 @@ def equal(run: str, judge_name: str, version: str, boot: int = 2000) -> int:
     base = cfgs[0]
     _, p0, r0 = curve(base)
     P0, R0 = p0[-1], r0[-1]
+    if pool is not None:
+        new = Counter(c for i in keep for f in texts[i]["facts"] if f["verdict"] in POSITIVE
+                      and not set(f["src"]) & (set(pool) | {"teacher"}) for c in f["src"])
+        print(f"pool frozen to {', '.join(pool)} (+ teacher); expressed facts outside it, by config: {dict(new)}")
     print(f"{len(keep)} judged texts, pool {total}; baseline {base}: P {P0:.3f} R {R0:.3f}\n")
     print("| run | predicted | P | R | P at base R | R at base P |\n|---|---|---|---|---|---|")
     cuts = {}
@@ -480,6 +487,7 @@ def main() -> int:
                     help="predict: keep candidates down to this far under the bar, two per pair (D1e)")
     ap.add_argument("--configs", default="base,ner+np:1,ner+np+nest:2")
     ap.add_argument("--runs", help="combine: label=run,... (baseline first), each run's --tag file")
+    ap.add_argument("--pool", help="equal: configs whose facts make the frozen pool (default: all)")
     ap.add_argument("--judge", default="astra")
     ap.add_argument("--tag", default="", help="predict / rescore: suffix of the predictions file")
     ap.add_argument("--base-tag", default="-merge", help="rescore: the file whose first config is the baseline")
@@ -494,7 +502,7 @@ def main() -> int:
     if a.cmd == "combine":
         return combine(a.run, a.runs.split(","), a.tag or "-n500")
     if a.cmd == "equal":
-        return equal(a.run, a.judge, a.version)
+        return equal(a.run, a.judge, a.version, pool=a.pool.split(",") if a.pool else None)
     a.run = set_key(a.run, a.set)      # every later step reads files by slice
     if a.tag and a.cmd in ("judge", "score"):
         a.run += a.tag                 # a tagged predictions file judged as its own set
