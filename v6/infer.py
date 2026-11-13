@@ -109,6 +109,12 @@ class Extractor:
         # Plan r4 T2: the new-relation bar raised by this for relations that
         # have no offset of their own and that the verifier does not decide.
         self.new_bar_shift = 0.0
+        # Relations the frozen ATLOP path answers in prose (Re-DocRED's 96):
+        # there the margin decides and the verifier only vetoes, below this
+        # probability (stage 3: deciding them by the verifier cost 8 F1 on
+        # Re-DocRED documents; the veto gains about 1).
+        self.ver_veto = 0.1
+        self.rd_names = rd
 
     def use_verifier(self, run: str, threshold: float = 0.5, floor: float = 3.0,
                      trained: set[str] | None = None) -> None:
@@ -292,11 +298,19 @@ class Extractor:
             m = row[1:] - row[0] + off
             order = np.argsort(-m)
             if ver:     # trained relations: the pair's two best candidates near the bar go to the verifier
-                tr = [k for k in order if relations[k]["name"] in self.ver_trained][:2]
+                decide = lambda k: (relations[k]["name"] in self.ver_trained
+                                    and not (frozen and relations[k]["name"] in self.rd_names))
+                tr = [k for k in order if decide(k)][:2]
                 for k in tr:
                     if m[k] - self.margin_shift > -self.ver_floor:
-                        vc.append((h, t, relations[k]["name"])); vm.append(float(m[k]))
-                order = [k for k in order if relations[k]["name"] not in self.ver_trained]
+                        vc.append((h, t, relations[k]["name"], False)); vm.append(float(m[k]))
+                for k in order[:top]:           # frozen-path relations above the bar: the verifier may veto
+                    if (frozen and relations[k]["name"] in self.rd_names and m[k] > 0
+                            and relations[k]["name"] in self.ver_trained):
+                        vc.append((h, t, relations[k]["name"], True)); vm.append(float(m[k]))
+                order = [k for k in order if not decide(k)
+                         and not (frozen and relations[k]["name"] in self.rd_names
+                                  and relations[k]["name"] in self.ver_trained)]
             for k in order[:top]:
                 if m[k] > 0:
                     facts.append({"head": h, "relation": relations[k]["name"], "tail": t,
@@ -305,10 +319,14 @@ class Extractor:
             # A verified fact's margin is its log-odds over the threshold:
             # positive exactly when kept, ranked by the verifier.
             lt = float(np.log(self.ver_threshold) - np.log1p(-self.ver_threshold))
-            for (h, t, rel), m, p in zip(vc, vm, self._verify(w, nodes, spans, parts, vc)):
+            lv = float(np.log(self.ver_veto) - np.log1p(-self.ver_veto))
+            probs = self._verify(w, nodes, spans, parts, [c[:3] for c in vc])
+            for (h, t, rel, veto), m, p in zip(vc, vm, probs):
                 if p is not None:
                     q = min(max(p, 1e-6), 1 - 1e-6)
-                    m = self.margin_shift + float(np.log(q) - np.log1p(-q)) - lt
+                    lo = float(np.log(q) - np.log1p(-q))
+                    # a vetoable fact keeps its margin unless the verifier is below the veto
+                    m = min(m, self.margin_shift + lo - lv) if veto else self.margin_shift + lo - lt
                 if m > 0:
                     facts.append({"head": h, "relation": rel, "tail": t, "margin": round(m, 3),
                                   "p": None if p is None else round(p, 4)})
