@@ -601,10 +601,21 @@ def score_m2(args) -> int:
     tb = m2.item_table(data, preds)
     wins = {w["id"]: w for w in data["windows"]}
     vbest, vtop = np.full(len(data["items"]), -1e3), np.full(len(data["items"]), -1)
+    outdir = Path(args.out_dir or "v6/runs/m2-unseen")
+    si, sn = map(int, args.slice.split("/")) if args.slice else (0, 1)
+    if args.combine:            # merge the slices' files, then score
+        for f in sorted(outdir.glob(f"verifier-{args.run}-*of{sn}.pkl")):
+            x = pickle.loads(f.read_bytes())
+            sel = x["done"]
+            vbest[sel], vtop[sel] = x["vbest"][sel], x["vtop"][sel]
     t0 = time.time()
+    done = np.zeros(len(data["items"]), dtype=bool)
     for n, (it, M) in enumerate(zip(data["items"], tb["M"])):
-        if args.limit and n >= args.limit:
+        if args.combine or (args.limit and n >= args.limit):
             break
+        if n % sn != si:        # MPS memory grows over a long run: slice in fresh processes
+            continue
+        done[n] = True
         if (M <= -1e2).all():
             continue
         w = wins[it["window"]]
@@ -630,6 +641,11 @@ def score_m2(args) -> int:
         vbest[n], vtop[n] = float(logit[j]), ks[j]
         if (n + 1) % 500 == 0:
             print(f"  {n + 1}/{len(data['items'])} [{time.time() - t0:.0f}s]", flush=True)
+    if args.slice and not args.combine:
+        f = outdir / f"verifier-{args.run}-{si}of{sn}.pkl"
+        f.write_bytes(pickle.dumps({"vbest": vbest, "vtop": vtop, "done": done}))
+        print(f"wrote {f}")
+        return 0
     if args.limit:          # pipeline test: the first items only
         keep = np.arange(min(args.limit, len(tb["pos"])))
         tb = {k: v[keep] for k, v in tb.items()}
@@ -647,7 +663,7 @@ def score_m2(args) -> int:
     print(f"{args.base} margins: AUC {base['auc']:.3f}, top-1 {base['top1']:.3f}, F1 {base['f1']:.3f}")
     print(f"{args.run} over its top 4: AUC {auc(vbest):.3f}, top-1 {float((vtop[pos] == gold[pos]).mean()):.3f}, "
           f"F1 {2 * P * R / max(P + R, 1e-12):.3f} (P {P:.3f} R {R:.3f}) at p > 0.5")
-    out = Path(args.out_dir or "v6/runs/m2-unseen") / f"verifier-{args.run}.pkl"
+    out = outdir / f"verifier-{args.run}.pkl"
     out.write_bytes(pickle.dumps({"vbest": vbest, "vtop": vtop}))
     return 0
 
@@ -679,6 +695,8 @@ def main() -> int:
     ap.add_argument("--config", default="e1b", help="score-m1: the config whose predictions to re-rank")
     ap.add_argument("--base", default="ultrabert-380m-v8e-w1half", help="score-m2: the run whose top 4 to verify")
     ap.add_argument("--m2-set", default="v6/runs/m2-unseen/set.json")
+    ap.add_argument("--slice", help="score-m2: i/n, items with index %% n == i (fresh process each)")
+    ap.add_argument("--combine", action="store_true", help="score-m2: merge the --slice files and score")
     a = ap.parse_args()
     if a.cmd == "build":
         return build(a.seed, a.d1e)
