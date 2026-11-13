@@ -551,21 +551,27 @@ def load_pairs() -> list[dict]:
 
 
 # ── predict ────────────────────────────────────────────────────────
-def predict(items: list[dict], modes: list[str], device: str = "cpu") -> dict:
+def predict(items: list[dict], modes: list[str], device: str = "cpu", run: str | None = None) -> dict:
     """Per statement and mode, every candidate the decoder ranks (top 4 per
     pair, margins kept below the bar) with each attribute head's
-    polarity / modality probabilities."""
+    polarity / modality probabilities. With ``run``, that run's own relation
+    step and attribute head alone (the head is named after the run)."""
     import torch
     from ..infer import Extractor
     from ..train.gold_eval import CKPT_DIR
-    ex = Extractor(RUN, device=device, local=CKPT_DIR)
-    exb = Extractor(HEADS["attrv8b"], device=device, local=CKPT_DIR)
-    for e in (ex, exb):
+    if run:
+        ex = exb = Extractor(run, device=device)
+        exs = (ex,)
+    else:
+        ex = Extractor(RUN, device=device, local=CKPT_DIR)
+        exb = Extractor(HEADS["attrv8b"], device=device, local=CKPT_DIR)
+        exs = (ex, exb)
+    for e in exs:
         e.rel_offsets = {k: v + SHIFT for k, v in e.rel_offsets.items()}
         e.unseen_offset -= SHIFT
         e.top = max(e.top, 4)
     assert ex.rel_offsets == exb.rel_offsets and ex.unseen_offset == exb.unseen_offset
-    heads = {"v7.1": ex.model.attr, "attrv8b": exb.model.attr}
+    heads = {run: ex.model.attr} if run else {"v7.1": ex.model.attr, "attrv8b": exb.model.attr}
     m = ex.model
     cap = {}
     fwd = m.forward
@@ -589,7 +595,7 @@ def predict(items: list[dict], modes: list[str], device: str = "cpu") -> dict:
                     ents = ex._entities(w, it["types"] or None)
                 cap.clear()
                 nodes, facts = ex._relations(w, ents, list(it["relations"]), ex.top)
-                if n < 5 and mode == "gold":       # the attrv8b run's own relation step agrees
+                if n < 5 and mode == "gold" and not run:   # the attrv8b run's own relation step agrees
                     _, fb = exb._relations(w, ents, list(it["relations"]), exb.top)
                     check.append(max([abs(a["margin"] - b["margin"]) for a, b in zip(facts, fb)] or [0.0])
                                  if len(facts) == len(fb) else float("inf"))
@@ -860,6 +866,7 @@ def main() -> int:
     p.add_argument("--modes", default="gold,e2e")
     p.add_argument("--device", default="cpu")
     p.add_argument("--threads", type=int, default=0)
+    p.add_argument("--run", help="one run's relation step and attribute head (preds-run-<run>-*.pkl)")
     sub.add_parser("score")
     a = ap.parse_args()
     if a.cmd == "build":
@@ -876,9 +883,10 @@ def main() -> int:
     items = load_hand() if a.set == "hand" else load_pairs()
     lo, hi = (int(x) if x else None for x in (a.slice.split(":") if a.slice else ("", "")))
     items = items[lo:hi]
-    d = predict(items, a.modes.split(","), a.device)
+    d = predict(items, a.modes.split(","), a.device, a.run)
     OUT.mkdir(parents=True, exist_ok=True)
     tag = f"{a.set}-{lo or 0}-{hi if hi is not None else 'end'}"
+    tag = f"run-{a.run}-{tag}" if a.run else tag
     (OUT / f"preds-{tag}.pkl").write_bytes(pickle.dumps(d))
     print(f"written {OUT / f'preds-{tag}.pkl'}; relation check {d['check']}")
     return 0
