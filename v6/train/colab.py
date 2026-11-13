@@ -251,7 +251,7 @@ def build_bundles() -> tuple[Path, Path, str]:
                          corpus / "student_label_emb.pkl", corpus / "kg_short.json",
                          corpus / "synth_her_case.json", corpus / "kg_short_d1.json",
                          corpus / "kg_d2_concepts.json", corpus / "kg_d3_forms.json",
-                         corpus / "label_para.json")
+                         corpus / "label_para.json", corpus / "verifier_v1.json")
              if p.exists()]
     # Keyed by every bundled side file's size and mtime: a name that ignores
     # one ships a stale copy of it (the Re-DocRED evidence was lost that way).
@@ -1093,8 +1093,10 @@ POST_JOBS = {
     # the teacher-corpus caches from the run's hubdata manifest, then the head fine-tune
     "attr": "python -m v6.train.hubdata pull --manifest manifest-{ev}.json --match knowledge-teacher"
             " && python -m v6.train.attr_finetune --run {ev}",
+    # plan r4 V1: the fact verifier over a finished run (data/v6-corpus/verifier_v1.json)
+    "ver": "python -m v6.train.verifier train --run {ev} --out-run {ev}-ver1 --upload",
 }
-POST_LINES = r"margins above|ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
+POST_LINES = r"^eval \d|done: best|training examples|margins above|ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
 
 POST_START = r'''
 import json, os, subprocess, sys

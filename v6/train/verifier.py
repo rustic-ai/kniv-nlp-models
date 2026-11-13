@@ -118,11 +118,9 @@ def _record(row: dict, cands: list[dict], split: str, src: str, rng: random.Rand
                         opts.append((a - 1, b))
                     if opts:
                         na, nb = rng.choice(opts)
-                        ents.append([(na, nb)])
-                        names.append(" ".join(toks[na:nb]))
-                        e = len(ents) - 1
-                        out.append({"h": e if k == h else h, "t": e if k == t else t, "rel": r,
-                                    "y": 1, "src": "neg:argument"})
+                        # the cut or widened span stands in for argument k in this candidate only
+                        out.append({"h": h, "t": t, "rel": r, "y": 1, "src": "neg:argument",
+                                    "swap": [k, [na, nb]]})
     return {"id": row["id"], "split": split, "tokens": toks, "sentence_spans": row["sentence_spans"],
             "speakers": row.get("speakers"), "participants": list(row["payload"].get("participants") or []),
             "entities": [[list(m) for m in ms] for ms in ents], "names": names, "cands": out}
@@ -265,19 +263,35 @@ class Verifier(nn.Module):
         return self.head(x).float()
 
 
-def encode(rec: dict, c: dict, tok, bank: dict, para: dict | None, rng: random.Random | None,
-           max_subwords: int = 1024) -> dict | None:
-    """One (text, candidate) example: marker ids with the candidate after
-    them, each mention's marker position, the candidate's token mask."""
+def _markers(rec: dict, tok, swap=None) -> dict:
+    """The marker pass's input for a text; ``swap`` = ``[k, [a, b]]`` marks
+    span ``a:b`` in place of entity ``k``'s mentions (a broken argument)."""
     from .data import marker_features, speaker_turns
-    from .kdata import label_text
     spans = [tuple(x) for x in rec["sentence_spans"]]
     parts = rec.get("participants") or []
     ents = [[tuple(m) for m in ms] for ms in rec["entities"]]
+    if swap is not None:
+        ents[swap[0]] = [tuple(swap[1])]
     n_part = len(parts)
     turns = speaker_turns(spans, rec.get("speakers"), parts) if parts else []
-    rm = marker_features(rec["tokens"], spans, [np.asarray(ms) for ms in ents[n_part:]], tok,
-                         turns=[(s, p) for s, p in turns], participants=parts)
+    return marker_features(rec["tokens"], spans, [np.asarray(ms) for ms in ents[n_part:]], tok,
+                           turns=[(s, p) for s, p in turns], participants=parts)
+
+
+def encode(rec: dict, c: dict, tok, bank: dict, para: dict | None, rng: random.Random | None,
+           max_subwords: int = 1024, cache: dict | None = None) -> dict | None:
+    """One (text, candidate) example: marker ids with the candidate after
+    them, each mention's marker position, the candidate's token mask."""
+    swap = c.get("swap")
+    key = (id(rec), None if swap is None else (swap[0], tuple(swap[1])))
+    rm = cache.get(key) if cache is not None else None
+    if rm is None:
+        rm = _markers(rec, tok, swap)
+        if cache is not None:
+            cache[key] = rm
+    names = list(rec["names"])
+    if swap is not None:
+        names[swap[0]] = " ".join(rec["tokens"][swap[1][0]:swap[1][1]])
     men = rm["men_pos"]                       # participants' turns first, then entities
     if any(len(men[k]) == 0 or men[k].max() < 0 for k in (c["h"], c["t"])):
         return None
@@ -288,7 +302,7 @@ def encode(rec: dict, c: dict, tok, bank: dict, para: dict | None, rng: random.R
         pn, pd = rng.choice(para[rel["id"]])
         name, desc = pn, pd or desc
     # names first, so the 96-token cap only ever cuts the description
-    text = f"{rec['names'][c['h']]} | {name} | {rec['names'][c['t']]} | {desc}"
+    text = f"{names[c['h']]} | {name} | {names[c['t']]} | {desc}"
     cand = tok(text, add_special_tokens=False)["input_ids"][:96]
     ids = [int(x) for x in rm["ids"]] + cand + [tok.sep_token_id]
     if len(ids) > max_subwords:
@@ -324,8 +338,9 @@ def examples(recs, tok, bank, para, rng, split: str, limit: int | None = None) -
     for r in recs:
         if r["split"] != split:
             continue
+        cache: dict = {}
         for c in r["cands"]:
-            e = encode(r, c, tok, bank, para if split == "train" else None, rng)
+            e = encode(r, c, tok, bank, para if split == "train" else None, rng, cache=cache)
             if e is not None:
                 e["src"] = c.get("src", "")
                 out.append(e)
@@ -423,8 +438,11 @@ def train(args) -> int:
     (out / "status.json").write_text(json.dumps({"state": "done", "step": steps, "best": best,
                                                  "time": time.time()}))
     if args.upload:
-        from .srl_finetune import upload
-        upload(out, args.out_run, args.repo)
+        from huggingface_hub import HfApi
+        HfApi().upload_folder(repo_id=args.repo, folder_path=str(out), path_in_repo=args.out_run,
+                              allow_patterns=["verifier.pt", "best.metric", "status.json", "train.log"],
+                              commit_message=f"Add {args.out_run} (fact verifier)")
+        print(f"uploaded to {args.repo}/{args.out_run}", flush=True)
     print(f"done: best held-out AUC {best:.4f}")
     return 0
 
