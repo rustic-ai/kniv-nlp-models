@@ -136,7 +136,7 @@ def _from_payload(row: dict) -> list[dict]:
     return out
 
 
-def build(seed: int = 13, d1e: Path | None = None) -> int:
+def build(seed: int = 13, d1e: list[Path] | None = None) -> int:
     from ..config import RUNS_DIR
     from ..eval.negation_pilot import heldout_base, heldout_form
     rng = random.Random(seed)
@@ -169,8 +169,8 @@ def build(seed: int = 13, d1e: Path | None = None) -> int:
         r = _record(row, _from_payload(row), "train", "concepts", rng, neg=True)
         if r:
             recs.append(r); c["concepts train"] += 1
-    if d1e is not None and d1e.exists():
-        n = _add_d1e(recs, d1e, rng)
+    for f in d1e or []:
+        n = _add_d1e(recs, f, rng)
         c["d1e texts"] += n
     for r in recs:
         for x in r["cands"]:
@@ -661,7 +661,7 @@ def main() -> int:
     ap.add_argument("--repo", default="dragonscale-ai/kniv-v6-runs")
     ap.add_argument("--local", type=Path)
     ap.add_argument("--device")
-    ap.add_argument("--d1e", type=Path, help="build: D1e's labels file (M1 format)")
+    ap.add_argument("--d1e", type=Path, nargs="*", help="build: D1e's labels files (M1 format)")
     ap.add_argument("--rank", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--head-lr", type=float, default=1e-3)
