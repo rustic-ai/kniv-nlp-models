@@ -504,6 +504,11 @@ SHORT_SPLITS = {"short": None, "short_pairs": "pairs", "synth": "synth",
                 # training texts, D2's concept passages, D3's forms.
                 "short_d1": "train", "concepts": "train", "forms": "train"}
 SYNTH_DRAWS = 4
+# Plan r4 C4 (``loop.py --hold-out-m3``): leave M3's held-out fifth of the
+# minimal pairs (``negation_pilot.heldout_base``) and a fifth of D3's bases
+# (``heldout_form``) out of training, so M3's pairs and D3's forms score text
+# the run never saw. Off by default: earlier runs trained on every pair.
+HOLD_OUT_M3 = False
 # Unlabelled pairs of a partial source kept as negatives, per source: FewRel
 # labels one pair per sentence and says nothing of the others.
 # Bump whenever a featuriser's output changes: the feature cache is keyed on it.
@@ -787,6 +792,8 @@ def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: i
     if not path.exists():
         raise SystemExit(f"{path} missing; run python -m v6.train.kdata --prep")
     hold_sig = (load_holdout() or {}).get("relations") if source == "teacher" else None
+    if HOLD_OUT_M3 and split == "train" and source in ("short_pairs", "forms"):
+        hold_sig = ["m3-holdout", 1]
     if source == "synth":                       # the swap's code decides the features too
         from . import name_swap
         hold_sig = [_digest(Path(name_swap.__file__)), SYNTH_DRAWS]
@@ -816,6 +823,12 @@ def knowledge_features(source: str, split: str, tok, max_subwords: int, n_cls: i
         part = SHORT_SPLITS[source] or split
         data = json.loads(path.read_text())
         rows = data.get(part, []) if split == "train" or source == "short" else []
+        if HOLD_OUT_M3 and split == "train" and source in ("short_pairs", "forms"):
+            from ..eval.negation_pilot import heldout_base, heldout_form
+            held = heldout_base if source == "short_pairs" else heldout_form
+            n0 = len(rows)
+            rows = [r for r in rows if not held(r["id"])]
+            local[f"{source}_m3_held_out"] += n0 - len(rows)
         draws = [None]
         if source == "synth":
             from .name_swap import HER_CASES, gender_table, swap_names

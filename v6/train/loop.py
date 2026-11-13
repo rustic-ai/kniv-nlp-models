@@ -678,6 +678,9 @@ def main() -> int:
     ap.add_argument("--span-match", choices=["dot", "mlp"], default="dot",
                     help="span head: span and type scored by a dot product, or by an MLP over both "
                          "(with the dot product as a residual)")
+    ap.add_argument("--hold-out-m3", action="store_true",
+                    help="leave M3's held-out fifth of the minimal pairs and a fifth of D3's forms "
+                         "out of training (plan r4 C4)")
     ap.add_argument("--kg-spans-only", default="",
                     help="comma-separated --kg-data sources used for their typed spans only "
                          "(relation labels dropped), e.g. trex")
@@ -893,6 +896,8 @@ def main() -> int:
         if args.rel_head not in ("label", "zs") or not args.phase2:
             raise SystemExit("--kg-data needs --phase2 and a label relation head")
         from ..label_bank import load as load_bank
+        from . import kdata as _kd
+        _kd.HOLD_OUT_M3 = args.hold_out_m3
         from .kdata import knowledge_features
         over = {d: int(n) for d, n in (x.split("=") for x in args.kg_oversample.split(",") if x)}
         kg_bank = load_bank()

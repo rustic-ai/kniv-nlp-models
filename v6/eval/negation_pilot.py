@@ -49,6 +49,15 @@ def heldout_base(text_id: str) -> bool:
     import hashlib
     base = text_id.split(":var:")[0].split("#")[0]
     return int(hashlib.sha1(base.encode()).hexdigest(), 16) % 5 == 0
+
+
+def heldout_form(text_id: str) -> bool:
+    """One fifth of D3's bases (all outside ``heldout_base``), held out of
+    training with ``--hold-out-m3`` so M3 can read D3's forms on texts the
+    model never saw (plan r4 C4). A second hash, independent of the first."""
+    import hashlib
+    base = text_id.split(":var:")[0].split("#")[0]
+    return int(hashlib.sha1(f"{base}:d3".encode()).hexdigest(), 16) % 5 == 0
 KIND_EXPECT = {"negated": ("negative", "asserted"), "reported": ("positive", "reported"),
                "planned": ("positive", "planned"), "desired": ("positive", "desired"),
                "questioned": ("positive", "questioned"), "hypothetical": ("positive", "hypothetical")}
