@@ -536,9 +536,125 @@ def score_m1(args) -> int:
     return 0
 
 
+@torch.no_grad()
+def score_m3(args) -> int:
+    """The verifier's verdict on each expected fact of the M3 hand set, with
+    gold entities and the fact given (the relation step's recall is read
+    apart): right = supported for asserted, negated for negated, hedged for a
+    hedged statement (supported also right where the set accepts asserted)."""
+    from ..eval import m3_negation as m3
+    from ..label_bank import load as load_bank
+    device = torch.device(args.device or "cpu")
+    model, tok = load_verifier(args.run, device)
+    bank = {r["name"]: r for r in load_bank()["relations"]}
+    rows = []
+    for it in m3.load_hand():
+        parts = list(dict.fromkeys(s for s in (it.get("sentence_speakers") or []) if s))
+        ents = [[] for _ in parts] + [[tuple(x) for x in e["spans"]] for e in it["entities"]]
+        names = parts + [e["name"] for e in it["entities"]]
+        rec = {"tokens": it["tokens"], "sentence_spans": it["sentence_spans"],
+               "speakers": it.get("sentence_speakers"), "participants": parts,
+               "entities": [[list(m) for m in ms] for ms in ents], "names": names}
+
+        def ix(a):
+            return parts.index(a[1:]) if isinstance(a, str) else len(parts) + a
+        for f in it["facts"]:
+            if f.get("optional"):
+                continue
+            e = encode(rec, {"h": ix(f["head"]), "t": ix(f["tail"]), "rel": f["relation"], "y": 0},
+                       tok, bank, None, None)
+            if e is None:
+                continue
+            p = torch.softmax(model(collate([e], tok.pad_token_id, device)), -1)[0].tolist()
+            mods = set(f["modality"])
+            if f["polarity"] == "negative":
+                ok = {2}; fam = "negated"
+            elif "asserted" in mods and len(mods) == 1:
+                ok = {0}; fam = "asserted"
+            else:
+                ok = {3} | ({0} if "asserted" in mods else set()); fam = "hedged"
+            rows.append((fam, int(np.argmax(p)) in ok, p, it["id"]))
+    for fam in ("negated", "hedged", "asserted"):
+        r = [x for x in rows if x[0] == fam]
+        v = Counter(VERDICTS[int(np.argmax(x[2]))] for x in r)
+        print(f"{fam:9s} ({len(r)}): verdict right {np.mean([x[1] for x in r]):.3f}; verdicts {dict(v)}")
+    return 0
+
+
+@torch.no_grad()
+def score_m2(args) -> int:
+    """M2 (never-trained relations): the verifier over a run's top 4
+    relations per pair (by its margin), the pair's score the best verdict
+    logit; AUC positives against negatives, top-1 and F1 at p > 0.5 against
+    the run's own margins on the same items."""
+    import pickle
+    from ..eval import m2_unseen as m2
+    from ..eval.heldout_zs import _lit
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else
+                                          "mps" if torch.backends.mps.is_available() else "cpu"))
+    model, tok = load_verifier(args.run, device)
+    data = json.loads(Path(args.m2_set).read_text())
+    rels = data["relations"]
+    bank = {r["code"]: {"name": r["name"], "description": r.get("description", "")} for r in rels}
+    names = [r["code"] for r in rels]
+    preds = m2.load_preds(f"pt:{args.base}", args.m2_set)
+    tb = m2.item_table(data, preds)
+    wins = {w["id"]: w for w in data["windows"]}
+    vbest, vtop = np.full(len(data["items"]), -1e3), np.full(len(data["items"]), -1)
+    t0 = time.time()
+    for n, (it, M) in enumerate(zip(data["items"], tb["M"])):
+        if args.limit and n >= args.limit:
+            break
+        if (M <= -1e2).all():
+            continue
+        w = wins[it["window"]]
+        ents = [[tuple(m) for m in e["mentions"]] for e in _lit(w["entities"])]
+        toks = _lit(w["tokens"])
+        rec = {"tokens": toks, "sentence_spans": _lit(w["sentence_spans"]), "speakers": None,
+               "participants": [], "entities": [[list(m) for m in ms] for ms in ents],
+               "names": [" ".join(toks[ms[0][0]:ms[0][1]]) if ms else "" for ms in ents]}
+        top = np.argsort(-M)[:4]
+        exs, ks = [], []
+        cache = {}
+        for k in top:
+            e = encode(rec, {"h": it["head"], "t": it["tail"], "rel": names[k], "y": 0}, tok, bank, None,
+                       None, cache=cache)
+            if e is not None:
+                exs.append(e); ks.append(k)
+        if not exs:
+            continue
+        lg = model(collate(exs, tok.pad_token_id, device))
+        pr = 1 - torch.softmax(lg, -1)[:, 1]
+        logit = torch.log(pr + 1e-6) - torch.log(1 - pr + 1e-6)
+        j = int(logit.argmax())
+        vbest[n], vtop[n] = float(logit[j]), ks[j]
+        if (n + 1) % 500 == 0:
+            print(f"  {n + 1}/{len(data['items'])} [{time.time() - t0:.0f}s]", flush=True)
+    if args.limit:          # pipeline test: the first items only
+        keep = np.arange(min(args.limit, len(tb["pos"])))
+        tb = {k: v[keep] for k, v in tb.items()}
+        vbest, vtop = vbest[keep], vtop[keep]
+    pos, gold = tb["pos"], tb["gold"]
+
+    def auc(sc):
+        sp, sn = sc[pos], sc[~pos]
+        allv = np.concatenate([sp, sn]); r = allv.argsort().argsort() + 1.0
+        return (r[:len(sp)].sum() - len(sp) * (len(sp) + 1) / 2) / (len(sp) * len(sn))
+    base = m2.metrics(tb)
+    pred = vbest > 0
+    tp = int((pos & pred & (vtop == gold)).sum())
+    P, R = tp / max(pred.sum(), 1), tp / max(pos.sum(), 1)
+    print(f"{args.base} margins: AUC {base['auc']:.3f}, top-1 {base['top1']:.3f}, F1 {base['f1']:.3f}")
+    print(f"{args.run} over its top 4: AUC {auc(vbest):.3f}, top-1 {float((vtop[pos] == gold[pos]).mean()):.3f}, "
+          f"F1 {2 * P * R / max(P + R, 1e-12):.3f} (P {P:.3f} R {R:.3f}) at p > 0.5")
+    out = Path(args.out_dir or "v6/runs/m2-unseen") / f"verifier-{args.run}.pkl"
+    out.write_bytes(pickle.dumps({"vbest": vbest, "vtop": vtop}))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=["build", "train", "score-m1"])
+    ap.add_argument("cmd", choices=["build", "train", "score-m1", "score-m3", "score-m2"])
     ap.add_argument("--run", default="ultrabert-380m-v8e-w1half")
     ap.add_argument("--out-run", default="ultrabert-380m-v8v1")
     ap.add_argument("--out-dir")
@@ -561,11 +677,17 @@ def main() -> int:
     ap.add_argument("--upload", action="store_true")
     ap.add_argument("--name", default="m1p3b-n500", help="score-m1: the M1 predictions file")
     ap.add_argument("--config", default="e1b", help="score-m1: the config whose predictions to re-rank")
+    ap.add_argument("--base", default="ultrabert-380m-v8e-w1half", help="score-m2: the run whose top 4 to verify")
+    ap.add_argument("--m2-set", default="v6/runs/m2-unseen/set.json")
     a = ap.parse_args()
     if a.cmd == "build":
         return build(a.seed, a.d1e)
     if a.cmd == "train":
         return train(a)
+    if a.cmd == "score-m3":
+        return score_m3(a)
+    if a.cmd == "score-m2":
+        return score_m2(a)
     return score_m1(a)
 
 
