@@ -100,14 +100,25 @@ def main() -> int:
     ap.add_argument("--tag", default="ver1b")
     ap.add_argument("--limit", type=int, default=8000)
     ap.add_argument("--device")
+    ap.add_argument("--fit-set", help="fit on judged end-to-end candidates: NAME|CONFIG|CUT_THRESHOLD")
     ap.add_argument("--out", type=Path, default=Path("v6/runs/k-checks/p3-verifier.json"))
     a = ap.parse_args()
-    device = torch.device(a.device or ("mps" if torch.backends.mps.is_available() else "cpu"))
-    p, y = heldout_probs(a.run, device, a.limit)
-    f = [cls_f1(p, y, t) for t in GRID]
-    thr = float(GRID[int(np.argmax(f))])
-    print(f"held-out fifth (D1 candidates, gold entities): {len(y):,}, {y.mean():.2f} expressed; "
-          f"fitted threshold {thr:.2f} (F1 {max(f):.3f}; at 0.5 {cls_f1(p, y, 0.5):.3f})")
+    if a.fit_set:     # judged end-to-end candidates outside M1 (``name|config|threshold it was cut at``)
+        name, cfg, t0 = a.fit_set.split("|")
+        m, ok, total = e2e_curve(name, cfg)
+        m = m + _logit(float(t0))          # its margins are log-odds over t0: back to log-odds
+        fs = [e2e_f1(m, ok, total, t) for t in GRID]
+        thr = float(GRID[int(np.argmax(fs))])
+        y = ok
+        print(f"fitted on {name} ({cfg}; {len(m):,} judged candidates, pool {total}): threshold {thr:.2f} "
+              f"(F1 {max(fs):.3f}; at 0.5 {e2e_f1(m, ok, total, 0.5):.3f})")
+    else:
+        device = torch.device(a.device or ("mps" if torch.backends.mps.is_available() else "cpu"))
+        p, y = heldout_probs(a.run, device, a.limit)
+        f = [cls_f1(p, y, t) for t in GRID]
+        thr = float(GRID[int(np.argmax(f))])
+        print(f"held-out fifth (D1 candidates, gold entities): {len(y):,}, {y.mean():.2f} expressed; "
+              f"fitted threshold {thr:.2f} (F1 {max(f):.3f}; at 0.5 {cls_f1(p, y, 0.5):.3f})")
     sets = [("M1 short dev, d123 flat", f"m1p3b-n500-v-{a.tag}-d123", "d123+v"),
             ("M1 short dev, v7.1 nested", "v2-n500", "ner+np+nest+merge:2+v"),
             ("CoNLL04 test, v7.1 flat", f"ultrabert-380m-v7b8ev-conll04-v-{a.tag}-base", "base+v"),
@@ -126,6 +137,8 @@ def main() -> int:
         print(f"| {label} | {ff:.3f} | {fh:.3f} | {fs[b]:.3f} ({GRID[b]:.2f}) | {100 * (ff - fs[b]):+.1f} |")
     print("\nPASS" if ok_all else "\nFAIL: the fitted threshold is more than 1 F1 off some set's best")
     a.out.parent.mkdir(parents=True, exist_ok=True)
+    if a.fit_set:
+        a.out = a.out.with_name("p3-verifier-e2e.json")
     a.out.write_text(json.dumps(out, indent=1))
     return 0
 
