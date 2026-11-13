@@ -406,15 +406,64 @@ def k4_score(name: str) -> None:
     print(f"schema pool facts whose pair a true open fact covers: {cov}/{tot} = {cov / max(tot, 1):.3f}")
 
 
+# ── type-fit filter and new-relation bar (M4, offline on saved rows) ──
+def m4_filter(run: str, naming: str = "user") -> None:
+    """Drop candidates whose argument types break the relation's constraint
+    (``m4_business.CONSTRAINT``) before the bar; sweep the new-relation bar."""
+    from . import m4_business as m4
+    items = m4.load()
+
+    def load_rows(mode):
+        rows = json.loads((m4.OUT / f"rows-{run}-{naming}-{mode}.json").read_text())
+        for r in rows:
+            for c in r["cand"]:
+                h, rel, t = c["key"]
+                c["key"] = (h, rel, t) if mode == "gold" else (frozenset(h), rel, frozenset(t))
+        return rows
+
+    def types_of(it, c, mode):
+        if mode == "gold":
+            return it["entities"][c["key"][0]]["type"], it["entities"][c["key"][2]]["type"]
+        return tuple(c["types"])
+
+    for mode in ("gold", "e2e"):
+        rows = load_rows(mode)
+        frows = []
+        for it, r in zip(items, rows):
+            keep = []
+            for c in r["cand"]:
+                ch, ct = m4.CONSTRAINT[c["rel"]]
+                th, tt = types_of(it, c, mode)
+                if th in ch and tt in ct:
+                    keep.append(c)
+            frows.append({**r, "cand": keep})
+        a, b = m4.score_rows(items, rows, mode), m4.score_rows(items, frows, mode)
+        d = m4.bootstrap(b["per_item"], a["per_item"])
+        print(f"\n## {run}, {mode}")
+        for nm, sc in (("no filter", a), ("type filter", b)):
+            p, r, f = sc["prf"]
+            print(f"  {nm:11s}: P {p:.3f} R {r:.3f} F1 {f:.3f}  ({int(sc['counts'][1])} predicted; "
+                  f"type violations {sc['type_violations']:.3f})")
+        print(f"  F1 filter - none: {100 * d[0]:+.1f} [{100 * d[1]:+.1f}, {100 * d[2]:+.1f}]")
+        line = []
+        for dl in np.arange(-4, 2.01, 0.5):
+            fa = m4.score_rows(items, rows, mode, delta=dl)["prf"]
+            fb = m4.score_rows(items, frows, mode, delta=dl)["prf"]
+            line.append(f"{dl:+.1f}: {fa[2]:.3f}/{fb[2]:.3f} (P {fb[0]:.2f} R {fb[1]:.2f})")
+        print("  new-relation bar sweep, F1 (none / filter):\n   " + "\n   ".join(line))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("cmd", choices=["k1", "k2-sample", "k2-score", "layers", "k3",
-                                    "k4-decode", "k4-judge", "k4-score"])
+                                    "k4-decode", "k4-judge", "k4-score", "m4-filter"])
     ap.add_argument("--name", default="m1p3a-n500")
+    ap.add_argument("--run", help="m4-filter: the run whose saved M4 rows to filter")
     a = ap.parse_args()
     {"k1": lambda: k1(a.name), "k2-sample": lambda: k2_sample(a.name), "k2-score": k2_score,
      "layers": lambda: layers(a.name), "k3": lambda: k3(a.name), "k4-decode": lambda: k4_decode(a.name),
-     "k4-judge": lambda: k4_judge(a.name), "k4-score": lambda: k4_score(a.name)}[a.cmd]()
+     "k4-judge": lambda: k4_judge(a.name), "k4-score": lambda: k4_score(a.name),
+     "m4-filter": lambda: m4_filter(a.run)}[a.cmd]()
     return 0
 
 
