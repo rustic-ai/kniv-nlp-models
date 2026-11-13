@@ -430,7 +430,9 @@ def set_tag(path) -> str:
 
 
 def load_preds(spec: str, set_path=None) -> dict:
-    paths = sorted(OUT.glob(f"preds-{tag(spec)}*.pkl"))
+    # the tag must end where the name's suffix starts: "-d12" must not read "-d123"'s files
+    head = f"preds-{tag(spec)}"
+    paths = sorted(p for p in OUT.glob(f"{head}*.pkl") if p.name[len(head):][:1] in ("-", "."))
     out = None
     for p in paths:
         x = pickle.loads(p.read_bytes())
