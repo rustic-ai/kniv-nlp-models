@@ -80,14 +80,16 @@ def load_conll04(limit: int | None = None) -> list[dict]:
     return items
 
 
-def load_short_dev(limit: int | None = None) -> list[dict]:
+def load_short_dev(limit: int | None = None, split: str = "dev", keep=None) -> list[dict]:
     from ..label_bank import load as load_bank
     bank = load_bank()
     rel = {r["name"]: r for r in bank["relations"]}
     typ = {t["name"]: t for t in bank.get("entity_types", bank.get("types", []))}
-    data = json.loads(Path("data/v6-corpus/kg_short.json").read_text())["dev"]
+    data = json.loads(Path("data/v6-corpus/kg_short.json").read_text())[split]
     items = []
     for x in data:
+        if keep is not None and not keep(x["id"]):
+            continue
         p = _lit(x["payload"])
         items.append({
             "id": x["id"], "tokens": _lit(x["tokens"]), "sentence_spans": _lit(x["sentence_spans"]),

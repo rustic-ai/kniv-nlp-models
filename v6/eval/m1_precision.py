@@ -59,6 +59,11 @@ def load_set(name: str, n: int) -> list[dict]:
     """Texts of one M1 slice, as ``heldout_zs`` items."""
     if name == "short":
         return hz.load_short_dev(n)
+    if name.startswith("train"):    # D1e (plan r4 5.2): "train:OFFSET", short training texts
+        from .negation_pilot import heldout_base  # outside M3's / V1's held-out fifth
+        off = int(name.partition(":")[2] or 0)
+        items = hz.load_short_dev(off + n, split="train", keep=lambda i: not heldout_base(i))
+        return items[off:off + n]
     if name == "conll04":
         return hz.load_conll04(n)
     if name == "m4":            # complete expected facts: m4_business scores it without a judge
@@ -70,10 +75,14 @@ def load_set(name: str, n: int) -> list[dict]:
 
 def set_key(run: str, name: str) -> str:
     """File key: the short-dev slice keeps the original names."""
-    return run if name == "short" else f"{run}-{name}"
+    return run if name == "short" else f"{run}-{name.replace(':', '-')}"
 
 
-def predict(run: str, n: int, configs: list[str], tag: str = "", set_name: str = "short") -> None:
+def predict(run: str, n: int, configs: list[str], tag: str = "", set_name: str = "short",
+            floor: float = 0.0) -> None:
+    """Each config's end-to-end facts above the deployed bar; with ``floor``,
+    candidates down to ``floor`` under it, the best two relations per pair
+    (D1e's candidates, as D1 took within 3 of the bar)."""
     from ..infer import Extractor
     items = load_set(set_name, n)
     ex = Extractor(run)
@@ -85,12 +94,23 @@ def predict(run: str, n: int, configs: list[str], tag: str = "", set_name: str =
     for cfg in configs:
         _configure(ex, cfg, boost0)
         rows = hz.predict(ex, items, "e2e")
-        preds[cfg] = [sorted({c["key"] for c in r["cand"] if c["m"] > 0}, key=str) for r in rows]
-        margins[cfg] = [{c["key"]: max(c["m"], -1e9) for c in r["cand"] if c["m"] > 0} for r in rows]
+        if floor:
+            rows = [{**r, "cand": _top_per_pair([c for c in r["cand"] if c["m"] > -floor], 2)} for r in rows]
+        preds[cfg] = [sorted({c["key"] for c in r["cand"] if c["m"] > -floor}, key=str) for r in rows]
+        margins[cfg] = [{c["key"]: max(c["m"], -1e9) for c in r["cand"] if c["m"] > -floor} for r in rows]
         print(f"{cfg}: {sum(map(len, preds[cfg]))} predicted facts on {len(items)} texts", flush=True)
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / f"preds-{set_key(run, set_name)}{tag}.pkl").write_bytes(pickle.dumps({"run": run, "items": items, "preds": preds,
                                                                       "margins": margins}))
+
+
+def _top_per_pair(cands: list[dict], k: int) -> list[dict]:
+    by = {}
+    for c in sorted(cands, key=lambda c: -c["m"]):
+        pair = (c["key"][0], c["key"][2])
+        if len(by.setdefault(pair, [])) < k:
+            by[pair].append(c)
+    return [c for cs in by.values() for c in cs]
 
 
 def _same(a, b) -> bool:
@@ -453,8 +473,11 @@ def main() -> int:
     ap.add_argument("cmd", choices=["predict", "judge", "score", "rescore", "agree", "combine", "equal"])
     ap.add_argument("--run", default="ultrabert-380m-v7b8ev")
     ap.add_argument("--short", type=int, default=300, help="texts in the slice (0: all)")
-    ap.add_argument("--set", default="short", choices=["short", "conll04", "m4"],
-                    help="M1 slice: short dev, CoNLL04 test, or the M4 business texts")
+    ap.add_argument("--set", default="short",
+                    help="M1 slice: short (dev), conll04 (test), m4 (business texts), or train:OFFSET "
+                         "(short training texts outside the held-out fifth, D1e)")
+    ap.add_argument("--floor", type=float, default=0.0,
+                    help="predict: keep candidates down to this far under the bar, two per pair (D1e)")
     ap.add_argument("--configs", default="base,ner+np:1,ner+np+nest:2")
     ap.add_argument("--runs", help="combine: label=run,... (baseline first), each run's --tag file")
     ap.add_argument("--judge", default="astra")
@@ -466,7 +489,7 @@ def main() -> int:
                     help="judge: only the texts of the hand-checked sample (hand-check.json)")
     a = ap.parse_args()
     if a.cmd == "predict":
-        predict(a.run, a.short, a.configs.split(","), a.tag, a.set)
+        predict(a.run, a.short, a.configs.split(","), a.tag, a.set, a.floor)
         return 0
     if a.cmd == "combine":
         return combine(a.run, a.runs.split(","), a.tag or "-n500")
