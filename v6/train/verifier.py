@@ -521,7 +521,7 @@ def score_m1(args) -> int:
             print(f"  {i}/{len(P['items'])}", flush=True)
     P2 = {**P, "margins": {**P["margins"], f"{args.config}+v": [new[i] for i in range(len(P['items']))]},
           "preds": {**P["preds"], f"{args.config}+v": P["preds"][args.config]}}
-    name2 = f"{args.name}-v-{args.run.split('-')[-1]}-{args.config}"
+    name2 = f"{args.name}-v-{args.tag or args.run.split('-')[-1]}-{args.config}"
     (OUT / f"preds-{name2}.pkl").write_bytes(pickle.dumps(P2))
     # the labels are the same facts: copy, adding the new config as a source of each fact
     from ..eval.m1_precision import labels_path
@@ -692,6 +692,7 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=13)
     ap.add_argument("--upload", action="store_true")
     ap.add_argument("--name", default="m1p3b-n500", help="score-m1: the M1 predictions file")
+    ap.add_argument("--tag", help="score-m1: the verifier's tag in the output name (default the run's last word)")
     ap.add_argument("--config", default="e1b", help="score-m1: the config whose predictions to re-rank")
     ap.add_argument("--base", default="ultrabert-380m-v8e-w1half", help="score-m2: the run whose top 4 to verify")
     ap.add_argument("--m2-set", default="v6/runs/m2-unseen/set.json")
