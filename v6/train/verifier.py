@@ -396,7 +396,7 @@ def train(args) -> int:
     model = Verifier(base, r=args.rank).to(device)
     opt = torch.optim.AdamW([{"params": list(model.ver.parameters()), "lr": args.lr},
                              {"params": list(model.head.parameters()), "lr": args.head_lr}], weight_decay=0.01)
-    steps = args.steps or (len(tr) * args.epochs) // args.batch
+    steps = int(args.steps or (len(tr) * args.epochs) // args.batch)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=[args.lr, args.head_lr], total_steps=steps,
                                                 pct_start=0.05, anneal_strategy="linear")
     w = torch.tensor([1.0, 1.0, args.neg_weight, args.hedge_weight], device=device)
