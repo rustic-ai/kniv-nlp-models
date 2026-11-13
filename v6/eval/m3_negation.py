@@ -386,12 +386,19 @@ SPEC = [
      "per:Sam Whitaker|he; org:Harbor City Hawks",
      "Sam Whitaker > member of sports team > Harbor City Hawks [hypothetical]"),
 ]
+# Part 2 (plan r4 C7): groups numbered from 11, in their own module.
+from .m3_hand_extra import SPEC_EXTRA  # noqa: E402
+SPEC = SPEC + SPEC_EXTRA
 
 # Form tag -> the family it is reported under.
 FAMILY = {"asserted": "asserted", "not": "negated", "never": "negated", "nolonger": "negated",
           "denied": "negated", "planned": "planned", "expected": "planned", "desired": "desired",
           "might": "hypothetical", "conditional": "hypothetical", "rumoured": "reported",
-          "reported": "reported", "question": "questioned"}
+          "reported": "reported", "question": "questioned",
+          # part 2 forms
+          "refused": "negated", "neither": "negated", "false": "negated", "yet": "negated",
+          "may": "hypothetical", "probably": "hypothetical", "would": "hypothetical",
+          "considering": "planned", "hopes": "desired", "allegedly": "reported", "claims": "reported"}
 
 
 # ── build ──────────────────────────────────────────────────────────
