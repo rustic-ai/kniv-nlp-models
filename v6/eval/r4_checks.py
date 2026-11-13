@@ -453,17 +453,97 @@ def m4_filter(run: str, naming: str = "user") -> None:
         print("  new-relation bar sweep, F1 (none / filter):\n   " + "\n   ".join(line))
 
 
+# ── V0: verifier cost on CPU ───────────────────────────────────────
+LAYERS = {"tiny": 7, "small": 10, "medium": 19, "large": 22, "xlarge-d": 24, "xlarge-u": 24}
+
+
+def v0(sizes: list[str], n_short: int = 100, n_doc: int = 50, cand_len: int = 20, pack: int = 8) -> None:
+    """Per model: today's CPU time per text (one ``window`` call: plain pass,
+    entities, marker pass, attributes), the candidates a verifier would read
+    (two per pair within 1.5 and 3 of the bar), and three verifier forms
+    costed from marker passes timed with the window's ids extended by one
+    candidate (``cand_len`` subwords) and by ``pack`` candidates: (full) one
+    pass per candidate; (b) ``pack`` candidates per pass; (a) the top 4 layers
+    re-run per candidate, estimated as 4/L of a full pass. The costs use the
+    band within 1.5 of the bar. One process, onnxruntime's default threads."""
+    import time
+    from huggingface_hub import snapshot_download
+    from kniv_v7 import Kniv
+    from ..gold.redocred import load_rel_items, relation_inventory
+    from ..label_bank import load as load_bank
+    from . import heldout_zs as hz
+    bank = {r["name"]: r for r in load_bank()["relations"]}
+    short = hz.load_short_dev(n_short)
+    names, _ = relation_inventory()
+    doc_rels = [{"name": n, "description": bank.get(n, {}).get("description", "")} for n in names]
+    doc_types = [{"name": n} for n in ("person", "organization", "location", "time", "number", "miscellaneous")]
+    docs = [{"tokens": it.tokens, "sentence_spans": it.layers["sentence_spans"]}
+            for it in load_rel_items("test", limit=n_doc)]
+    print("| model | text | words | today s/text | marker pass s | above bar | within 1.5 | within 3 | "
+          "full s | (b) packed s | (a) top-4 s | x today: full / b / a |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for size in sizes:
+        k = Kniv(snapshot_download(f"dragonscale-ai/kniv-v7-{size}-en", revision="v7.1.1"))
+        base_run, last = k.run, {}
+
+        def run(name, **x):
+            if name == "marker":
+                last["x"] = x
+            return base_run(name, **x)
+        k.run = run
+
+        def timed(x, extra):
+            ids = x["rm_input_ids"]
+            ext = np.concatenate([ids[:, :-1], np.resize(ids[:, 1:-1], (1, extra)), ids[:, -1:]], 1)
+            t0 = time.perf_counter()
+            base_run("marker", **{**x, "rm_input_ids": ext, "rm_attention_mask": np.ones_like(ext)})
+            return time.perf_counter() - t0
+
+        for label, items in (("short", short), ("doc", docs)):
+            today, mk, t1, tp, cnt = [], [], [], [], Counter()
+            zs0, top0 = k.zs_offset, k.top
+            words = 0
+            for it in items:
+                w = {"tokens": it["tokens"], "sentence_spans": it["sentence_spans"]}
+                rels, types = it.get("relations") or doc_rels, it.get("types") or doc_types
+                k.zs_offset = zs0
+                last.clear()
+                t0 = time.perf_counter()
+                k.window(w, rels, types, False, top0)
+                today.append(time.perf_counter() - t0)
+                words += len(it["tokens"])
+                if "x" not in last:
+                    continue
+                mk.append(timed(last["x"], 0)); t1.append(timed(last["x"], cand_len))
+                tp.append(timed(last["x"], cand_len * pack))
+                k.zs_offset = zs0 - 3.0
+                out = k.window(w, rels, types, False, 2)
+                ms = [f["margin"] - 3.0 for f in out["facts"]]
+                cnt["above"] += sum(m > 0 for m in ms)
+                cnt["1.5"] += sum(m > -1.5 for m in ms)
+                cnt["3"] += sum(m > -3 for m in ms)
+            k.zs_offset = zs0
+            m = len(items)
+            T, N = np.mean(today), cnt["1.5"] / m
+            c1, cp = np.mean(t1), np.mean(tp)
+            full, packed, topk = N * c1, np.ceil(N / pack) * cp, N * c1 * 4 / LAYERS[size]
+            print(f"| {size} | {label} | {words / m:.0f} | {T:.3f} | {np.mean(mk):.3f} | {cnt['above'] / m:.1f} | "
+                  f"{N:.1f} | {cnt['3'] / m:.1f} | {full:.2f} | {packed:.2f} | {topk:.2f} | "
+                  f"{(T + full) / T:.1f} / {(T + packed) / T:.1f} / {(T + topk) / T:.1f} |", flush=True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("cmd", choices=["k1", "k2-sample", "k2-score", "layers", "k3",
-                                    "k4-decode", "k4-judge", "k4-score", "m4-filter"])
+                                    "k4-decode", "k4-judge", "k4-score", "m4-filter", "v0"])
     ap.add_argument("--name", default="m1p3a-n500")
     ap.add_argument("--run", help="m4-filter: the run whose saved M4 rows to filter")
+    ap.add_argument("--sizes", default="large,xlarge-u,xlarge-d,tiny", help="v0: release sizes")
     a = ap.parse_args()
     {"k1": lambda: k1(a.name), "k2-sample": lambda: k2_sample(a.name), "k2-score": k2_score,
      "layers": lambda: layers(a.name), "k3": lambda: k3(a.name), "k4-decode": lambda: k4_decode(a.name),
      "k4-judge": lambda: k4_judge(a.name), "k4-score": lambda: k4_score(a.name),
-     "m4-filter": lambda: m4_filter(a.run)}[a.cmd]()
+     "m4-filter": lambda: m4_filter(a.run), "v0": lambda: v0(a.sizes.split(","))}[a.cmd]()
     return 0
 
 
