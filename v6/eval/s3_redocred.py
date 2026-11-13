@@ -52,6 +52,7 @@ def run_slice(a) -> None:
     ex.ver_on = False
     res["margin"] = slim(hz.predict(ex, its, "gold"))
     ex.use_verifier(a.verifier, threshold=0.5)      # m of a verified candidate: its log-odds
+    ex.ver_veto_frozen = False      # every near-bar candidate scored; the veto rule is read offline
     ex.margin_shift = hz.SHIFT
     ex.ver_on = True
     res["verifier"] = slim(hz.predict(ex, its, "gold"))
@@ -81,15 +82,24 @@ def combine(a) -> None:
                 for r in R["verifier"]]
         B = np.array([score_item(r, "gold") for r in rows], float)
         pb, d = f1(B.sum(0)), bootstrap(B, A)
-        print(f"  verifier at {t:.2f}: P {pb[0]:.3f} R {pb[1]:.3f} F1 {pb[2]:.3f}; "
-              f"- margin {100 * d[0]:+.1f} [{100 * d[1]:+.1f}, {100 * d[2]:+.1f}]")
+        # the deployed rule on these relations: the margin decides, the verifier vetoes below t
+        rows_v = []
+        for rm, rv in zip(R["margin"], R["verifier"]):
+            pv = {c["key"]: c["m"] for c in rv["cand"] if c["p"] is not None}     # log-odds
+            rows_v.append({**rm, "cand": [{**c, "m": c["m"] if pv.get(c["key"], 99) > lt else -1.0}
+                                          for c in rm["cand"]]})
+        C = np.array([score_item(r, "gold") for r in rows_v], float)
+        pc, e = f1(C.sum(0)), bootstrap(C, A)
+        print(f"  at {t:.2f}: verifier decides P {pb[0]:.3f} R {pb[1]:.3f} F1 {pb[2]:.3f} "
+              f"({100 * d[0]:+.1f} [{100 * d[1]:+.1f}, {100 * d[2]:+.1f}]); margin with veto "
+              f"P {pc[0]:.3f} R {pc[1]:.3f} F1 {pc[2]:.3f} ({100 * e[0]:+.1f} [{100 * e[1]:+.1f}, {100 * e[2]:+.1f}])")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--run", default="ultrabert-380m-v8p3-d123")
     ap.add_argument("--verifier", default="ultrabert-380m-v8p3-d123-ver1")
-    ap.add_argument("--thresholds", default="0.1,0.2,0.3,0.4,0.5,0.6,0.7", help="combine: thresholds to read")
+    ap.add_argument("--thresholds", default="0.02,0.05,0.1,0.2,0.3,0.5", help="combine: thresholds to read")
     ap.add_argument("--limit", type=int, default=100)
     ap.add_argument("--offset", type=int, default=0)
     ap.add_argument("--device")

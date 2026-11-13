@@ -114,6 +114,7 @@ class Extractor:
         # probability (stage 3: deciding them by the verifier cost 8 F1 on
         # Re-DocRED documents; the veto gains about 1).
         self.ver_veto = 0.1
+        self.ver_veto_frozen = True     # False: the verifier decides those too (guard-rail readings)
         self.rd_names = rd
 
     def use_verifier(self, run: str, threshold: float = 0.5, floor: float = 3.0,
@@ -298,18 +299,19 @@ class Extractor:
             m = row[1:] - row[0] + off
             order = np.argsort(-m)
             if ver:     # trained relations: the pair's two best candidates near the bar go to the verifier
+                veto_rd = frozen and self.ver_veto_frozen
                 decide = lambda k: (relations[k]["name"] in self.ver_trained
-                                    and not (frozen and relations[k]["name"] in self.rd_names))
+                                    and not (veto_rd and relations[k]["name"] in self.rd_names))
                 tr = [k for k in order if decide(k)][:2]
                 for k in tr:
                     if m[k] - self.margin_shift > -self.ver_floor:
                         vc.append((h, t, relations[k]["name"], False)); vm.append(float(m[k]))
                 for k in order[:top]:           # frozen-path relations above the bar: the verifier may veto
-                    if (frozen and relations[k]["name"] in self.rd_names and m[k] > 0
+                    if (veto_rd and relations[k]["name"] in self.rd_names and m[k] - self.margin_shift > 0
                             and relations[k]["name"] in self.ver_trained):
                         vc.append((h, t, relations[k]["name"], True)); vm.append(float(m[k]))
                 order = [k for k in order if not decide(k)
-                         and not (frozen and relations[k]["name"] in self.rd_names
+                         and not (veto_rd and relations[k]["name"] in self.rd_names
                                   and relations[k]["name"] in self.ver_trained)]
             for k in order[:top]:
                 if m[k] > 0:
