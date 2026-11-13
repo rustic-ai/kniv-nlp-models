@@ -151,7 +151,8 @@ def predict(ex, items: list[dict], mode: str) -> list[dict]:
         cand = []
         for f in facts:
             cand.append({"key": (keys[f["head"]], f["relation"], keys[f["tail"]]),
-                         "m": f["margin"] - SHIFT, "unseen": f["relation"] not in known})
+                         "m": f["margin"] - SHIFT, "unseen": f["relation"] not in known,
+                         "p": f.get("p")})
         out.append({"cand": cand, "gold": it["facts"], "item": it,
                     "ents": [(e.get("type"), [tuple(m) for m in e["mentions"]]) for e in ents]})
     return out
