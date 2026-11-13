@@ -521,7 +521,7 @@ def score_m1(args) -> int:
             print(f"  {i}/{len(P['items'])}", flush=True)
     P2 = {**P, "margins": {**P["margins"], f"{args.config}+v": [new[i] for i in range(len(P['items']))]},
           "preds": {**P["preds"], f"{args.config}+v": P["preds"][args.config]}}
-    name2 = f"{args.name}-v-{args.run.split('-')[-1]}"
+    name2 = f"{args.name}-v-{args.run.split('-')[-1]}-{args.config}"
     (OUT / f"preds-{name2}.pkl").write_bytes(pickle.dumps(P2))
     # the labels are the same facts: copy, adding the new config as a source of each fact
     from ..eval.m1_precision import labels_path
