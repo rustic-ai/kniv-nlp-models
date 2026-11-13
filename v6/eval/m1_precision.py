@@ -64,6 +64,9 @@ def load_set(name: str, n: int) -> list[dict]:
         off = int(name.partition(":")[2] or 0)
         items = hz.load_short_dev(off + n, split="train", keep=lambda i: not heldout_base(i))
         return items[off:off + n]
+    if name.startswith("dev:"):     # P3' (plan r4): short-dev texts after M1's 500
+        off = int(name.partition(":")[2])
+        return hz.load_short_dev(off + n)[off:off + n]
     if name == "conll04":
         return hz.load_conll04(n)
     if name == "m4":            # complete expected facts: m4_business scores it without a judge
@@ -481,8 +484,8 @@ def main() -> int:
     ap.add_argument("--run", default="ultrabert-380m-v7b8ev")
     ap.add_argument("--short", type=int, default=300, help="texts in the slice (0: all)")
     ap.add_argument("--set", default="short",
-                    help="M1 slice: short (dev), conll04 (test), m4 (business texts), or train:OFFSET "
-                         "(short training texts outside the held-out fifth, D1e)")
+                    help="M1 slice: short (dev), dev:OFFSET (short dev after M1's texts), conll04 (test), m4 "
+                         "(business texts), or train:OFFSET (short training texts outside the held-out fifth, D1e)")
     ap.add_argument("--floor", type=float, default=0.0,
                     help="predict: keep candidates down to this far under the bar, two per pair (D1e)")
     ap.add_argument("--configs", default="base,ner+np:1,ner+np+nest:2")
