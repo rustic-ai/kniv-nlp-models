@@ -262,11 +262,15 @@ def main() -> int:
             deployed[run], rows[run] = pickle.loads(cp.read_bytes())
             print(f"{run}: candidates from {cp}", flush=True)
             continue
-        ex = Extractor(run, device=args.device, local=args.local, span_boost=args.span_boost)
+        base_run, _, ver = run.partition("+ver@")   # "RUN+ver@T": RUN with its verifier at threshold T (plan r4 stage 3)
+        ex = Extractor(base_run, device=args.device, local=args.local, span_boost=args.span_boost)
         deployed[run] = dep = ex.unseen_offset
         ex.rel_offsets = {k: v + SHIFT for k, v in ex.rel_offsets.items()}
         ex.unseen_offset = dep - SHIFT
         ex.top = max(ex.top, 4)
+        if ver:
+            ex.use_verifier(f"{base_run}-ver1", threshold=float(ver))
+            ex.margin_shift = SHIFT
         rows[run] = {}
         for s, items in data.items():
             for mode in modes:
