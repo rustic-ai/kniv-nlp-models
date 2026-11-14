@@ -234,6 +234,7 @@ MODELS = {
 
 V71_DATE = "2026-11-03"
 V711_DATE = "2026-11-09"
+V712_DATE = "2026-11-13"
 
 # v7.1 per model: LitBank coreference (v7.0 -> v7.1), end-to-end speed-up at 500
 # words (fp32, INT8), and the model-specific changes.
@@ -348,7 +349,7 @@ knowledge against a schema you supply at inference time.
 |---|---|
 | developed by | Dragonscale ([{org}](https://huggingface.co/{org})) |
 | model type | multi-task transformer encoder |
-| version | kniv v7.1.1 (`{run}`), {v711_date}; v7.1 {v71_date}; v7.0 {date} |
+| version | kniv v7.1.2 (`{run}`), {v712_date}; v7.1.1 {v711_date}; v7.1 {v71_date}; v7.0 {date} |
 | base model | [{base}](https://huggingface.co/{base}) |
 | parameters | {params} |
 | input | up to 512 words per window ({window} subwords) |
@@ -512,6 +513,19 @@ at run time (see GUIDE.md).
 
 ## Changelog
 
+**v7.1.2 ({v712_date}).** A runtime fix; the weights and graphs are unchanged.
+Raw text was split into sentences at any period before a capital letter, so
+"Sen. Robert F. Kennedy" became three sentences and the name two entities
+("Robert F." and "Kennedy"); titles ("Dr. Smith"), initials ("J. K.
+Rowling"), abbreviated months ("Dec. 13") and dotted acronyms ("U.S. Army")
+broke the same way. Sentences no longer end after these, and the word
+tokenizer keeps them whole ("U.S.", "F.", "Dec.", "Inc."), as the Penn
+Treebank and CoNLL do. On CoNLL04 from raw text, end-to-end relation F1
+rises 1.1 to 3.8 points across the six v7 models; pre-tokenized input is
+unaffected. One known case goes the other way: a sentence ending in a
+single capital letter ("I met Mr. T. He was tall.") is not split. To get
+v7.1.1 back, download with `revision="v7.1.1"`.
+
 **v7.1.1 ({v711_date}).** A runtime fix; the weights, graphs and scores are unchanged.
 A window's only entity was dropped: the entity grouping step returned nothing
 below two entities. A text with one entity of the requested types gave no
@@ -619,7 +633,7 @@ def write(model: str, out: Path) -> None:
                        org=ORG, repo=m["repo"], choose=m["choose"], github=GITHUB,
                        window=m["window"], base_licence=m["base_licence"], hn=m["hn"], int8_speed=m["int8_speed"], int8_how=m.get("int8_how", ""), int8_drop=m["int8_drop"],
                        about=m["about"].format(org=ORG, other=m["other"], choose=m["choose"]),
-                       date=m["date"], v71_date=V71_DATE, v711_date=V711_DATE, v71=v71_notes(model), v71_weights=" apart from the entity-type prior" if V71[model][4] == "flat" else "", missed=m["missed"], limits=m["limits"], int8_note=m["int8_note"],
+                       date=m["date"], v71_date=V71_DATE, v711_date=V711_DATE, v712_date=V712_DATE, v71=v71_notes(model), v71_weights=" apart from the entity-type prior" if V71[model][4] == "flat" else "", missed=m["missed"], limits=m["limits"], int8_note=m["int8_note"],
                        qs_note=m["qs_note"], size=m["size"], family=family(model),
                        lme0=s["lme"][0], lme1=s["lme"][1],
                        lme2=s["lme"][2], lme3=s["lme"][3],
