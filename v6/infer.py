@@ -95,7 +95,7 @@ class Extractor:
         # ("Northwind" / "Northwind 's plant"); keep the highest-margin one (v8 M1).
         self.merge_variants = False
         # v8 plan r4 V1: a fact verifier decides the relations it was trained
-        # on (candidates down to ``ver_floor`` under the bar, two per pair,
+        # on (candidates down to ``ver_floor`` under the bar, ``top`` per pair,
         # kept when its probability of "expressed" reaches ``ver_threshold``);
         # every other relation keeps the margin rule. See ``use_verifier``.
         self.verifier = None
@@ -310,11 +310,11 @@ class Extractor:
         for (h, t), row in zip(zip(b["pair_h"].tolist(), b["pair_t"].tolist()), lg):
             m = row[1:] - row[0] + off
             order = np.argsort(-m)
-            if ver:     # trained relations: the pair's two best candidates near the bar go to the verifier
+            if ver:     # trained relations: the pair's best candidates near the bar go to the verifier
                 veto_rd = frozen and self.ver_veto_frozen
                 decide = lambda k: (relations[k]["name"] in self.ver_trained
                                     and not (veto_rd and relations[k]["name"] in self.rd_names))
-                tr = [k for k in order if decide(k)][:2]
+                tr = [k for k in order if decide(k)][:top]      # as many per pair as the margin path keeps
                 for k in tr:
                     if m[k] - self.margin_shift > -self.ver_floor:
                         vc.append((h, t, relations[k]["name"], False)); vm.append(float(m[k]))
