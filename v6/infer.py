@@ -368,22 +368,22 @@ def verdict_attributes(pol: list[float], mod: list[float], verdict: list[float])
     """Polarity and modality of a verified fact (plan r4 stage 3): the
     verifier's verdict (supported, not supported, negated, hedged) decides
     negative polarity and whether the modality is asserted; the attribute
-    head's probabilities pick which non-asserted modality a hedged fact has
-    (and the modality of a negated one). Inputs and outputs are probability
-    lists in ``schemas.POLARITIES`` / ``schemas.MODALITIES`` order."""
+    head's probabilities pick which non-asserted modality a hedged fact has.
+    A negated fact is asserted (the head read negation as non-asserted on
+    the M3 hand set; "X did not join" asserts the negation). Inputs and
+    outputs are probability lists in ``schemas.POLARITIES`` /
+    ``schemas.MODALITIES`` order."""
     from .schemas import MODALITIES
     k = int(np.argmax([verdict[0], verdict[2], verdict[3]]))        # among the expressed verdicts
     pol2 = [0.0, 1.0] if k == 1 else [1.0, 0.0]
     a = MODALITIES.index("asserted")
-    if k == 0:
+    if k in (0, 1):
         mod2 = [1.0 if i == a else 0.0 for i in range(len(MODALITIES))]
-    elif k == 2:
+    else:
         rest = [0.0 if i == a else x for i, x in enumerate(mod)]
         s = sum(rest)
         mod2 = [x / s for x in rest] if s > 0 else [0.0 if i == a else 1.0 / (len(MODALITIES) - 1)
                                                     for i in range(len(MODALITIES))]
-    else:
-        mod2 = list(mod)
     return pol2, mod2
 
 
