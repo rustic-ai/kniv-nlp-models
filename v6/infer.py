@@ -155,10 +155,19 @@ class Extractor:
                 exs.append(e); idx.append(j)
         out: list[float | None] = [None] * len(cands)     # None: too long to verify
         bs = 16 if len(rec["tokens"]) < 200 else 4       # long windows: 1,024-subword inputs
-        for i in range(0, len(exs), bs):
-            lg = self.verifier(vcollate(exs[i:i + bs], self.tok.pad_token_id, self.device))
-            for j, p in zip(idx[i:i + bs], (1 - torch.softmax(lg, -1)[:, 1]).tolist()):
-                out[j] = p
+        # The verifier runs the relation module's pair features on its own
+        # batch; keep the relation pass's cached state, which the fact
+        # attribute head (polarity, modality) reads after this step.
+        rel = self.model.relation
+        saved = {k: getattr(rel, k) for k in ("_ent", "_pair_in", "_pair", "_labels") if hasattr(rel, k)}
+        try:
+            for i in range(0, len(exs), bs):
+                lg = self.verifier(vcollate(exs[i:i + bs], self.tok.pad_token_id, self.device))
+                for j, p in zip(idx[i:i + bs], (1 - torch.softmax(lg, -1)[:, 1]).tolist()):
+                    out[j] = p
+        finally:
+            for k, v in saved.items():
+                setattr(rel, k, v)
         if self.device.type == "mps":
             torch.mps.empty_cache()
         return out

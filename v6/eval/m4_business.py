@@ -861,6 +861,13 @@ def score(run: str, local: bool, naming: str, modes: list[str], device: str) -> 
     ex.rel_offsets = {k: v + SHIFT for k, v in ex.rel_offsets.items()}
     ex.unseen_offset -= SHIFT
     ex.top = max(ex.top, 4)
+    import os
+    tag = ""
+    if os.environ.get("KNIV_VERIFIER"):     # plan r4 stage 3: the verifier decides the relations it was trained on
+        ex.use_verifier(os.environ["KNIV_VERIFIER"], threshold=float(os.environ.get("KNIV_VER_THRESHOLD", "0.48")))
+        ex.margin_shift = SHIFT
+        tag = "-ver"
+    run_file = run + tag
     rels, _ = schema(naming)
     bank = {r["name"] for r in load_bank()["relations"]}
     bank_suite = {r["name"] for r in RELATIONS if (BANK_NAME.get(r["name"]) if naming == "bank" else r["name"]) in bank}
@@ -875,15 +882,15 @@ def score(run: str, local: bool, naming: str, modes: list[str], device: str) -> 
         s["sweep_new_relation_bar"] = sweep
         s["seconds"] = time.time() - t0
         res[mode] = s
-        (OUT / f"rows-{run}-{naming}-{mode}.json").write_text(json.dumps(
+        (OUT / f"rows-{run_file}-{naming}-{mode}.json").write_text(json.dumps(
             [{"id": r["id"], "cand": [{**c, "key": [sorted(x) if isinstance(x, frozenset) else x for x in c["key"]]}
                                       for c in r["cand"]], "ents": r["ents"]} for r in rows], default=list))
         print(report(f"{run}, {naming} names, {mode} entities", s), flush=True)
         print("bar sweep (F1 by new-relation offset delta): "
               + " ".join(f"{k}:{v:.3f}" for k, v in sweep.items()), flush=True)
         print(f"[{s['seconds']:.0f}s]\n", flush=True)
-    (OUT / f"score-{run}-{naming}.json").write_text(json.dumps(res, indent=1, default=list))
-    print(f"written {OUT / f'score-{run}-{naming}.json'}")
+    (OUT / f"score-{run_file}-{naming}.json").write_text(json.dumps(res, indent=1, default=list))
+    print(f"written {OUT / f'score-{run_file}-{naming}.json'}")
     return 0
 
 
