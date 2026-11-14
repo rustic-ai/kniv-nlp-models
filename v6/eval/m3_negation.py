@@ -566,9 +566,14 @@ def predict(items: list[dict], modes: list[str], device: str = "cpu", run: str |
     import torch
     from ..infer import Extractor
     from ..train.gold_eval import CKPT_DIR
+    import os
     if run:
         ex = exb = Extractor(run, device=device)
         exs = (ex,)
+        if os.environ.get("KNIV_VERIFIER"):     # plan r4 stage 3: verified facts read polarity / modality from the verdict
+            ex.use_verifier(os.environ["KNIV_VERIFIER"],
+                            threshold=float(os.environ.get("KNIV_VER_THRESHOLD", "0.48")))
+            ex.margin_shift = SHIFT
     else:
         ex = Extractor(RUN, device=device, local=CKPT_DIR)
         exb = Extractor(HEADS["attrv8b"], device=device, local=CKPT_DIR)
@@ -628,9 +633,16 @@ def predict(items: list[dict], modes: list[str], device: str = "cpu", run: str |
                             att[hn] = (torch.softmax(a["polarity"], -1).cpu().numpy(),
                                        torch.softmax(a["modality"], -1).cpu().numpy())
                     for j, f in enumerate(facts):
+                        at = {hn: (v[0][j].tolist(), v[1][j].tolist()) for hn, v in att.items()}
+                        if ex.verifier is not None and run:
+                            from ..infer import verdict_attributes
+                            pol, mod = at[run]
+                            v = verdict_attributes(pol, mod, f["verdict"]) if "verdict" in f else (pol, mod)
+                            at[run + "+verall"] = v                                   # every fact it read
+                            at[run + "+ver"] = (pol, mod) if f.get("vetoable") else v   # only facts it decided
                         cand.append({"h": keys[f["head"]], "r": f["relation"], "t": keys[f["tail"]],
                                      "m": f["margin"] - SHIFT, "unseen": f["relation"] not in ex.rel_offsets,
-                                     "attr": {hn: (v[0][j].tolist(), v[1][j].tolist()) for hn, v in att.items()}})
+                                     "verified": "verdict" in f, "attr": at})
                 rows[mode].append({"id": it["id"], "cand": cand})
             if n % 100 == 0:
                 print(f"  {n}/{len(items)} [{time.time() - t0:.0f}s]", flush=True)
@@ -893,7 +905,8 @@ def main() -> int:
     d = predict(items, a.modes.split(","), a.device, a.run)
     OUT.mkdir(parents=True, exist_ok=True)
     tag = f"{a.set}-{lo or 0}-{hi if hi is not None else 'end'}"
-    tag = f"run-{a.run}-{tag}" if a.run else tag
+    import os
+    tag = f"run-{a.run}{'-ver' if os.environ.get('KNIV_VERIFIER') else ''}-{tag}" if a.run else tag
     (OUT / f"preds-{tag}.pkl").write_bytes(pickle.dumps(d))
     print(f"written {OUT / f'preds-{tag}.pkl'}; relation check {d['check']}")
     return 0

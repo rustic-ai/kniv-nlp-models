@@ -154,6 +154,7 @@ class Extractor:
             if e is not None:
                 exs.append(e); idx.append(j)
         out: list[float | None] = [None] * len(cands)     # None: too long to verify
+        self._last_verdicts: dict[int, list[float]] = {}   # candidate -> P(supported, not, negated, hedged)
         bs = 16 if len(rec["tokens"]) < 200 else 4       # long windows: 1,024-subword inputs
         # The verifier runs the relation module's pair features on its own
         # batch; keep the relation pass's cached state, which the fact
@@ -163,8 +164,10 @@ class Extractor:
         try:
             for i in range(0, len(exs), bs):
                 lg = self.verifier(vcollate(exs[i:i + bs], self.tok.pad_token_id, self.device))
-                for j, p in zip(idx[i:i + bs], (1 - torch.softmax(lg, -1)[:, 1]).tolist()):
+                pr = torch.softmax(lg, -1).float().cpu()
+                for j, p, v in zip(idx[i:i + bs], (1 - pr[:, 1]).tolist(), pr.tolist()):
                     out[j] = p
+                    self._last_verdicts[j] = v
         finally:
             for k, v in saved.items():
                 setattr(rel, k, v)
@@ -332,15 +335,20 @@ class Extractor:
             lt = float(np.log(self.ver_threshold) - np.log1p(-self.ver_threshold))
             lv = float(np.log(self.ver_veto) - np.log1p(-self.ver_veto))
             probs = self._verify(w, nodes, spans, parts, [c[:3] for c in vc])
-            for (h, t, rel, veto), m, p in zip(vc, vm, probs):
+            verd = self._last_verdicts
+            for j, ((h, t, rel, veto), m, p) in enumerate(zip(vc, vm, probs)):
                 if p is not None:
                     q = min(max(p, 1e-6), 1 - 1e-6)
                     lo = float(np.log(q) - np.log1p(-q))
                     # a vetoable fact keeps its margin unless the verifier is below the veto
                     m = min(m, self.margin_shift + lo - lv) if veto else self.margin_shift + lo - lt
                 if m > 0:
-                    facts.append({"head": h, "relation": rel, "tail": t, "margin": round(m, 3),
-                                  "p": None if p is None else round(p, 4)})
+                    f = {"head": h, "relation": rel, "tail": t, "margin": round(m, 3),
+                         "p": None if p is None else round(p, 4)}
+                    if j in verd:       # the verifier read it: its verdict (polarity / modality, verdict_attributes)
+                        f["verdict"] = verd[j]
+                        f["vetoable"] = veto
+                    facts.append(f)
         return nodes, facts
 
     def extract(self, text: str | None = None, turns=None, relations: list[dict] = (),
@@ -354,6 +362,29 @@ class Extractor:
                 facts = merge_variants(nodes, facts)
             out.append({"tokens": w["tokens"], "entities": nodes, "facts": facts})
         return out
+
+
+def verdict_attributes(pol: list[float], mod: list[float], verdict: list[float]) -> tuple[list[float], list[float]]:
+    """Polarity and modality of a verified fact (plan r4 stage 3): the
+    verifier's verdict (supported, not supported, negated, hedged) decides
+    negative polarity and whether the modality is asserted; the attribute
+    head's probabilities pick which non-asserted modality a hedged fact has
+    (and the modality of a negated one). Inputs and outputs are probability
+    lists in ``schemas.POLARITIES`` / ``schemas.MODALITIES`` order."""
+    from .schemas import MODALITIES
+    k = int(np.argmax([verdict[0], verdict[2], verdict[3]]))        # among the expressed verdicts
+    pol2 = [0.0, 1.0] if k == 1 else [1.0, 0.0]
+    a = MODALITIES.index("asserted")
+    if k == 0:
+        mod2 = [1.0 if i == a else 0.0 for i in range(len(MODALITIES))]
+    elif k == 2:
+        rest = [0.0 if i == a else x for i, x in enumerate(mod)]
+        s = sum(rest)
+        mod2 = [x / s for x in rest] if s > 0 else [0.0 if i == a else 1.0 / (len(MODALITIES) - 1)
+                                                    for i in range(len(MODALITIES))]
+    else:
+        mod2 = list(mod)
+    return pol2, mod2
 
 
 def _nests(a: dict, b: dict) -> bool:
