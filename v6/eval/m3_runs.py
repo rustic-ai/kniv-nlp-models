@@ -70,7 +70,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--base", required=True)
     ap.add_argument("--other", nargs="+", required=True)
+    ap.add_argument("--loose-det", action="store_true", help="end to end, ignore a leading the / a / an")
     a = ap.parse_args()
+    m3.LOOSE_DET = a.loose_det
     spec = lambda s: (s.split(":")[0], s.split(":")[1] if ":" in s else s.split(":")[0].removesuffix("-ver"))
     cfgs = [spec(a.base)] + [spec(x) for x in a.other]
     R = {c: rows_of(*c) for c in cfgs}

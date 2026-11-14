@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import pickle
 import time
 from collections import Counter, defaultdict
@@ -658,11 +659,20 @@ def _mentions(it: dict, k) -> set:
     return {" ".join(it["tokens"][a:b]).lower() for a, b in it["entities"][k]["spans"]}
 
 
+# End to end, a mention matches the expected one by its text; with LOOSE_DET a
+# leading "the" / "a" / "an" is ignored on both sides ("the Bluefin Rowing
+# Club" for "Bluefin Rowing Club"), as the M1 judge would accept it.
+LOOSE_DET = False
+_DET = re.compile(r"^(?:the|a|an) ")
+
+
 def _arg(it, mode, key, k) -> bool:
     if isinstance(k, str) or isinstance(key, str):
         return key == k
     if mode == "gold":
         return key == k
+    if LOOSE_DET:
+        return bool({_DET.sub("", x) for x in key} & {_DET.sub("", x) for x in _mentions(it, k)})
     return bool(set(key) & _mentions(it, k))
 
 
