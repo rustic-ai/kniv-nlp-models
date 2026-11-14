@@ -887,7 +887,7 @@ def score(run: str, local: bool, naming: str, modes: list[str], device: str) -> 
     if os.environ.get("KNIV_VERIFIER"):     # plan r4 stage 3: the verifier decides the relations it was trained on
         ex.use_verifier(os.environ["KNIV_VERIFIER"], threshold=float(os.environ.get("KNIV_VER_THRESHOLD", "0.48")))
         ex.margin_shift = SHIFT
-        tag = "-ver"
+        tag = "-ver" if os.environ["KNIV_VERIFIER"].endswith("-ver1") else "-" + os.environ["KNIV_VERIFIER"].split("-")[-1]
     if ex.trim_det:                          # KNIV_TRIM_DET=1: leading articles trimmed from mentions
         tag += "-det"
     if ex.unseen_ex is not None:             # KNIV_UNSEEN_FROM=RUN: never-trained relations through RUN

@@ -558,8 +558,13 @@ def k_loss(lg: torch.Tensor, y: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
 def evaluate(model, exs, pad, device, bs: int = 32) -> dict:
     model.eval()
     P, Y, S = [], [], []
-    for i in range(0, len(exs), bs):
-        chunk = exs[i:i + bs]
+    i = 0
+    while i < len(exs):
+        k = 1                               # as many as fit bs x 384 squared (long windows: a few)
+        while i + k < len(exs) and k < bs and (k + 1) * max(len(e["ids"]) for e in exs[i:i + k + 1]) ** 2 <= bs * 384 ** 2:
+            k += 1
+        chunk = exs[i:i + k]
+        i += k
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
             lg = model(collate(chunk, pad, device))
         P.append(torch.softmax(lg, -1).cpu().numpy()); Y += [e["y"] for e in chunk]; S += [e["src"] for e in chunk]
@@ -588,6 +593,34 @@ def evaluate(model, exs, pad, device, bs: int = 32) -> dict:
         sel = np.array([x == s for x in S])
         res[f"acc_{s}"] = float((pred[sel] == Y[sel]).mean())
     return res
+
+
+def next_batch(tr: list, order: list, longq: list, batch: int, max_tokens: int) -> list:
+    """Up to ``batch`` examples within a memory budget of ``batch`` x
+    ``max_tokens``² (every layer's attention map is kept for backward, so
+    memory grows with the square of the length). Examples
+    too long for a full batch wait in ``longq`` (mutated) and go out in a
+    batch of their own when one more would pass the budget, or when
+    ``order`` runs out; short ones drawn meanwhile go back to ``order``."""
+    idx = []
+    while order and len(idx) < batch:
+        j = order.pop()
+        n = len(tr[j]["ids"])
+        if n <= max_tokens:
+            idx.append(j)
+            continue
+        if longq and (len(longq) + 1) * max(n, *(len(tr[x]["ids"]) for x in longq)) ** 2 > batch * max_tokens ** 2:
+            out = list(longq)
+            longq[:] = [j]
+            order.extend(idx)
+            return out
+        longq.append(j)
+    if not order and longq:
+        order.extend(idx)
+        out = list(longq)
+        longq[:] = []
+        return out
+    return idx
 
 
 def train(args) -> int:
@@ -619,12 +652,15 @@ def train(args) -> int:
     loss_fn = nn.CrossEntropyLoss(weight=w) if len(verdicts) == len(VERDICTS) else (lambda lg, y: k_loss(lg, y, w))
     out = Path(args.out_dir or f"data/v6-eval/checkpoints/{args.out_run}")
     out.mkdir(parents=True, exist_ok=True)
-    best, t0, order = -1.0, time.time(), []
+    best, t0, order, longq = -1.0, time.time(), [], []
     model.train()
     for step in range(1, steps + 1):
         if not order:
             order = list(range(len(tr))); rng.shuffle(order)
-        idx = [order.pop() for _ in range(min(args.batch, len(order)))]
+        idx = next_batch(tr, order, longq, args.batch, args.max_tokens)
+        if not idx:
+            order = list(range(len(tr))); rng.shuffle(order)
+            idx = next_batch(tr, order, longq, args.batch, args.max_tokens)
         b = collate([tr[i] for i in idx], tok.pad_token_id, device)
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
             lg = model(b)
@@ -912,6 +948,8 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--head-lr", type=float, default=1e-3)
     ap.add_argument("--batch", type=int, default=32)
+    ap.add_argument("--max-tokens", type=int, default=384,
+                    help="train: longer examples go in batches of their own, within batch x max-tokens squared")
     ap.add_argument("--epochs", type=float, default=1.0)
     ap.add_argument("--steps", type=int)
     ap.add_argument("--eval-every", type=int, default=1000)
