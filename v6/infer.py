@@ -101,6 +101,7 @@ class Extractor:
         self.verifier = None
         self.ver_threshold = 0.5
         self.ver_floor = 3.0
+        self.ver_log = None             # a list: every verified candidate (pre-verifier margin, p, verdict) is appended
         self.ver_top = None             # candidates verified per pair (None: ``top``, as many as the margin path keeps)
         self.ver_trained: set[str] = set()
         self.ver_on = True
@@ -343,6 +344,10 @@ class Extractor:
                     lo = float(np.log(q) - np.log1p(-q))
                     # a vetoable fact keeps its margin unless the verifier is below the veto
                     m = min(m, self.margin_shift + lo - lv) if veto else self.margin_shift + lo - lt
+                if self.ver_log is not None:
+                    self.ver_log.append({"head": h, "tail": t, "relation": rel, "vetoable": veto,
+                                         "m": round(vm[j] - self.margin_shift, 3), "p": p,
+                                         "verdict": verd.get(j)})
                 if m > 0:
                     f = {"head": h, "relation": rel, "tail": t, "margin": round(m, 3),
                          "p": None if p is None else round(p, 4)}
