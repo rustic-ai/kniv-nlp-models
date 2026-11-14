@@ -34,7 +34,6 @@ RAW = Path(__file__).resolve().parents[1] / "corpus" / "output" / "raw"
 
 # Sentence splitting is used ONLY to record spans inside a window. It is
 # never a unit of training, and never decides what the model sees.
-_SENT_END = re.compile(r"(?<=[.!?])[\"')\]]*\s+(?=[A-Z0-9\"'(\[])")
 
 # Canonical tokenization, fixed here once for every annotator. Whitespace
 # splitting is not adequate: it leaves "coffee.", "str.find" and
@@ -155,8 +154,12 @@ class Document:
 
 
 def split_sentences(text: str) -> list[str]:
-    parts = [p.strip() for p in _SENT_END.split(text) if p.strip()]
-    return parts or ([text.strip()] if text.strip() else [])
+    """The release runtime's splitter (``kniv_v7.windows``, v7.1.2): no cut
+    after titles, months, initials or dotted acronyms. The v6 and v7 training
+    corpora were built with the earlier rule (a cut at any . ! ? before a
+    capital, digit or quote), which split "Sen. Robert F. Kennedy" in three."""
+    from kniv_v7.windows import split_sentences as runtime_split
+    return runtime_split(text)
 
 
 # ── adapters ─────────────────────────────────────────────────────
