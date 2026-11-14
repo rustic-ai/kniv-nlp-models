@@ -428,12 +428,16 @@ def equal(run: str, judge_name: str, version: str, boot: int = 2000, pool: list[
             for k, m in P["margins"][c][i].items():
                 f = next((f for f in t["facts"] if c in f["src"]
                           and _same((set(f["key"][0]), f["key"][1], set(f["key"][2])), k)), None)
-                rows[c].append((i, m, f is not None and f["verdict"] in POSITIVE))
+                ok = f is not None and f["verdict"] in POSITIVE
+                # recall counts only facts inside the pool (frozen: its configs' and the teacher's)
+                inpool = ok and (pool is None or bool(set(f["src"]) & (set(pool) | {"teacher"})))
+                rows[c].append((i, m, ok, inpool))
 
     def curve(c):
         r = sorted(rows[c], key=lambda x: -x[1])
         ok = np.cumsum([x[2] for x in r])
-        return np.array([x[1] for x in r]), ok / np.arange(1, len(r) + 1), ok / total
+        hit = np.cumsum([x[3] for x in r])
+        return np.array([x[1] for x in r]), ok / np.arange(1, len(r) + 1), hit / total
 
     base = cfgs[0]
     _, p0, r0 = curve(base)
@@ -456,7 +460,7 @@ def equal(run: str, judge_name: str, version: str, boot: int = 2000, pool: list[
 
     def per_text(c, cut):
         a = np.zeros((len(texts), 2))
-        for i, m, ok in rows[c]:
+        for i, m, ok, _ in rows[c]:
             if m >= cut:
                 a[i] += [ok, 1]
         return a[keep]
