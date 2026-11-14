@@ -262,8 +262,13 @@ def main() -> int:
             deployed[run], rows[run] = pickle.loads(cp.read_bytes())
             print(f"{run}: candidates from {cp}", flush=True)
             continue
-        base_run, _, ver = run.partition("+ver@")   # "RUN+ver@T": RUN with its verifier at threshold T (plan r4 stage 3)
+        import os
+        os.environ.pop("KNIV_UNSEEN_FROM", None)
+        if "+e1u" in run:                           # "...+e1u": never-trained relations through E1b's relation step
+            os.environ["KNIV_UNSEEN_FROM"] = "ultrabert-380m-v8e-w1half"
+        base_run, _, ver = run.replace("+det", "").replace("+e1u", "").partition("+ver@")   # "RUN+ver@T": RUN with its verifier at threshold T (plan r4 stage 3)
         ex = Extractor(base_run, device=args.device, local=args.local, span_boost=args.span_boost)
+        ex.trim_det = "+det" in run                 # "...+det": leading articles trimmed from mentions
         deployed[run] = dep = ex.unseen_offset
         ex.rel_offsets = {k: v + SHIFT for k, v in ex.rel_offsets.items()}
         ex.unseen_offset = dep - SHIFT

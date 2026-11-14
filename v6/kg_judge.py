@@ -154,6 +154,7 @@ def judge_prompt(it: dict, facts: list[dict]) -> str:
 
 class CandJudge(KGAnnotator):
     prompt = "kgcand"            # "kgcand2": the stricter c2 judge
+    layer = "kgcand"             # "kgcandk": verdicts with the hedge kind (prompt kgcand3k)
 
     def build_messages(self, layer: str, item) -> list[dict]:
         return [{"role": "system", "content": SYSTEM[self.prompt]},
@@ -164,7 +165,7 @@ async def _run(ann, items: list, tag: str) -> dict:
     logger = RunLogger(OUT / tag, every=25)
     out = {}
     try:
-        for coro in asyncio.as_completed([ann.annotate_and_cache("kgcand", it) for it in items]):
+        for coro in asyncio.as_completed([ann.annotate_and_cache(ann.layer, it) for it in items]):
             r = await coro
             logger.record(r, (ann.spec.price_in, ann.spec.price_out), len(items))
             out[r.item_id] = r

@@ -158,6 +158,20 @@ def validate_payload(layer: str, payload: object, n: int,
         return {int(v["fact"]): v["verdict"] for v in payload
                 if isinstance(v, dict) and "fact" in v and v.get("verdict") in KGCAND_VERDICTS}, None, None
 
+    if layer == "kgcandk":                       # verdict, and "hedged:<kind>" for a hedged fact
+        from ..schemas import HEDGE_KINDS, KGCAND_VERDICTS
+        if isinstance(payload, dict):
+            return {int(k): v for k, v in payload.items()}, None, None
+        if not isinstance(payload, list):
+            return None, "verdicts is not a list", "parse"
+        out = {}
+        for v in payload:
+            if isinstance(v, dict) and "fact" in v and v.get("verdict") in KGCAND_VERDICTS:
+                k = v.get("kind")
+                out[int(v["fact"])] = (f"hedged:{k}" if v["verdict"] == "hedged" and k in HEDGE_KINDS
+                                       else v["verdict"])
+        return out, None, None
+
     if layer in ("kgvar", "kgvar4"):
         if isinstance(payload, dict):            # a cached, already-parsed payload
             return payload, None, None

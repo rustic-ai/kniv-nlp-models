@@ -916,7 +916,8 @@ def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     tag = f"{a.set}-{lo or 0}-{hi if hi is not None else 'end'}"
     import os
-    tag = f"run-{a.run}{'-ver' if os.environ.get('KNIV_VERIFIER') else ''}-{tag}" if a.run else tag
+    tag = (f"run-{a.run}{'-ver' if os.environ.get('KNIV_VERIFIER') else ''}"
+           f"{'-det' if os.environ.get('KNIV_TRIM_DET') == '1' else ''}-{tag}") if a.run else tag
     (OUT / f"preds-{tag}.pkl").write_bytes(pickle.dumps(d))
     print(f"written {OUT / f'preds-{tag}.pkl'}; relation check {d['check']}")
     return 0

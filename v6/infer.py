@@ -37,10 +37,35 @@ import torch
 UNSEEN_ID = 10 ** 6          # columns the bank does not know: never routed to the frozen path
 
 
+ARTICLES = {"the", "a", "an"}
+
+
+def trim_articles(tokens: list[str], sp: list, nodes: list[dict]) -> list[dict]:
+    """The returned mentions without a leading article, on mentions of two
+    words or more: always when lower case, at a sentence start when
+    capitalised ("The Hague" mid-sentence stays). Only what is reported
+    changes: the relation and verifier passes read the entity step's spans."""
+    starts = {int(s) for s, _ in sp}
+
+    def cut(a, b):
+        t = tokens[a]
+        return (a + 1, b) if b - a > 1 and (t in ARTICLES or (a in starts and t.lower() in ARTICLES)) else (a, b)
+    out = []
+    for n in nodes:
+        if n.get("speaker") or not n.get("spans"):
+            out.append(n)
+            continue
+        ms = [cut(int(a), int(b)) for a, b in n["spans"]]
+        out.append({**n, "text": " ".join(tokens[ms[0][0]:ms[0][1]]),
+                    "mentions": [" ".join(tokens[a:b]) for a, b in ms], "spans": ms,
+                    "model_spans": n["spans"]})
+    return out
+
+
 class Extractor:
     def __init__(self, run: str = "deberta-v3-large-p2-zs-v62-ftr", device=None,
                  local: Path | None = None, zs_offset: float | None = None,
-                 span_offset: float | None = None, span_boost: float | None = None):
+                 span_offset: float | None = None, span_boost: float | None = None, _nested: bool = False):
         from .train.gold_eval import HF_REPO, load_run
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else
                                               "mps" if torch.backends.mps.is_available() else "cpu"))
@@ -118,6 +143,18 @@ class Extractor:
         self.ver_veto = 0.05
         self.ver_veto_frozen = True     # False: the verifier decides those too (guard-rail readings)
         self.rd_names = rd
+        # Plan r4 review step 2: drop a leading article ("the", "a", "an";
+        # capitalised only at a sentence start) from every entity mention.
+        import os as _os
+        self.trim_det = _os.environ.get("KNIV_TRIM_DET") == "1"
+        # Review step 4: relations the verifier does not decide and that have
+        # no offset of their own (never-trained ones) go to another run's
+        # relation step on the same entities (KNIV_UNSEEN_FROM=RUN; the two
+        # runs must share the encoder body). Its bar moves with this one's.
+        self._unseen0 = self.unseen_offset
+        self.unseen_ex = None
+        if _os.environ.get("KNIV_UNSEEN_FROM") and not _nested:
+            self.unseen_ex = Extractor(_os.environ["KNIV_UNSEEN_FROM"], device=str(self.device), _nested=True)
 
     def use_verifier(self, run: str, threshold: float = 0.5, floor: float = 3.0,
                      trained: set[str] | None = None) -> None:
@@ -130,14 +167,15 @@ class Extractor:
             from huggingface_hub import hf_hub_download
             path = Path(hf_hub_download(HF_REPO, f"{run}/verifier.pt", local_dir=str(CKPT_DIR)))
         ck = torch.load(path, map_location="cpu", weights_only=False)
-        m = Verifier(self.model, r=ck["rank"]).to(self.device)
+        from .train.verifier import VERDICTS
+        m = Verifier(self.model, r=ck["rank"], n_out=len(ck.get("verdicts", VERDICTS))).to(self.device)
         m.ver.load_state_dict(ck["ver"]); m.head.load_state_dict(ck["head"])
         m.eval()
         from .label_bank import load as load_bank
         self.verifier = m
         self.ver_bank = {r["name"]: r for r in load_bank()["relations"]}
         self.ver_threshold, self.ver_floor = float(threshold), float(floor)
-        self.ver_trained = set(trained) if trained is not None else trained_relations()
+        self.ver_trained = set(trained) if trained is not None else trained_relations(ck.get("data", "verifier_v1.json"))
 
     @torch.no_grad()
     def _verify(self, w: dict, nodes: list[dict], spans: list, parts: list, cands: list) -> list:
@@ -169,7 +207,8 @@ class Extractor:
                 pr = torch.softmax(lg, -1).float().cpu()
                 for j, p, v in zip(idx[i:i + bs], (1 - pr[:, 1]).tolist(), pr.tolist()):
                     out[j] = p
-                    self._last_verdicts[j] = v
+                    # V1c's eight verdicts: the four of VERDICTS (kinds summed), then the five kinds
+                    self._last_verdicts[j] = v if len(v) == 4 else v[:3] + [sum(v[3:])] + v[3:]
         finally:
             for k, v in saved.items():
                 setattr(rel, k, v)
@@ -254,6 +293,25 @@ class Extractor:
     # ── relations ────────────────────────────────────────────────────
     @torch.no_grad()
     def _relations(self, w: dict, ents: list[dict], relations: list[dict], top: int):
+        o = self.unseen_ex
+        if o is None or self.verifier is None or not self.ver_on:
+            return self._relations_own(w, ents, relations, top)
+        routed = [r for r in relations if r["name"] not in self.ver_trained and r["name"] not in self.rel_offsets]
+        if not routed:
+            return self._relations_own(w, ents, relations, top)
+        names = {r["name"] for r in routed}
+        keep = [r for r in relations if r["name"] not in names]
+        o.unseen_offset = o._unseen0 - (self._unseen0 - self.unseen_offset)
+        o.rel_offsets, o.top, o.trim_det = {}, self.top, self.trim_det
+        n2, f2 = o._relations_own(w, ents, routed, top)
+        if not keep:
+            return n2, f2
+        n1, f1 = self._relations_own(w, ents, keep, top)
+        assert [n.get("text") for n in n1] == [n.get("text") for n in n2]
+        return n1, f1 + f2
+
+    @torch.no_grad()
+    def _relations_own(self, w: dict, ents: list[dict], relations: list[dict], top: int):
         from .train.data import blank_window, collate, marker_features, speaker_turns
         from .train.kdata import label_text
         tokens, sp = w["tokens"], [tuple(x) for x in w["sentence_spans"]]
@@ -276,7 +334,7 @@ class Extractor:
                               "mentions": [" ".join(tokens[a:b]) for a, b in ms], "spans": ms})
                 spans.append(np.asarray(ms, dtype=np.int32))
         if len(spans) < 2:
-            return nodes, []
+            return (trim_articles(tokens, sp, nodes) if self.trim_det else nodes), []
         f.update(coref=None, _n_rel=1, rel={"spans": spans, "types": np.zeros(len(spans), np.int32),
                                             "triples": []})
         part_turns = [(s, p) for s, p in turns if p < n_part]
@@ -355,6 +413,8 @@ class Extractor:
                         f["verdict"] = verd[j]
                         f["vetoable"] = veto
                     facts.append(f)
+        if self.trim_det:
+            nodes = trim_articles(tokens, sp, nodes)
         return nodes, facts
 
     def extract(self, text: str | None = None, turns=None, relations: list[dict] = (),
@@ -385,6 +445,9 @@ def verdict_attributes(pol: list[float], mod: list[float], verdict: list[float])
     a = MODALITIES.index("asserted")
     if k in (0, 1):
         mod2 = [1.0 if i == a else 0.0 for i in range(len(MODALITIES))]
+    elif len(verdict) == 4 + len(MODALITIES) - 1:     # V1c: the verifier's own hedge kinds
+        s = sum(verdict[4:]) or 1.0
+        mod2 = [0.0] + [x / s for x in verdict[4:]]
     else:
         rest = [0.0 if i == a else x for i, x in enumerate(mod)]
         s = sum(rest)

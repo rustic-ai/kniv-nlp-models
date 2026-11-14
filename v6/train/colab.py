@@ -251,7 +251,8 @@ def build_bundles() -> tuple[Path, Path, str]:
                          corpus / "student_label_emb.pkl", corpus / "kg_short.json",
                          corpus / "synth_her_case.json", corpus / "kg_short_d1.json",
                          corpus / "kg_d2_concepts.json", corpus / "kg_d3_forms.json",
-                         corpus / "label_para.json", corpus / "verifier_v1.json")
+                         corpus / "label_para.json", corpus / "verifier_v1.json",
+                         corpus / "verifier_v1c.json")
              if p.exists()]
     # Keyed by every bundled side file's size and mtime: a name that ignores
     # one ships a stale copy of it (the Re-DocRED evidence was lost that way).
@@ -1095,6 +1096,8 @@ POST_JOBS = {
             " && python -m v6.train.attr_finetune --run {ev}",
     # plan r4 V1: the fact verifier over a finished run (data/v6-corpus/verifier_v1.json)
     "ver": "python -m v6.train.verifier train --run {ev} --out-run {ev}-ver1 --upload",
+    # plan r4 review step 3: V1c, both judges, hedge kinds, long windows (data/v6-corpus/verifier_v1c.json)
+    "ver1c": "python -m v6.train.verifier train --run {ev} --out-run {ev}-ver1c --data verifier_v1c.json --upload",
 }
 POST_LINES = r"^eval \d|done: best|training examples|margins above|ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
 

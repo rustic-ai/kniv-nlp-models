@@ -364,6 +364,28 @@ KGCAND_SCHEMA = _envelope("candidate_verdicts", {
 })
 
 
+HEDGE_KINDS = ["hypothetical", "planned", "desired", "questioned", "reported"]
+KGCANDK_SCHEMA = _envelope("candidate_verdicts", {
+    "verdicts": _array_of(
+        {
+            "type": "object",
+            "properties": {
+                "fact": {"type": "integer", "description": "the fact's number"},
+                "verdict": {"type": "string", "enum": KGCAND_VERDICTS,
+                            "description": "supported: stated or clearly implied, head to tail as the "
+                                           "definition reads; negated: the passage says it is not so; "
+                                           "hedged: mentioned only as possible, planned, wished, asked "
+                                           "or claimed without commitment; not_supported: otherwise"},
+                "kind": {"type": "string", "enum": HEDGE_KINDS + ["none"],
+                         "description": "for a hedged fact, how it is hedged; none otherwise"},
+            },
+            "required": ["fact", "verdict", "kind"], "additionalProperties": False,
+        },
+        "One verdict per listed fact.",
+    ),
+})
+
+
 KGVAR_KINDS = ["negated", "reported", "planned", "desired", "questioned", "hypothetical"]
 # D3 (v8 plan r2): the forms of M3 the six kinds above do not cover.
 KGVAR4_KINDS = ["denied", "never", "no_longer", "might", "rumoured", "expected"]
@@ -456,6 +478,7 @@ SCHEMAS = {
     "bankmerge": BANKMERGE_SCHEMA,
     "kgjudge": KGJUDGE_SCHEMA,
     "kgcand": KGCAND_SCHEMA,
+    "kgcandk": KGCANDK_SCHEMA,
     "kgvar": KGVAR_SCHEMA,
     "kgvarjudge": KGVARJUDGE_SCHEMA,
     "kgvar4": KGVAR4_SCHEMA,
@@ -482,7 +505,7 @@ PAYLOAD_KEY = {
     "pos": "tags", "lemma": "lemmas", "morph": "feats",
     "dep": "arcs", "srl": "tags", "rel": "triples",
     "cls": "labels", "sentiment": "sentiment", "keywords": "keywords",
-    "discover": "relations", "bankmerge": "relations", "kg": "knowledge", "kgjudge": "verdicts", "kgcand": "verdicts",
+    "discover": "relations", "bankmerge": "relations", "kg": "knowledge", "kgjudge": "verdicts", "kgcand": "verdicts", "kgcandk": "verdicts",
     "kgvar": "variants", "kgvarjudge": "verdicts", "kgsyn": "passage",
     "kgvar4": "variants", "kgvarjudge4": "verdicts", "kgpara": "names",
 }

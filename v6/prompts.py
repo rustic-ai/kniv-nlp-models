@@ -348,6 +348,16 @@ SYSTEM["kgcand3"] = (
 )
 
 
+# c3k (plan r4 review step 3): c3 with the kind of every hedged fact, for
+# the verifier's modality verdicts; the four verdicts and their wording are c3's.
+SYSTEM["kgcand3k"] = SYSTEM["kgcand3"] + (
+    "\nFor a hedged fact also give its kind: hypothetical (if, would, might, "
+    "could), planned (intended or scheduled), desired (wished, wanted, hoped), "
+    "questioned (asked about), or reported (claimed by someone the passage "
+    "does not vouch for: alleged, said to, according to)."
+)
+
+
 def kg_user_message(sentences: list[str], speakers: list[str | None] | None,
                     participants: list[str], types: list[dict], relations: list[dict]) -> str:
     """One window for the ``kg`` layer: numbered sentences (with speakers in a

@@ -39,6 +39,11 @@ import torch
 import torch.nn as nn
 
 VERDICTS = ["supported", "not_supported", "negated", "hedged"]
+# V1c (plan r4 review step 3): hedged split into its kinds (schemas.MODALITIES
+# after "asserted", same order); label HEDGED_ANY = hedged, kind unknown (the
+# loss is on the kinds' summed probability).
+VERDICTS_K = ["supported", "not_supported", "negated", "hypothetical", "planned", "desired", "questioned", "reported"]
+HEDGED_ANY = -1
 POSITIVE = {"supported", "negated", "hedged"}
 SYMMETRIC_HINT = ("sibling", "spouse", "partner", "shares", "adjacent", "neighbo", "twinned",
                   "related to", "associated with", "married", "friend", "same as", "different from",
@@ -226,9 +231,192 @@ def _add_d1e(recs: list[dict], labels_file: Path, rng: random.Random) -> int:
     return n
 
 
+# ── V1c: both judges, hedge kinds, long windows ───────────────────
+DATA_K = "verifier_v1c.json"
+
+
+def _held_long(text_id: str) -> bool:
+    """A fifth of the stage-4 pilot's texts, by hash: the long-text reading."""
+    import hashlib
+    return int(hashlib.sha1(text_id.encode()).hexdigest(), 16) % 5 == 0
+
+
+def _second(name: str) -> dict:
+    """DeepSeek c3k labels (``v6.eval.s6_second``) by text id: per fact
+    (GPT-6 verdict, DeepSeek verdict, kind), in the GPT-6 file's order."""
+    from ..eval.s6_second import _path
+    p = _path(name)
+    if not p.exists():
+        return {}
+    return {t["id"]: [(f["gpt6"], f["verdict"], f["kind"]) for f in t["facts"]]
+            for t in json.loads(p.read_text()) if t["judged"]}
+
+
+def _k_label(gpt6: str, second: tuple | None, c: Counter) -> int | None:
+    """The V1c label of one judged fact: None (dropped) when the judges
+    disagree on the verdict (hedged against hedged agrees whatever the kinds);
+    DeepSeek's kind for a hedged fact; HEDGED_ANY when the kind is unknown."""
+    if gpt6 not in VERDICTS:
+        return None
+    if second is None or second[1] not in VERDICTS:
+        c["single judge"] += 1
+        return HEDGED_ANY if gpt6 == "hedged" else VERDICTS_K.index(gpt6)
+    if second[1] != gpt6:
+        c["dropped: judges disagree"] += 1
+        return None
+    c["both judges agree"] += 1
+    if gpt6 == "hedged":
+        return VERDICTS_K.index(second[2]) if second[2] in VERDICTS_K else HEDGED_ANY
+    return VERDICTS_K.index(gpt6)
+
+
+def _mention_entities(tokens: list[str]):
+    """Entities found by mention text (every occurrence), as in ``_add_d1e``."""
+    low = [w.lower() for w in tokens]
+    idx, ents, names = {}, [], []
+
+    def ent(ms):
+        key = tuple(sorted(ms))
+        if key not in idx:
+            spans = []
+            for m in ms:
+                mt = m.lower().split()
+                spans += [(a, a + len(mt)) for a in range(len(low) - len(mt) + 1) if low[a:a + len(mt)] == mt]
+            if not spans:
+                return None
+            idx[key] = len(ents)
+            ents.append(sorted(set(spans)))
+            names.append(max(ms, key=len))
+        return idx[key]
+    return ent, ents, names
+
+
+def build_k(seed: int = 13) -> int:
+    """V1b's set rebuilt for V1c: hedge kinds (from the payload's modality
+    for generated rows, from DeepSeek where it judged), the agreement filter
+    wherever both judges labelled a text (D1's sample, D1e, the stage-4
+    pilot), and the pilot's long windows (a fifth held out by text)."""
+    from ..config import RUNS_DIR
+    from ..eval.m1_precision import OUT as M1, labels_path
+    from ..eval.negation_pilot import heldout_base, heldout_form
+    from ..schemas import MODALITIES
+    rng = random.Random(seed)
+    c = Counter()
+    recs = []
+    sec = {k: _second(k) for k in ("d1", "d1e", "s4")}
+    short = json.loads((_corpus() / "kg_short.json").read_text())
+    labels = {r["id"]: r for r in json.loads(
+        (RUNS_DIR / "kg-judge" / "labels-d1-full-ultrabert-380m-v7b8ev.json").read_text())}
+    for row in short["train"]:
+        lab = labels.get(row["id"])
+        if not lab or not lab.get("judged"):
+            continue
+        two = sec["d1"].get(row["id"])
+        cands = []
+        for j, f in enumerate(lab["facts"]):
+            if f["head"] == f["tail"]:
+                continue
+            y = _k_label(f.get("verdict"), two[j] if two else None, c)
+            if y is not None:
+                cands.append({"h": f["head"], "t": f["tail"], "rel": f["relation"], "y": y})
+        split = "held" if heldout_base(row["id"]) else "train"
+        r = _record_k(row, cands, split, "d1", rng, neg=split == "train")
+        if r:
+            recs.append(r); c[f"d1 texts {split}"] += 1
+
+    def payload(row):
+        out = []
+        for f in row["payload"]["facts"]:
+            mod = f.get("modality", "asserted")
+            y = (2 if f.get("polarity") == "negative" else 0 if mod == "asserted" else
+                 VERDICTS_K.index(mod) if mod in VERDICTS_K else HEDGED_ANY)
+            out.append({"h": f["head"], "t": f["tail"], "rel": f["relation"], "y": y})
+        return out
+    for row in short["pairs"]:
+        split = "held" if heldout_base(row["id"]) else "train"
+        r = _record_k(row, payload(row), split, "pairs", rng, neg=False)
+        if r:
+            recs.append(r); c[f"pairs {split}"] += 1
+    for row in json.loads((_corpus() / "kg_d3_forms.json").read_text())["train"]:
+        split = "held" if heldout_form(row["id"]) else "train"
+        r = _record_k(row, payload(row), split, "forms", rng, neg=False)
+        if r:
+            recs.append(r); c[f"forms {split}"] += 1
+    for row in json.loads((_corpus() / "kg_d2_concepts.json").read_text())["train"]:
+        r = _record_k(row, payload(row), "train", "concepts", rng, neg=True)
+        if r:
+            recs.append(r); c["concepts train"] += 1
+    import pickle
+    from ..eval.s6_second import D1E
+    for run in D1E:
+        L = json.loads(labels_path(run, "astra", "c3").read_text())
+        P = pickle.loads((M1 / f"preds-{run}.pkl").read_bytes())
+        for it, t in zip(P["items"], L["texts"]):
+            if not t["judged"] or not t["facts"]:
+                continue
+            two = sec["d1e"].get(it["id"])
+            ent, ents, names = _mention_entities(it["tokens"])
+            cands = []
+            for j, f in enumerate(t["facts"]):
+                if "teacher" in f["src"] and len(f["src"]) == 1:
+                    continue
+                y = _k_label(f["verdict"], two[j] if two else None, c)
+                h, tl = ent(f["key"][0]), ent(f["key"][2])
+                if y is None or h is None or tl is None or h == tl:
+                    continue
+                cands.append({"h": h, "t": tl, "rel": f["key"][1], "y": y, "src": "d1e"})
+            if cands:
+                recs.append({"id": it["id"], "split": "train", "tokens": it["tokens"],
+                             "sentence_spans": it["sentence_spans"], "speakers": it.get("speakers"),
+                             "participants": it.get("participants") or [],
+                             "entities": [[list(m) for m in ms] for ms in ents], "names": names, "cands": cands})
+                c["d1e texts"] += 1
+    S = RUNS_DIR / "s4-pilot"
+    items = {it["id"]: it for it in json.loads((S / "items.json").read_text())}
+    for t in json.loads((S / "labels-astra-c3.json").read_text()):
+        if not t["judged"]:
+            continue
+        it = items[t["id"]]
+        two = sec["s4"].get(t["id"])
+        ent, ents, names = _mention_entities(it["tokens"])
+        cands = []
+        for j, x in enumerate(t["cands"]):
+            y = _k_label(x["judge"], two[j] if two else None, c)
+            h, tl = ent(x["head_m"]), ent(x["tail_m"])
+            if y is None or h is None or tl is None or h == tl:
+                continue
+            cands.append({"h": h, "t": tl, "rel": x["relation"], "y": y, "src": "s4"})
+        if cands:
+            split = "held_long" if _held_long(t["id"]) else "train"
+            recs.append({"id": t["id"], "split": split, "tokens": it["tokens"],
+                         "sentence_spans": it["sentence_spans"], "speakers": it.get("speakers"),
+                         "participants": it.get("participants") or [],
+                         "entities": [[list(m) for m in ms] for ms in ents], "names": names, "cands": cands})
+            c[f"s4 texts {split}"] += 1
+    for r in recs:
+        for x in r["cands"]:
+            c[f"cand {r['split']} {x['src']} {'hedged?' if x['y'] == HEDGED_ANY else VERDICTS_K[x['y']]}"] += 1
+    (_corpus() / DATA_K).write_text(json.dumps({"records": recs, "verdicts": VERDICTS_K}))
+    for k in sorted(c):
+        print(f"  {k}: {c[k]:,}")
+    print("wrote", _corpus() / DATA_K)
+    return 0
+
+
+def _record_k(row, cands, split, src, rng, neg=True):
+    """``_record`` with labels in VERDICTS_K (free negatives: not supported)."""
+    expressed = [dict(c, y=0 if c["y"] != 1 else 1) for c in cands]       # _record reads y for POSITIVE only
+    r = _record(row, expressed, split, src, rng, neg=neg)
+    if r is None:
+        return None
+    for x, c in zip(r["cands"], cands):                                      # the judged ones come first, in order
+        x["y"] = c["y"]
+    return r
+
+
 # ── model ──────────────────────────────────────────────────────────
 class Verifier(nn.Module):
-    def __init__(self, base, r: int = 64, hidden: int = 512):
+    def __init__(self, base, r: int = 64, hidden: int = 512, n_out: int = len(VERDICTS)):
         super().__init__()
         from .model import RelationAdapter
         self.base = base
@@ -241,7 +429,7 @@ class Verifier(nn.Module):
             self.ver.load_grown(st, "")
         H = base.encoder.config.hidden_size
         self.head = nn.Sequential(nn.LayerNorm(4 * H), nn.Linear(4 * H, hidden), nn.GELU(),
-                                  nn.Dropout(0.1), nn.Linear(hidden, len(VERDICTS)))
+                                  nn.Dropout(0.1), nn.Linear(hidden, n_out))
 
     def trainable(self):
         return list(self.ver.parameters()) + list(self.head.parameters())
@@ -349,6 +537,23 @@ def examples(recs, tok, bank, para, rng, split: str, limit: int | None = None) -
     return out
 
 
+def coarse(P: np.ndarray) -> np.ndarray:
+    """Verdict probabilities in VERDICTS order (the kinds summed into hedged)."""
+    return P if P.shape[1] == len(VERDICTS) else np.concatenate([P[:, :3], P[:, 3:].sum(1, keepdims=True)], 1)
+
+
+def k_loss(lg: torch.Tensor, y: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """Weighted NLL over VERDICTS_K; HEDGED_ANY rows on log sum of the kinds."""
+    lp = torch.log_softmax(lg.float(), -1)
+    known = y >= 0
+    yk = y.clamp(min=0)
+    nll = -lp.gather(1, yk.unsqueeze(1)).squeeze(1)
+    any_h = -torch.logsumexp(lp[:, 3:], -1)
+    loss = torch.where(known, nll, any_h)
+    wt = torch.where(known, w[yk], w[3])
+    return (loss * wt).sum() / wt.sum()
+
+
 @torch.no_grad()
 def evaluate(model, exs, pad, device, bs: int = 32) -> dict:
     model.eval()
@@ -360,13 +565,21 @@ def evaluate(model, exs, pad, device, bs: int = 32) -> dict:
         P.append(torch.softmax(lg, -1).cpu().numpy()); Y += [e["y"] for e in chunk]; S += [e["src"] for e in chunk]
     model.train()
     P, Y = np.concatenate(P), np.array(Y)
+    res_k = {}
+    if P.shape[1] == len(VERDICTS_K):        # kinds: their accuracy on rows with a known kind, then coarse
+        kk = Y >= 3
+        if kk.any():
+            res_k["acc_kind"] = float((P[kk, 3:].argmax(1) + 3 == Y[kk]).mean())
+            res_k["n_kind"] = int(kk.sum())
+        P = coarse(P)
+        Y = np.where((Y >= 3) | (Y == HEDGED_ANY), 3, Y)
     expressed = 1 - P[:, 1]
     yb = Y != 1
     o = expressed.argsort().argsort() + 1
     n1, n0 = yb.sum(), (~yb).sum()
     auc = (o[yb].sum() - n1 * (n1 + 1) / 2) / max(n1 * n0, 1)
     pred = P.argmax(1)
-    res = {"n": len(Y), "acc": float((pred == Y).mean()), "auc_expressed": float(auc)}
+    res = {"n": len(Y), "acc": float((pred == Y).mean()), "auc_expressed": float(auc), **res_k}
     for k, v in enumerate(VERDICTS):
         sel = Y == k
         if sel.any():
@@ -388,19 +601,22 @@ def train(args) -> int:
     bank = {r["name"]: r for r in bank_l["relations"]}
     para_raw = json.loads((_corpus() / "label_para.json").read_text()) if (_corpus() / "label_para.json").exists() else {}
     para = {int(k): v for k, v in para_raw.items()}
-    recs = json.loads((_corpus() / DATA).read_text())["records"]
+    D = json.loads((_corpus() / args.data).read_text())
+    recs, verdicts = D["records"], D.get("verdicts", VERDICTS)
     rng = random.Random(args.seed)
     tr = examples(recs, tok, bank, para, rng, "train", args.limit)
     held = examples(recs, tok, bank, None, rng, "held", args.dev_limit)
-    print(f"{len(tr):,} training examples, {len(held):,} held out; {Counter(e['y'] for e in tr)}", flush=True)
-    model = Verifier(base, r=args.rank).to(device)
+    held_long = examples(recs, tok, bank, None, rng, "held_long", args.dev_limit)
+    print(f"{len(tr):,} training examples, {len(held):,} held out, {len(held_long):,} long held out; "
+          f"{Counter(e['y'] for e in tr)}", flush=True)
+    model = Verifier(base, r=args.rank, n_out=len(verdicts)).to(device)
     opt = torch.optim.AdamW([{"params": list(model.ver.parameters()), "lr": args.lr},
                              {"params": list(model.head.parameters()), "lr": args.head_lr}], weight_decay=0.01)
     steps = int(args.steps or (len(tr) * args.epochs) // args.batch)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=[args.lr, args.head_lr], total_steps=steps,
                                                 pct_start=0.05, anneal_strategy="linear")
-    w = torch.tensor([1.0, 1.0, args.neg_weight, args.hedge_weight], device=device)
-    loss_fn = nn.CrossEntropyLoss(weight=w)
+    w = torch.tensor([1.0, 1.0, args.neg_weight] + [args.hedge_weight] * (len(verdicts) - 3), device=device)
+    loss_fn = nn.CrossEntropyLoss(weight=w) if len(verdicts) == len(VERDICTS) else (lambda lg, y: k_loss(lg, y, w))
     out = Path(args.out_dir or f"data/v6-eval/checkpoints/{args.out_run}")
     out.mkdir(parents=True, exist_ok=True)
     best, t0, order = -1.0, time.time(), []
@@ -425,12 +641,15 @@ def train(args) -> int:
             print(f"step {step}/{steps} loss {loss.item():.4f} [{time.time() - t0:.0f}s]", flush=True)
         if step % args.eval_every == 0 or step == steps:
             res = evaluate(model, held, tok.pad_token_id, device)
+            if held_long:
+                res.update({f"long_{k}": v for k, v in evaluate(model, held_long, tok.pad_token_id, device).items()
+                            if k in ("n", "auc_expressed", "acc", "acc_kind")})
             print(f"eval {step}: {json.dumps({k: round(v, 4) for k, v in res.items()})}", flush=True)
             if res["auc_expressed"] > best:
                 best = res["auc_expressed"]
                 torch.save({"ver": model.ver.state_dict(), "head": model.head.state_dict(),
                             "base_run": args.run, "rank": args.rank, "step": step, "eval": res,
-                            "data": DATA}, out / "verifier.pt")
+                            "data": args.data, "verdicts": verdicts}, out / "verifier.pt")
                 (out / "best.metric").write_text(json.dumps({"value": best, "step": step,
                                                              "metric": "held-out AUC, expressed"}))
             (out / "status.json").write_text(json.dumps({"state": "running", "step": step, "of": steps,
@@ -447,12 +666,12 @@ def train(args) -> int:
     return 0
 
 
-def trained_relations() -> set[str]:
+def trained_relations(data: str = DATA) -> set[str]:
     """Relation names in the verifier set's training split (cached beside it)."""
-    cache = _corpus() / "verifier_v1-relations.json"
+    cache = _corpus() / data.replace(".json", "-relations.json")
     if cache.exists():
         return set(json.loads(cache.read_text()))
-    recs = json.loads((_corpus() / DATA).read_text())["records"]
+    recs = json.loads((_corpus() / data).read_text())["records"]
     names = sorted({c["rel"] for r in recs if r["split"] == "train" for c in r["cands"]})
     cache.write_text(json.dumps(names))
     return set(names)
@@ -467,7 +686,7 @@ def load_verifier(run: str, device, repo: str | None = None, local: Path | None 
     ck = torch.load(path, map_location="cpu", weights_only=False)
     base, tok, spec, vocab, _ = load_run(ck["base_run"], repo or HF_REPO, device)
     base.eval()
-    m = Verifier(base, r=ck["rank"]).to(device)
+    m = Verifier(base, r=ck["rank"], n_out=len(ck.get("verdicts", VERDICTS))).to(device)
     m.ver.load_state_dict(ck["ver"]); m.head.load_state_dict(ck["head"])
     m.eval()
     return m, tok
@@ -587,7 +806,7 @@ def score_m3(args) -> int:
             rows.append((fam, int(np.argmax(p)) in ok, p, it["id"]))
     for fam in ("negated", "hedged", "asserted"):
         r = [x for x in rows if x[0] == fam]
-        v = Counter(VERDICTS[int(np.argmax(x[2]))] for x in r)
+        v = Counter(VERDICTS[int(np.argmax(x[2][:4]))] for x in r)
         print(f"{fam:9s} ({len(r)}): verdict right {np.mean([x[1] for x in r]):.3f}; verdicts {dict(v)}")
     return 0
 
@@ -681,7 +900,7 @@ def score_m2(args) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=["build", "train", "score-m1", "score-m3", "score-m2"])
+    ap.add_argument("cmd", choices=["build", "build-k", "train", "score-m1", "score-m3", "score-m2"])
     ap.add_argument("--run", default="ultrabert-380m-v8e-w1half")
     ap.add_argument("--out-run", default="ultrabert-380m-v8v1")
     ap.add_argument("--out-dir")
@@ -702,6 +921,7 @@ def main() -> int:
     ap.add_argument("--hedge-weight", type=float, default=1.5)
     ap.add_argument("--seed", type=int, default=13)
     ap.add_argument("--upload", action="store_true")
+    ap.add_argument("--data", default=DATA, help="train: the verifier set (data/v6-corpus/...)")
     ap.add_argument("--name", default="m1p3b-n500", help="score-m1: the M1 predictions file")
     ap.add_argument("--tag", help="score-m1: the verifier's tag in the output name (default the run's last word)")
     ap.add_argument("--config", default="e1b", help="score-m1: the config whose predictions to re-rank")
@@ -712,6 +932,8 @@ def main() -> int:
     a = ap.parse_args()
     if a.cmd == "build":
         return build(a.seed, a.d1e)
+    if a.cmd == "build-k":
+        return build_k(a.seed)
     if a.cmd == "train":
         return train(a)
     if a.cmd == "score-m3":

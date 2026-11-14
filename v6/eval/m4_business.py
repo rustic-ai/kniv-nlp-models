@@ -679,7 +679,7 @@ def predict(ex, items: list[dict], mode: str, naming: str) -> list[dict]:
     attribute head's polarity / modality probabilities."""
     import torch
     rels, back = schema(naming)
-    cap = {}
+    cap, cap_u = {}, {}
     fwd = ex.model.forward
 
     def capture(b, **kw):
@@ -687,6 +687,14 @@ def predict(ex, items: list[dict], mode: str, naming: str) -> list[dict]:
         return fwd(b, **kw)
     ex.model.forward = capture
     m = ex.model
+    u = ex.unseen_ex                            # KNIV_UNSEEN_FROM: routed relations' batch is the other model's
+    if u is not None:
+        fwd_u = u.model.forward
+
+        def capture_u(b, **kw):
+            cap_u["b"] = b
+            return fwd_u(b, **kw)
+        u.model.forward = capture_u
     rows = []
     try:
         for it in items:
@@ -696,39 +704,52 @@ def predict(ex, items: list[dict], mode: str, naming: str) -> list[dict]:
                         for e in it["entities"]]
             else:
                 ents = ex._entities(w, it["types"])
-            cap.clear()
+            cap.clear(); cap_u.clear()
             nodes, facts = ex._relations(w, ents, list(rels), ex.top)
             first = {tuple(mm): i for i, e in enumerate(ents) for mm in e["mentions"]}
             keys = []
             for n in nodes:
                 if mode == "gold":
-                    keys.append(first[tuple(n["spans"][0])])
+                    keys.append(first[tuple(n.get("model_spans", n["spans"])[0])])
                 else:
                     keys.append(frozenset(x.lower() for x in n["mentions"]))
             cand = []
             if facts:
-                b = cap["b"]
-                pairs = list(zip(b["pair_h"].tolist(), b["pair_t"].tolist()))
-                names = [r["name"] for r in rels]
-                P = torch.tensor([pairs.index((f["head"], f["tail"])) for f in facts], device=ex.device)
-                K = torch.tensor([names.index(f["relation"]) for f in facts], device=ex.device)
-                with torch.no_grad():
-                    a = m.attr(m.relation._pair, m.relation._labels, m.relation._ent, b, P, K) \
-                        if getattr(m, "attr", None) is not None else None
+                routed = set()
+                if u is not None and cap_u:
+                    routed = {r["name"] for r in rels if r["name"] not in ex.ver_trained
+                              and r["name"] not in ex.rel_offsets}
+                att = {}
+                for mod_, cb, names in ((m, cap.get("b"), [r["name"] for r in rels if r["name"] not in routed]),
+                                        (u.model if u is not None else None, cap_u.get("b"),
+                                         [r["name"] for r in rels if r["name"] in routed])):
+                    js = [j for j, f in enumerate(facts) if (f["relation"] in routed) == (mod_ is not m)]
+                    if not js or cb is None or getattr(mod_, "attr", None) is None:
+                        continue
+                    pairs = list(zip(cb["pair_h"].tolist(), cb["pair_t"].tolist()))
+                    P = torch.tensor([pairs.index((facts[j]["head"], facts[j]["tail"])) for j in js], device=ex.device)
+                    K = torch.tensor([names.index(facts[j]["relation"]) for j in js], device=ex.device)
+                    with torch.no_grad():
+                        a_ = mod_.attr(mod_.relation._pair, mod_.relation._labels, mod_.relation._ent, cb, P, K)
+                    for i, j in enumerate(js):
+                        att[j] = (a_["polarity"][i], a_["modality"][i])
+                a = att or None
                 for j, f in enumerate(facts):
                     c = {"key": (keys[f["head"]], back[f["relation"]], keys[f["tail"]]),
                          "rel": back[f["relation"]], "m": f["margin"] - SHIFT,
                          "unseen": f["relation"] not in ex.rel_offsets,
                          "types": (nodes[f["head"]]["type"], nodes[f["tail"]]["type"]),
                          "texts": (nodes[f["head"]]["text"], nodes[f["tail"]]["text"])}
-                    if a is not None:
-                        c["pol"] = torch.softmax(a["polarity"][j], -1).cpu().tolist()
-                        c["mod"] = torch.softmax(a["modality"][j], -1).cpu().tolist()
+                    if a is not None and j in a:
+                        c["pol"] = torch.softmax(a[j][0], -1).cpu().tolist()
+                        c["mod"] = torch.softmax(a[j][1], -1).cpu().tolist()
                     cand.append(c)
             rows.append({"id": it["id"], "cand": cand,
                          "ents": [(e.get("type"), [tuple(x) for x in e["mentions"]]) for e in ents]})
     finally:
         ex.model.forward = fwd
+        if u is not None:
+            u.model.forward = fwd_u
     return rows
 
 
@@ -867,6 +888,10 @@ def score(run: str, local: bool, naming: str, modes: list[str], device: str) -> 
         ex.use_verifier(os.environ["KNIV_VERIFIER"], threshold=float(os.environ.get("KNIV_VER_THRESHOLD", "0.48")))
         ex.margin_shift = SHIFT
         tag = "-ver"
+    if ex.trim_det:                          # KNIV_TRIM_DET=1: leading articles trimmed from mentions
+        tag += "-det"
+    if ex.unseen_ex is not None:             # KNIV_UNSEEN_FROM=RUN: never-trained relations through RUN
+        tag += "-u" + ex.unseen_ex.run.split("-")[-1]
     run_file = run + tag
     rels, _ = schema(naming)
     bank = {r["name"] for r in load_bank()["relations"]}
