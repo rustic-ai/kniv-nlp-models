@@ -176,7 +176,8 @@ def build(run: str):
 PROMPTS = {"c1": "kgcand", "c2": "kgcand2", "c3": "kgcand3"}
 
 
-def judge(run: str, judge_name: str, version: str = "c1", only: set | None = None) -> int:
+def judge(run: str, judge_name: str, version: str = "c1", only: set | None = None,
+          first: int = 0) -> int:
     from ..annotate.base import CacheStore
     from ..annotate.kg import KGItem
     from ..kg_judge import CandJudge, _run
@@ -186,6 +187,8 @@ def judge(run: str, judge_name: str, version: str = "c1", only: set | None = Non
     items = []
     if only is not None:
         rows = [(it, f) for it, f in rows if it["id"] in only]
+    if first:
+        rows = rows[:first]
     for it, facts in rows:
         if not facts:
             continue
@@ -207,6 +210,7 @@ def judge(run: str, judge_name: str, version: str = "c1", only: set | None = Non
                                "src": f["src"], "verdict": v.get(n)} for n, f in enumerate(facts)]})
     tag = "" if version == "c1" else f"-{version}"
     tag += "-handcheck" if only is not None else ""
+    tag += f"-first{first}" if first else ""
     (OUT / f"labels-{run}-{judge_name}{tag}.json").write_text(json.dumps({"configs": list(d["preds"]),
                                                                           "texts": out}))
     print(Counter(f["verdict"] for t in out for f in t["facts"]))
@@ -509,6 +513,7 @@ def main() -> int:
     ap.add_argument("--version", default="c1", choices=list(PROMPTS), help="judge prompt")
     ap.add_argument("--handcheck", action="store_true",
                     help="judge: only the texts of the hand-checked sample (hand-check.json)")
+    ap.add_argument("--first", type=int, default=0, help="judge: only the first N texts (a pilot)")
     a = ap.parse_args()
     if a.cmd == "predict":
         predict(a.run, a.short, a.configs.split(","), a.tag, a.set, a.floor)
@@ -523,7 +528,7 @@ def main() -> int:
     if a.cmd == "judge":
         only = ({x["id"] for x in json.loads((OUT / "hand-check.json").read_text())["facts"]}
                 if a.handcheck else None)
-        return judge(a.run, a.judge, a.version, only)
+        return judge(a.run, a.judge, a.version, only, a.first)
     if a.cmd == "agree":
         return agree(a.run, a.judge, a.version)
     if a.cmd == "rescore":

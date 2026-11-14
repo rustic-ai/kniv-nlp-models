@@ -68,12 +68,12 @@ def cls_f1(p, y, thr):
     return 2 * tp / max(k.sum() + y.sum(), 1)
 
 
-def e2e_curve(name: str, cfg: str):
+def e2e_curve(name: str, cfg: str, judge: str = "astra"):
     """(logit, expressed) per prediction of ``cfg`` and the pool size, as
     ``m1_precision equal`` counts them."""
     from .m1_precision import OUT, POSITIVE, _same, labels_path
     P = pickle.loads((OUT / f"preds-{name}.pkl").read_bytes())
-    L = json.loads(labels_path(name, "astra", "c3").read_text())
+    L = json.loads(labels_path(name, judge, "c3").read_text())
     rows, total = [], 0
     for i, t in enumerate(L["texts"]):
         if not t["judged"]:
