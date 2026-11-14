@@ -101,6 +101,7 @@ class Extractor:
         self.verifier = None
         self.ver_threshold = 0.5
         self.ver_floor = 3.0
+        self.ver_top = None             # candidates verified per pair (None: ``top``, as many as the margin path keeps)
         self.ver_trained: set[str] = set()
         self.ver_on = True
         # Evaluators add a constant to every offset to see all candidates;
@@ -314,7 +315,7 @@ class Extractor:
                 veto_rd = frozen and self.ver_veto_frozen
                 decide = lambda k: (relations[k]["name"] in self.ver_trained
                                     and not (veto_rd and relations[k]["name"] in self.rd_names))
-                tr = [k for k in order if decide(k)][:top]      # as many per pair as the margin path keeps
+                tr = [k for k in order if decide(k)][:self.ver_top or top]   # default: as many per pair as the margin path keeps
                 for k in tr:
                     if m[k] - self.margin_shift > -self.ver_floor:
                         vc.append((h, t, relations[k]["name"], False)); vm.append(float(m[k]))

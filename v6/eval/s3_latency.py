@@ -21,6 +21,7 @@ def main() -> int:
     ap.add_argument("--verifier", default="ultrabert-380m-v8p3-d123-ver1")
     ap.add_argument("--n", type=int, default=50)
     ap.add_argument("--threads", type=int, default=8)
+    ap.add_argument("--settings", default="3:4", help="nested with the verifier: FLOOR:VER_TOP,... (each its own row)")
     a = ap.parse_args()
     import torch
     torch.set_num_threads(a.threads)
@@ -39,12 +40,18 @@ def main() -> int:
     ex._verify = counted
     print("| decode | verifier | median s / text | mean s / text | candidates verified / text |\n|---|---|---|---|---|")
     base = {}
-    for dec in ("base", "ner+np+nest+merge:2"):
-        for ver in (False, True):
+    runs = [("base", False, None), ("base", True, None), ("ner+np+nest+merge:2", False, None)]
+    for s in a.settings.split(","):         # FLOOR:VER_TOP for nested, flat:FLOOR:VER_TOP for flat
+        flat = s.startswith("flat:")
+        runs.append(("base" if flat else "ner+np+nest+merge:2", True,
+                     tuple(float(x) for x in s.split(":")[1 if flat else 0:])))
+    for dec, ver, st in runs:
+        if True:
             name, _, boost = dec.partition(":")
             cfg = ("ver" if ver else "base") if name == "base" else name + ("+ver" if ver else "") + (":" + boost if boost else "")
             _configure(ex, cfg, boost0)
             ex.margin_shift = 0.0
+            ex.ver_floor, ex.ver_top = (st[0], int(st[1])) if st else (3.0, None)
             ts = []
             n_read.clear()
             for j, it in enumerate(items):
@@ -60,7 +67,8 @@ def main() -> int:
             if not ver:
                 base[dec] = mean
             ratio = f" ({mean / base[dec]:.2f}x)" if ver else ""
-            print(f"| {'flat' if dec == 'base' else 'nested'} | {'yes' if ver else 'no'} | {med:.2f} | {mean:.2f}{ratio} | "
+            lab = ('flat' if dec == 'base' else 'nested') + (f" f{st[0]:g}k{int(st[1])}" if st else "")
+            print(f"| {lab} | {'yes' if ver else 'no'} | {med:.2f} | {mean:.2f}{ratio} | "
                   f"{sum(n_read) / len(items):.1f} |", flush=True)
     return 0
 
