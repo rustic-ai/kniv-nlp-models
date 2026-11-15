@@ -112,6 +112,25 @@ def prep(args) -> int:
         return [None] * len(cands)
     ex._verify = grab
     out, t0, n_all, n_extra = {}, time.time(), 0, 0
+    queue: list = []
+    t_rel = t_ver = 0.0
+    from .verifier import collate as vcollate
+
+    def flush(q):
+        """V1c over queued candidates, sorted by length, batches within a token budget."""
+        q = sorted(q, key=lambda x: len(x[2]["ids"]))
+        i = 0
+        while i < len(q):
+            L = len(q[i][2]["ids"])
+            k = max(1, min(256, (256 * 128 * 128) // max(L * L, 1)))
+            chunk = q[i:i + k]
+            k = len(chunk)
+            with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
+                lg = ex.verifier(vcollate([c[2] for c in chunk], ex.tok.pad_token_id, device))
+            for (rid, (a, b, r), _), pr in zip(chunk, torch.softmax(lg.float(), -1).cpu().tolist()):
+                out.setdefault(rid, []).append({"h": a, "t": b, "rel": r, "soft": [round(x, 5) for x in pr]})
+            i += k
+        return len(q)
     for n, rec in enumerate(recs):
         parts = rec.get("participants") or []
         P = len(parts)
@@ -121,8 +140,10 @@ def prep(args) -> int:
         ents = [{"type": "entity", "mentions": [tuple(m) for m in ms]} for ms in rec["entities"][P:]]
         rels = [{"name": x, "description": bank.get(x, {}).get("description", "")} for x in schema_of(rec, schemas)]
         cap.clear()
+        t1 = time.time()
         with torch.no_grad():
             ex._relations(w, ents, rels, ex.top)
+        t_rel += time.time() - t1
         if not cap:
             continue
         # node index -> record entity index (speakers by name, entities by spans)
@@ -145,26 +166,22 @@ def prep(args) -> int:
             near = {x for c in rec["cands"] for x in (c["h"], c["t"])}
             extra.sort(key=lambda c: (not (c[0] in near or c[1] in near), random.Random(f"{rec['id']}{c}").random()))
             extra = extra[:args.max_extra]
-        if extra:                                   # V1c's probabilities, its own input form
-            from .verifier import collate as vcollate
-            cache, exs, keep = {}, [], []
+        if extra:                                   # V1c's probabilities, its own input form: queued, run in batches
+            cache, keep = {}, []
             for a, b, r in extra:
                 e = encode(rec, {"h": a, "t": b, "rel": r, "y": 0}, ex.tok, bank, None, None, cache=cache)
                 if e is not None:
-                    exs.append(e); keep.append((a, b, r))
-            probs = []
-            bs = 32 if len(rec["tokens"]) < 200 else 8
-            with torch.no_grad():
-                for i in range(0, len(exs), bs):
-                    with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
-                        lg = ex.verifier(vcollate(exs[i:i + bs], ex.tok.pad_token_id, device))
-                    probs += torch.softmax(lg.float(), -1).cpu().tolist()
-            out[rec["id"]] = [{"h": a, "t": b, "rel": r, "soft": [round(x, 5) for x in p]}
-                              for (a, b, r), p in zip(keep, probs)]
-            n_extra += len(out[rec["id"]])
+                    queue.append((rec["id"], (a, b, r), e))
+        if len(queue) >= args.queue or n == len(recs) - 1:
+            t1 = time.time()
+            n_extra += flush(queue)
+            t_ver += time.time() - t1
+            queue = []
         if n % 2000 == 0:
             print(f"prep {n}/{len(recs)}: {n_all:,} extractor candidates, {n_extra:,} unlabelled with V1c's "
-                  f"probabilities [{time.time() - t0:.0f}s]", flush=True)
+                  f"probabilities [{time.time() - t0:.0f}s: relation step {t_rel:.0f}s, V1c {t_ver:.0f}s]", flush=True)
+    if queue:
+        n_extra += flush(queue)
     ex._verify = orig
     path = _corpus() / LISTS
     path.write_text(json.dumps({"run": RUN, "verifier": V1C, "max_extra": args.max_extra, "extra": out}))
@@ -722,6 +739,7 @@ def main() -> int:
     ap.add_argument("--data", default="verifier_v1c.json")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--max-extra", type=int, default=60)
+    ap.add_argument("--queue", type=int, default=4096, help="prep: candidates queued before V1c runs on them")
     ap.add_argument("--rank", type=int, default=64)
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--head-lr", type=float, default=2e-4)
