@@ -525,6 +525,43 @@ def read(pred: dict) -> dict:
     return res
 
 
+def load_v3(path: Path, base, device) -> "Verifier3":
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    m = Verifier3(base, r=ck["rank"], n_out=len(ck.get("verdicts", VERDICTS_K))).to(device)
+    m.ver.load_state_dict(ck["ver"]); m.head.load_state_dict(ck["head"])
+    m.budget, m.cap = int(ck.get("budget", 448)), int(ck.get("cap", 256))
+    return m.eval()
+
+
+@torch.no_grad()
+def score_window(model, rec: dict, cands: list, tok, bank: dict, device, batch_tokens2: int = 384 ** 2 * 16):
+    """The extractor's call: one window (``rec``: tokens, sentence spans,
+    speakers, participants, entity spans, names) and its candidates ``(head,
+    tail, relation)``, listed in the fixed order (head's first mention,
+    tail's, relation), so the verdicts do not depend on the extractor's
+    order. Returns verdict probabilities per candidate (None: not readable,
+    the margin decides)."""
+    r = dict(rec, id=rec.get("id", "w"))
+    cs = [{"h": h, "t": t, "rel": rel, "y": 0, "key": j} for j, (h, t, rel) in enumerate(cands)]
+    ps = build_passes(r, cs, tok, bank, model.budget, model.cap, None, None, canon=True)
+    out: list = [None] * len(cands)
+    if not ps:
+        return out
+    was = model.training
+    model.eval()
+    for chunk in _batches(sorted(ps, key=lambda p: len(p["ids"])), batch_tokens2):
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
+            lg = model(collate(chunk, tok.pad_token_id, device))
+        pr = torch.softmax(lg.float(), -1).cpu().tolist()
+        j = 0
+        for p in chunk:
+            for sl in p["slots"]:
+                out[sl["key"]] = pr[j]
+                j += 1
+    model.train(was)
+    return out
+
+
 def _setup(args, device):
     from .gold_eval import load_run
     from ..label_bank import load as load_bank

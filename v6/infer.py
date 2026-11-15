@@ -179,6 +179,9 @@ class Extractor:
             from .train.verifier2 import LabelCache, load_v2
             m = load_v2(path, self.model, self.device)
             self.ver_labels = LabelCache(self.model, self.tok, self.device)
+        elif self.ver_form == "v3":         # plan r4 V3: candidates listed in shared passes, fixed order
+            from .train.verifier3 import load_v3
+            m = load_v3(path, self.model, self.device)
         else:
             m = Verifier(self.model, r=ck["rank"], n_out=len(ck.get("verdicts", VERDICTS))).to(self.device)
             m.ver.load_state_dict(ck["ver"]); m.head.load_state_dict(ck["head"])
@@ -199,9 +202,21 @@ class Extractor:
                "speakers": w.get("sentence_speakers"), "participants": parts,
                "entities": [[tuple(int(x) for x in m) for m in ms] for ms in spans],
                "names": [n["text"] for n in nodes]}
-        if getattr(self, "ver_form", "v1") == "v2":
-            from .train.verifier2 import score_window
-            got = score_window(self.verifier, rec, cands, self.tok, self.ver_bank, self.ver_labels, self.device)
+        if getattr(self, "ver_form", "v1") in ("v2", "v3"):
+            rel = self.model.relation
+            saved = {k: getattr(rel, k) for k in ("_ent", "_pair_in", "_pair", "_labels") if hasattr(rel, k)}
+            try:
+                if self.ver_form == "v2":
+                    from .train.verifier2 import score_window
+                    got = score_window(self.verifier, rec, cands, self.tok, self.ver_bank, self.ver_labels, self.device)
+                else:
+                    from .train.verifier3 import score_window as score3
+                    got = score3(self.verifier, rec, cands, self.tok, self.ver_bank, self.device)
+            finally:
+                for k, v in saved.items():
+                    setattr(rel, k, v)
+            if self.device.type == "mps":
+                torch.mps.empty_cache()
             self._last_verdicts = {}
             out2: list[float | None] = [None] * len(cands)
             for j, v in enumerate(got):
