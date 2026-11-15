@@ -245,9 +245,12 @@ def _chunk(rec, P, h, t):
         for i in range(a, b):
             so[i] = k
     best = None
+    last = len(sp) - 1
     for a in rec["entities"][h]:
         for b in rec["entities"][t]:
-            s = sorted([so.get(a[0], 0), so.get(b[0], 0)])
+            # every sentence either mention touches (a mention can cross a boundary)
+            ks = [so.get(x, 0 if x < sp[0][0] else last) for x in (a[0], a[1] - 1, b[0], b[1] - 1)]
+            s = (min(ks), max(ks))
             if best is None or s[1] - s[0] < best[1] - best[0]:
                 best = (s[0], s[1])
     return best
@@ -551,6 +554,13 @@ def train(args) -> int:
                                           "mps" if torch.backends.mps.is_available() else "cpu"))
     base, tok, bank, recs = _setup(args, device)
     extra = load_lists(args)
+    # the lists are keyed by record id, and 1,405 ids are shared by two training
+    # records with different entities: those records train on their labelled
+    # candidates only
+    ids = Counter(r["id"] for r in recs)
+    dup = {k for k, v in ids.items() if v > 1}
+    n_dup = sum(len(extra.pop(k, [])) for k in dup)
+    print(f"{len(dup):,} ids shared by two records: their {n_dup:,} unlabelled list candidates dropped", flush=True)
     verdicts = VERDICTS_K
     rng = random.Random(args.seed)
     train_recs = [r for r in recs if r["split"] == "train"]
