@@ -97,8 +97,16 @@ def prep(args) -> int:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     bank = {r["name"]: r for r in load_bank()["relations"]}
     recs = json.loads((_corpus() / args.data).read_text())["records"]
+    if args.merge:
+        return merge_parts(args)
+    # held-out records: only those V1c's held-out examples read
+    from .gold_eval import load_run
+    _, tok0, *_ = load_run(RUN, args.repo, torch.device("cpu"))
+    need = {recs[i]["id"] for sp in ("held", "held_long") for i in v1c_held_keys(recs, tok0, bank, sp, args.dev_limit)}
+    recs = [r for r in recs if r["split"] == "train" or r["id"] in need]
     if args.limit:
         recs = recs[:args.limit]
+    recs = [r for k, r in enumerate(recs) if k % args.shards == args.shard]
     schemas = _schemas()
     ex = Extractor(RUN, device=str(device))
     ex.use_verifier(V1C, threshold=0.6)
@@ -184,9 +192,30 @@ def prep(args) -> int:
         n_extra += flush(queue)
     ex._verify = orig
     path = _corpus() / LISTS
+    if args.shards > 1:
+        path = path.with_suffix(f".part{args.shard}.json")
     path.write_text(json.dumps({"run": RUN, "verifier": V1C, "max_extra": args.max_extra, "extra": out}))
     print(f"prep done: {len(recs):,} records, {n_all:,} extractor candidates, {n_extra:,} unlabelled kept "
           f"-> {path}", flush=True)
+    if args.shards > 1:
+        return 0
+    return _upload(args, path)
+
+
+def merge_parts(args) -> int:
+    path = _corpus() / LISTS
+    out = {}
+    for k in range(args.shards):
+        d = json.loads(path.with_suffix(f".part{k}.json").read_text())
+        out.update(d["extra"])
+        meta = d
+    path.write_text(json.dumps({**meta, "extra": out}))
+    print(f"prep merged: {len(out):,} records with unlabelled candidates, "
+          f"{sum(len(v) for v in out.values()):,} candidates -> {path}", flush=True)
+    return _upload(args, path)
+
+
+def _upload(args, path) -> int:
     if args.upload:
         from huggingface_hub import HfApi
         gz = path.with_suffix(".json.gz")
@@ -740,6 +769,9 @@ def main() -> int:
     ap.add_argument("--limit", type=int)
     ap.add_argument("--max-extra", type=int, default=60)
     ap.add_argument("--queue", type=int, default=4096, help="prep: candidates queued before V1c runs on them")
+    ap.add_argument("--shard", type=int, default=0)
+    ap.add_argument("--shards", type=int, default=1)
+    ap.add_argument("--merge", action="store_true", help="prep: merge the shards' parts (and upload)")
     ap.add_argument("--rank", type=int, default=64)
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--head-lr", type=float, default=2e-4)
