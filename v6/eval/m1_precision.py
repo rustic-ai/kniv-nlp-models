@@ -76,6 +76,9 @@ def load_set(name: str, n: int) -> list[dict]:
         return hz.load_short_dev(off + n)[off:off + n]
     if name == "conll04":
         return hz.load_conll04(n)
+    if name.startswith("news:"):    # plan r4: judged news text for the verifier ("news:train", "news:eval")
+        from ..news_v2 import load
+        return load(name.partition(":")[2], n or None)
     if name == "m4":            # complete expected facts: m4_business scores it without a judge
         from .m4_business import load
         items = load()

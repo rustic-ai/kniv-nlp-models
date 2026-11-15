@@ -59,6 +59,8 @@ def rows_of(name, n, seed=7):
         return _m1_rows(DEV)
     if name == "d1e":
         return [r for run in D1E for r in _m1_rows(run)]
+    if name.startswith("news"):          # "news-train" / "news-eval": an m1_precision run key
+        return _m1_rows(f"ultrabert-380m-v8p3-d123-{name}")
     if name == "s4":
         from .m1_precision import judge_prompt
         S = RUNS_DIR / "s4-pilot"
