@@ -412,7 +412,8 @@ def combine(name: str, specs: list[str], tag: str = "-n500") -> int:
     return 0
 
 
-def equal(run: str, judge_name: str, version: str, boot: int = 2000, pool: list[str] | None = None) -> int:
+def equal(run: str, judge_name: str, version: str, boot: int = 2000, pool: list[str] | None = None,
+          vs: list[tuple[str, str]] | None = None) -> int:
     """Each configuration at the first one's operating point: judged precision
     at its pooled recall and recall at its precision (each run's margin cut
     swept over its own judged facts), a paired bootstrap at equal recall with
@@ -474,7 +475,7 @@ def equal(run: str, judge_name: str, version: str, boot: int = 2000, pool: list[
 
     A = {c: per_text(c, cuts[c]) for c in cfgs}
     rng = np.random.default_rng(13)
-    pairs = [(c, base) for c in cfgs[1:]] + [(cfgs[j], cfgs[1]) for j in range(2, len(cfgs))]
+    pairs = [(c, base) for c in cfgs[1:]] + [(cfgs[j], cfgs[1]) for j in range(2, len(cfgs))] + list(vs or [])
     draws = [rng.integers(0, len(keep), len(keep)) for _ in range(boot)]
     print("\nprecision at the baseline's recall, paired bootstrap over texts")
     for a, b in pairs:
@@ -509,6 +510,7 @@ def main() -> int:
     ap.add_argument("--configs", default="base,ner+np:1,ner+np+nest:2")
     ap.add_argument("--runs", help="combine: label=run,... (baseline first), each run's --tag file")
     ap.add_argument("--pool", help="equal: configs whose facts make the frozen pool (default: all)")
+    ap.add_argument("--vs", help="equal: extra paired comparisons, a:b,...")
     ap.add_argument("--judge", default="astra")
     ap.add_argument("--tag", default="", help="predict / rescore: suffix of the predictions file")
     ap.add_argument("--base-tag", default="-merge", help="rescore: the file whose first config is the baseline")
@@ -524,7 +526,8 @@ def main() -> int:
     if a.cmd == "combine":
         return combine(a.run, a.runs.split(","), a.tag or "-n500")
     if a.cmd == "equal":
-        return equal(a.run, a.judge, a.version, pool=a.pool.split(",") if a.pool else None)
+        return equal(a.run, a.judge, a.version, pool=a.pool.split(",") if a.pool else None,
+                     vs=[tuple(x.split(":")) for x in a.vs.split(",")] if a.vs else None)
     a.run = set_key(a.run, a.set)      # every later step reads files by slice
     if a.tag and a.cmd in ("judge", "score"):
         a.run += a.tag                 # a tagged predictions file judged as its own set
