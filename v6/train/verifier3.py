@@ -286,9 +286,11 @@ def _legend(rels, bank, tok):
     return tok(txt, add_special_tokens=False)["input_ids"][:192]
 
 
-def build_passes(rec, cands, tok, bank, budget, cap, rng=None, cache=None):
+def build_passes(rec, cands, tok, bank, budget, cap, rng=None, cache=None, canon=False):
     """One record's passes for ``cands`` (each ``{h, t, rel, y}`` or with
-    ``soft``, and optionally ``swap``, ``key``). ``rng``: shuffle the lists."""
+    ``soft``, and optionally ``swap``, ``key``). ``rng``: shuffle the lists;
+    ``canon``: then put each list in a fixed order (first mention of the head,
+    of the tail, relation), so the passes do not depend on the input order."""
     P = len(rec.get("participants") or [])
     groups = defaultdict(list)
     for c in cands:
@@ -328,6 +330,9 @@ def build_passes(rec, cands, tok, bank, budget, cap, rng=None, cache=None):
             continue
         if rng is not None:
             rng.shuffle(cs)
+        if canon:
+            ent = cr["entities"] if key[0] == "chunk" else rec["entities"]
+            cs.sort(key=lambda c: (min(ent[c["h"]])[0], min(ent[c["t"]])[0], c["rel"], c["h"], c["t"]))
         segs = _segments(cs, names, bank, tok)
         # pack: candidate subwords within budget, the pass within MAX_PASS
         cur, cur_n = [], 0
@@ -370,7 +375,7 @@ def build_passes(rec, cands, tok, bank, budget, cap, rng=None, cache=None):
     return out
 
 
-def record_passes(rec, extra, tok, bank, budget, cap, rng=None, keep=None, cache=None):
+def record_passes(rec, extra, tok, bank, budget, cap, rng=None, keep=None, cache=None, canon=False):
     """A record's labelled candidates (``keep``: their indices, else all) and
     its unlabelled list members (training: all; evaluation: those in a chunk
     with a kept candidate, so each kept candidate sits in its own list)."""
@@ -381,7 +386,7 @@ def record_passes(rec, extra, tok, bank, budget, cap, rng=None, keep=None, cache
         cands.append({**c, "key": (rec["id"], j)})
     for e in extra or []:
         cands.append({"h": e["h"], "t": e["t"], "rel": e["rel"], "y": SOFT, "soft": e["soft"]})
-    ps = build_passes(rec, cands, tok, bank, budget, cap, rng, cache)
+    ps = build_passes(rec, cands, tok, bank, budget, cap, rng, cache, canon)
     if keep is not None:
         ps = [p for p in ps if any(s["key"] is not None for s in p["slots"])]
     return ps
