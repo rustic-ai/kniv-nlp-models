@@ -1101,8 +1101,13 @@ POST_JOBS = {
     # plan r4 V2: the shared-pass verifier on V1c's data; the probe runs the longest batches first and stops
     "ver2probe": "python -m v6.train.verifier2 train --run {ev} --out-run {ev}-ver2probe --probe 40",
     "ver2": "python -m v6.train.verifier2 train --run {ev} --out-run {ev}-ver2 --upload",
+    # plan r4 V3: the list verifier; prep writes the extractor's lists with V1c's probabilities (uploaded),
+    # the probe runs the longest batches first, the pilot reads the uploaded lists
+    "ver3prep": "python -m v6.train.verifier3 prep --run {ev} --out-run {ev}-ver3 --upload",
+    "ver3probe": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3 --probe 40",
+    "ver3": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3 --upload",
 }
-POST_LINES = r"^eval \d|done: best|probe done|training passes|best \(step|training examples|margins above|ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
+POST_LINES = r"^eval \d|^prep|order check|done: best|probe done|training passes|best \(step|training examples|margins above|ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
 
 POST_START = r'''
 import json, os, subprocess, sys
