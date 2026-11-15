@@ -1103,7 +1103,8 @@ POST_JOBS = {
     "ver2": "python -m v6.train.verifier2 train --run {ev} --out-run {ev}-ver2 --upload",
     # plan r4 V3: the list verifier; prep writes the extractor's lists with V1c's probabilities (uploaded),
     # the probe runs the longest batches first, the pilot reads the uploaded lists
-    "ver3prep": "for k in 0 1 2 3; do python -m v6.train.verifier3 prep --run {ev} --shard $k --shards 4"
+    "ver3prep": "python -m v6.train.verifier3 prep --run {ev} --limit 1 > /content/prep-warm.log 2>&1;"
+                " for k in 0 1 2 3; do python -m v6.train.verifier3 prep --run {ev} --shard $k --shards 4"
                 " > /content/prep-$k.log 2>&1 & done; wait; tail -n 2 /content/prep-*.log;"
                 " python -m v6.train.verifier3 prep --run {ev} --out-run {ev}-ver3 --shards 4 --merge --upload",
     "ver3probe": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3 --probe 40",
