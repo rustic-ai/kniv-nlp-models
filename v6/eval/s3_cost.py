@@ -29,7 +29,9 @@ CFGS = {"nest": ("ner+np+nest+merge+ver:2", "s3nest"), "flat": ("ver", "s3")}
 RUN, BASE = "ultrabert-380m-v8p3-d123", "m1s3b-n500"
 # plan r4 V2: V1c's readings against the fixed reference label file
 # (``m1v1c-n500``: v7.1, E1b, D1, D12, d123, V1b (s3) and V1c judged by both)
-VERS = {"ver1": ("", "s3", "m1s3b-n500"), "ver1c": ("-v1c", "v1c", "m1v1c-n500")}
+VERS = {"ver1": ("", "s3", "m1s3b-n500"), "ver1c": ("-v1c", "v1c", "m1v1c-n500"),
+        # V2: its facts match any judged fact of the reference file (no config of its own in it)
+        "ver2": ("-v2", None, "m1v1c-n500")}
 
 
 def _ver():
@@ -132,7 +134,7 @@ def read(cfg, drop_unjudged=False):
     P = pickle.loads((OUT / f"preds-{base}.pkl").read_bytes())
     sw = sorted(OUT.glob(f"s3cost-{cfg}{tag}-f*.pkl"))
     run = f"m1s3c-{cfg}{tag}" + ("-judged" if drop_unjudged else "")
-    names = ["v7.1", "e1b", "d1", "d12", "d123", lab]
+    names = ["v7.1", "e1b", "d1", "d12", "d123"] + ([lab] if lab else ["s3", "v1c"])
     Q = {"run": run, "items": P["items"], "preds": {}, "margins": {}}
     for c in names:
         Q["preds"][c], Q["margins"][c] = P["preds"][c], P["margins"][c]
@@ -156,7 +158,7 @@ def read(cfg, drop_unjudged=False):
         for i, t in enumerate(L["texts"]):
             for c in cfgs[len(names):]:
                 for k in Q["margins"][c][i]:
-                    f = next((f for f in t["facts"] if (drop_unjudged or lab in f["src"])
+                    f = next((f for f in t["facts"] if (drop_unjudged or lab is None or lab in f["src"])
                               and _same((set(f["key"][0]), f["key"][1], set(f["key"][2])), k)), None)
                     if f is None:
                         un += 1
