@@ -266,7 +266,7 @@ def main() -> int:
         os.environ.pop("KNIV_UNSEEN_FROM", None)
         if "+e1u" in run:                           # "...+e1u": never-trained relations through E1b's relation step
             os.environ["KNIV_UNSEEN_FROM"] = "ultrabert-380m-v8e-w1half"
-        base_run, _, ver = run.replace("+det", "").replace("+e1u", "").replace("+v1c", "").replace("+v2", "").partition("+ver@")   # "RUN+ver@T": RUN with its verifier at threshold T (plan r4 stage 3)
+        base_run, _, ver = run.replace("+det", "").replace("+e1u", "").replace("+v1c", "").replace("+v2", "").replace("+v3", "").partition("+ver@")   # "RUN+ver@T": RUN with its verifier at threshold T (plan r4 stage 3)
         ex = Extractor(base_run, device=args.device, local=args.local, span_boost=args.span_boost)
         ex.trim_det = "+det" in run                 # "...+det": leading articles trimmed from mentions
         deployed[run] = dep = ex.unseen_offset
@@ -274,8 +274,9 @@ def main() -> int:
         ex.unseen_offset = dep - SHIFT
         ex.top = max(ex.top, 4)
         if ver:
-            vname = f"{base_run}-ver2" if "+v2" in run else f"{base_run}-ver1{'c' if '+v1c' in run else ''}"
-            ex.use_verifier(vname, threshold=float(ver))   # "+v1c": V1c; "+v2": the shared-pass verifier
+            vname = (f"{base_run}-ver2" if "+v2" in run else f"{base_run}-ver3" if "+v3" in run
+                     else f"{base_run}-ver1{'c' if '+v1c' in run else ''}")
+            ex.use_verifier(vname, threshold=float(ver))   # "+v1c": V1c; "+v2": the shared-pass verifier; "+v3": the list verifier
             ex.margin_shift = SHIFT
         rows[run] = {}
         for s, items in data.items():

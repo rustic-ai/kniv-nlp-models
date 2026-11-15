@@ -162,12 +162,74 @@ def s4(caps) -> int:
     return 0
 
 
+def s4cmp(tags) -> int:
+    """Plan r4 readiness A3: other verifiers on stage 4's judged long windows
+    (``s4_pilot predict --tag``), read against the margin as the pilot read
+    V1b, on the same windows and the same seeded sample of candidates. The
+    judges read V1b's disagreements only: a verifier's change on one of
+    those is weighted by its window's judging rate; a change V1b did not make
+    was never judged, and is counted per window and bounded (all true / all
+    false)."""
+    base = {r["id"]: r for r in _rows()}
+    lab = _labels()
+    judged_ids = {k[0] for k in lab}
+    runs = {"v1b": {i: r for i, r in base.items() if i in judged_ids}}
+    for t in tags:
+        R = {}
+        for p in sorted(S4.glob(f"ver-{t}-*.pkl")):
+            for r in pickle.loads(p.read_bytes()):
+                R[r["id"]] = r
+        runs[t] = R
+    ids = sorted(set.intersection(*(set(R) for R in runs.values())))
+    print(f"{len(ids)} judged windows read by {', '.join(runs)}")
+    for rd in ("gpt6", "deepseek", "both"):
+        print(f"\n## {rd}: change against the margin alone, per window")
+        print("| verifier | true | false | net | changes per window | of them never judged | net if those all true / all false |")
+        print("|---|---|---|---|---|---|---|")
+        for name, R in runs.items():
+            acc, nchg, nunk = np.zeros(2), 0.0, 0.0
+            for i in ids:
+                b, r = base[i]["cands"], R[i]["cands"]
+                kb = {(c["head"], c["tail"], c["relation"]): c for c in b}
+                samp = [c for c in b if c["p"] is not None]
+                if not samp:
+                    continue
+                w = len(b) / len(samp)
+                dis_b = [c for c in samp if (c["m"] > 0) != (c["p"] >= THR)]
+                J_b = [c for c in dis_b if (i, c["head"], c["tail"], c["relation"]) in lab]
+                rate = len(J_b) / len(dis_b) if dis_b else 0.0
+                byk = {(c["head"], c["tail"], c["relation"]): c for c in r}
+                for c in samp:
+                    k = (c["head"], c["tail"], c["relation"])
+                    x = byk.get(k)
+                    if x is None or x["p"] is None or (c["m"] > 0) == (x["p"] >= THR):
+                        continue
+                    nchg += w
+                    sign = 1.0 if x["p"] >= THR else -1.0
+                    if (c["m"] > 0) == (c["p"] >= THR):     # V1b agreed with the margin: never judged
+                        nunk += w
+                        continue
+                    L = lab.get((i,) + k)
+                    if L is None or rate == 0:
+                        continue
+                    y = L["gpt6"] if rd == "gpt6" else L["deepseek"] if rd == "deepseek" else \
+                        (None if L["gpt6"] is None or L["deepseek"] is None else L["gpt6"] and L["deepseek"])
+                    if y is None:
+                        continue
+                    acc += (w / rate) * (np.array([sign, 0.0]) if y else np.array([0.0, sign]))
+            v, n = acc / len(ids), len(ids)
+            print(f"| {name} | {v[0]:+.2f} | {v[1]:+.2f} | {v[0] - v[1]:+.2f} | {nchg / n:.1f} | {nunk / n:.1f} | "
+                  f"{v[0] - v[1] + nunk / n:+.2f} / {v[0] - v[1] - nunk / n:+.2f} |")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=["s4"])
+    ap.add_argument("cmd", choices=["s4", "s4cmp"])
+    ap.add_argument("--tags", nargs="*", default=["v1c", "v3"], help="s4cmp: the verifiers' tags")
     ap.add_argument("--caps", type=int, nargs="+", default=[8, 16, 32, 64])
     a = ap.parse_args()
-    return s4(a.caps)
+    return s4cmp(a.tags) if a.cmd == "s4cmp" else s4(a.caps)
 
 
 if __name__ == "__main__":

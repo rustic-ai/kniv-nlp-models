@@ -103,15 +103,23 @@ def select(per: int) -> int:
     return 0
 
 
-def predict(part: int, size: int) -> int:
+def predict(part: int, size: int, ver: str = VER, full: bool = False, tag: str = "") -> int:
+    """``tag``: another verifier (plan r4 readiness A3) on the windows with
+    judged disagreements only, written as ``ver-TAG-NNN.pkl``; ``full``:
+    every candidate verified (the list verifier reads them all, as deployed),
+    otherwise the same seeded sample as the pilot."""
     import torch
     from ..infer import Extractor
-    items = json.loads((OUT / "items.json").read_text())[part * size:(part + 1) * size]
+    items = json.loads((OUT / "items.json").read_text())
+    if tag:
+        judged = {t["id"] for t in json.loads((OUT / "labels-astra-c3.json").read_text()) if t["judged"]}
+        items = [it for it in items if it["id"] in judged]
+    items = items[part * size:(part + 1) * size]
     if not items:
         print("empty part")
         return 0
     ex = Extractor(RUN)
-    ex.use_verifier(VER, threshold=THR)
+    ex.use_verifier(ver, threshold=THR)
     ex.margin_shift = 0.0
     orig = ex._verify
     cur = {}
@@ -131,7 +139,8 @@ def predict(part: int, size: int) -> int:
             if i in verd:
                 ex._last_verdicts[j] = verd[i]
         return out
-    ex._verify = sampled
+    if not full:
+        ex._verify = sampled
     rows = []
     for it in items:
         cur["id"] = it["id"]
@@ -148,7 +157,7 @@ def predict(part: int, size: int) -> int:
         rows.append({"id": it["id"], "kind": it["kind"], "cands": cands, "n_facts": len(facts)})
         if ex.device.type == "mps":
             torch.mps.empty_cache()
-    (OUT / f"pred-{part:03d}.pkl").write_bytes(pickle.dumps(rows))
+    (OUT / (f"ver-{tag}-{part:03d}.pkl" if tag else f"pred-{part:03d}.pkl")).write_bytes(pickle.dumps(rows))
     print(f"part {part}: {len(rows)} texts, {sum(len(r['cands']) for r in rows)} verified candidates")
     return 0
 
@@ -259,11 +268,14 @@ def main() -> int:
     ap.add_argument("--size", type=int, default=50)
     ap.add_argument("--cap", type=int, default=437)
     ap.add_argument("--first", type=int, default=0)
+    ap.add_argument("--ver", default=VER, help="predict: the verifier")
+    ap.add_argument("--full", action="store_true", help="predict: verify every candidate, not the pilot's sample")
+    ap.add_argument("--tag", default="", help="predict: write ver-TAG-NNN.pkl, judged windows only")
     a = ap.parse_args()
     if a.cmd == "select":
         return select(a.per)
     if a.cmd == "predict":
-        return predict(a.part, a.size)
+        return predict(a.part, a.size, a.ver, a.full, a.tag)
     if a.cmd == "judge":
         return judge(a.cap, a.first)
     return read()

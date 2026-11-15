@@ -345,7 +345,7 @@ def k4_decode(name: str) -> None:
           f"{Counter(f['src'].split(':')[0] for r in rows for f in r)}")
 
 
-def k4_judge(name: str) -> None:
+def k4_judge(name: str, judge: str = "astra") -> None:
     import asyncio
     from ..annotate.base import CacheStore
     from ..annotate.kg import KGItem
@@ -354,7 +354,7 @@ def k4_judge(name: str) -> None:
     from ..kg_teacher import CACHE
     P = pickle.loads((OUT / f"preds-{name}.pkl").read_bytes())
     rows = json.loads((K / f"k4-open-{name}.json").read_text())
-    spec = load_annotators(["astra"])["astra"]
+    spec = load_annotators([judge])[judge]
     items, keyed = [], []
     for it, facts in zip(P["items"], rows):
         if not facts:
@@ -370,13 +370,13 @@ def k4_judge(name: str) -> None:
     print(f"{len(items)} calls, {sum(len(f) for _, f in keyed)} facts", flush=True)
     ann = CandJudge(spec, CacheStore(CACHE, "c3"))
     ann.prompt = PROMPTS["c3"]
-    res = asyncio.run(_run(ann, items, "k4-open-astra-c3"))
+    res = asyncio.run(_run(ann, items, f"k4-open-{judge}-c3"))
     out = []
     for tid, facts in keyed:
         r = res.get(f"{tid}:k4open")
         v = r.payload if r is not None and r.ok else {}
         out.append({"id": tid, "judged": bool(v), "facts": [{**f, "verdict": v.get(n)} for n, f in enumerate(facts)]})
-    (K / f"k4-labels-{name}.json").write_text(json.dumps(out))
+    (K / f"k4-labels-{name}{'' if judge == 'astra' else '-' + judge}.json").write_text(json.dumps(out))
     print(Counter(f["verdict"] for t in out for f in t["facts"]))
 
 
@@ -537,12 +537,13 @@ def main() -> int:
     ap.add_argument("cmd", choices=["k1", "k2-sample", "k2-score", "layers", "k3",
                                     "k4-decode", "k4-judge", "k4-score", "m4-filter", "v0"])
     ap.add_argument("--name", default="m1p3a-n500")
+    ap.add_argument("--judge", default="astra", help="k4-judge: the judge")
     ap.add_argument("--run", help="m4-filter: the run whose saved M4 rows to filter")
     ap.add_argument("--sizes", default="large,xlarge-u,xlarge-d,tiny", help="v0: release sizes")
     a = ap.parse_args()
     {"k1": lambda: k1(a.name), "k2-sample": lambda: k2_sample(a.name), "k2-score": k2_score,
      "layers": lambda: layers(a.name), "k3": lambda: k3(a.name), "k4-decode": lambda: k4_decode(a.name),
-     "k4-judge": lambda: k4_judge(a.name), "k4-score": lambda: k4_score(a.name),
+     "k4-judge": lambda: k4_judge(a.name, a.judge), "k4-score": lambda: k4_score(a.name),
      "m4-filter": lambda: m4_filter(a.run), "v0": lambda: v0(a.sizes.split(","))}[a.cmd]()
     return 0
 

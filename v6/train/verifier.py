@@ -739,7 +739,19 @@ def score_m1(args) -> int:
     from ..label_bank import load as load_bank
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else
                                           "mps" if torch.backends.mps.is_available() else "cpu"))
-    model, tok = load_verifier(args.run, device)
+    from .gold_eval import CKPT_DIR, HF_REPO, load_run
+    vp = CKPT_DIR / args.run / "verifier.pt"
+    if not vp.exists():
+        from huggingface_hub import hf_hub_download
+        vp = Path(hf_hub_download(HF_REPO, f"{args.run}/verifier.pt", local_dir=str(CKPT_DIR)))
+    v3 = torch.load(vp, map_location="cpu", weights_only=False).get("form") == "v3"
+    if v3:                                  # the list verifier: each text's candidates in shared passes, fixed order
+        from . import verifier3 as V3
+        base3, tok, _, _, _ = load_run(V3.RUN, HF_REPO, device)
+        base3.eval()
+        model = V3.load_v3(vp, base3, device)
+    else:
+        model, tok = load_verifier(args.run, device)
     bank = {r["name"]: r for r in load_bank()["relations"]}
     P = pickle.loads((OUT / f"preds-{args.name}.pkl").read_bytes())
     new = {}
@@ -769,6 +781,18 @@ def score_m1(args) -> int:
         rec = {"tokens": it["tokens"], "sentence_spans": it["sentence_spans"], "speakers": it.get("speakers"),
                "participants": it.get("participants") or [], "entities": [[list(m) for m in ms] for ms in ents],
                "names": names}
+        out = {k: -1e3 for k in keys}           # facts the verifier cannot read go last
+        if v3:
+            ok = [(k, h, t) for k, h, t in cands if h >= 0 and t >= 0 and h != t]
+            prs = V3.score_window(model, rec, [(h, t, k[1]) for k, h, t in ok], tok, bank, device)
+            for (k, _, _), pr in zip(ok, prs):
+                if pr is not None:
+                    p = 1 - float(coarse(np.array([pr]))[0, 1])
+                    out[k] = float(np.log(p + 1e-6) - np.log(1 - p + 1e-6))
+            new[i] = out
+            if i % 100 == 0:
+                print(f"  {i}/{len(P['items'])}", flush=True)
+            continue
         exs, ks = [], []
         for k, h, t in cands:
             if h < 0 or t < 0 or h == t:
