@@ -252,7 +252,7 @@ def build_bundles() -> tuple[Path, Path, str]:
                          corpus / "synth_her_case.json", corpus / "kg_short_d1.json",
                          corpus / "kg_d2_concepts.json", corpus / "kg_d3_forms.json",
                          corpus / "label_para.json", corpus / "verifier_v1.json",
-                         corpus / "verifier_v1c.json")
+                         corpus / "verifier_v1c.json", corpus / "verifier_v3full.json")
              if p.exists()]
     # Keyed by every bundled side file's size and mtime: a name that ignores
     # one ships a stale copy of it (the Re-DocRED evidence was lost that way).
@@ -1109,6 +1109,9 @@ POST_JOBS = {
                 " python -m v6.train.verifier3 prep --run {ev} --out-run {ev}-ver3 --shards 4 --merge --upload",
     "ver3probe": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3 --probe 40",
     "ver3": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3 --upload",
+    # plan r4 readiness C: the full V3 run, V1c's data plus the judged news training texts, the pilot's lists
+    "ver3f": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3f --data verifier_v3full.json"
+             " --lists-run {ev}-ver3 --candidates 760000 --upload",
 }
 POST_LINES = r"^eval \d|^prep|order check|done: best|probe done|training passes|best \(step|training examples|margins above|ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
 

@@ -230,7 +230,7 @@ def load_lists(args) -> dict:
     path = _corpus() / LISTS
     if not path.exists():
         from huggingface_hub import hf_hub_download
-        gz = Path(hf_hub_download(args.repo, f"{args.out_run}/{LISTS.replace('.json', '.json.gz')}",
+        gz = Path(hf_hub_download(args.repo, f"{getattr(args, 'lists_run', None) or args.out_run}/{LISTS.replace('.json', '.json.gz')}",
                                   local_dir=str(_corpus().parent / "v6-eval" / "checkpoints")))
         path.write_bytes(gzip.decompress(gz.read_bytes()))
     return json.loads(path.read_text())["extra"]
@@ -820,6 +820,7 @@ def main() -> int:
     ap.add_argument("--data", default="verifier_v1c.json")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--max-extra", type=int, default=60)
+    ap.add_argument("--lists-run", help="the run whose uploaded lists to read (default: --out-run)")
     ap.add_argument("--queue", type=int, default=4096, help="prep: candidates queued before V1c runs on them")
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--shards", type=int, default=1)
