@@ -128,6 +128,12 @@ class Extractor:
         self.ver_floor = 3.0
         self.ver_log = None             # a list: every verified candidate (pre-verifier margin, p, verdict) is appended
         self.ver_top = None             # candidates verified per pair (None: ``top``, as many as the margin path keeps)
+        # plan r4 V2 step 1: at most ``ver_cap`` candidates verified per window,
+        # those closest to the bar first (``ver_rank`` "near") or the highest
+        # margins ("top"); the rest are left to the margin
+        import os as _os
+        self.ver_cap = int(_os.environ["KNIV_VER_CAP"]) if _os.environ.get("KNIV_VER_CAP") else None
+        self.ver_rank = _os.environ.get("KNIV_VER_RANK", "near")
         self.ver_trained: set[str] = set()
         self.ver_on = True
         # Evaluators add a constant to every offset to see all candidates;
@@ -168,8 +174,14 @@ class Extractor:
             path = Path(hf_hub_download(HF_REPO, f"{run}/verifier.pt", local_dir=str(CKPT_DIR)))
         ck = torch.load(path, map_location="cpu", weights_only=False)
         from .train.verifier import VERDICTS
-        m = Verifier(self.model, r=ck["rank"], n_out=len(ck.get("verdicts", VERDICTS))).to(self.device)
-        m.ver.load_state_dict(ck["ver"]); m.head.load_state_dict(ck["head"])
+        self.ver_form = ck.get("form", "v1")
+        if self.ver_form == "v2":           # plan r4 V2: one pass per window, every candidate from it
+            from .train.verifier2 import LabelCache, load_v2
+            m = load_v2(path, self.model, self.device)
+            self.ver_labels = LabelCache(self.model, self.tok, self.device)
+        else:
+            m = Verifier(self.model, r=ck["rank"], n_out=len(ck.get("verdicts", VERDICTS))).to(self.device)
+            m.ver.load_state_dict(ck["ver"]); m.head.load_state_dict(ck["head"])
         m.eval()
         from .label_bank import load as load_bank
         self.verifier = m
@@ -187,6 +199,16 @@ class Extractor:
                "speakers": w.get("sentence_speakers"), "participants": parts,
                "entities": [[tuple(int(x) for x in m) for m in ms] for ms in spans],
                "names": [n["text"] for n in nodes]}
+        if getattr(self, "ver_form", "v1") == "v2":
+            from .train.verifier2 import score_window
+            got = score_window(self.verifier, rec, cands, self.tok, self.ver_bank, self.ver_labels, self.device)
+            self._last_verdicts = {}
+            out2: list[float | None] = [None] * len(cands)
+            for j, v in enumerate(got):
+                if v is not None:
+                    out2[j] = 1 - v[1]
+                    self._last_verdicts[j] = v if len(v) == 4 else v[:3] + [sum(v[3:])] + v[3:]
+            return out2
         cache: dict = {}
         exs, idx = [], []
         for j, (h, t, rel) in enumerate(cands):
@@ -394,8 +416,17 @@ class Extractor:
             # positive exactly when kept, ranked by the verifier.
             lt = float(np.log(self.ver_threshold) - np.log1p(-self.ver_threshold))
             lv = float(np.log(self.ver_veto) - np.log1p(-self.ver_veto))
-            probs = self._verify(w, nodes, spans, parts, [c[:3] for c in vc])
-            verd = self._last_verdicts
+            sel = list(range(len(vc)))
+            if self.ver_cap is not None and len(vc) > self.ver_cap:
+                key = (lambda j: abs(vm[j] - self.margin_shift)) if self.ver_rank == "near" else (lambda j: -vm[j])
+                sel = sorted(sorted(sel, key=key)[:self.ver_cap])
+            got = self._verify(w, nodes, spans, parts, [vc[j][:3] for j in sel])
+            probs, verd = [None] * len(vc), {}
+            for i, j in enumerate(sel):
+                probs[j] = got[i]
+                if i in self._last_verdicts:
+                    verd[j] = self._last_verdicts[i]
+            self._last_verdicts = verd
             for j, ((h, t, rel, veto), m, p) in enumerate(zip(vc, vm, probs)):
                 if p is not None:
                     q = min(max(p, 1e-6), 1 - 1e-6)

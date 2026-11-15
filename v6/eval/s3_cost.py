@@ -27,10 +27,26 @@ from .m1_precision import OUT, POSITIVE, _same, equal, labels_path
 
 CFGS = {"nest": ("ner+np+nest+merge+ver:2", "s3nest"), "flat": ("ver", "s3")}
 RUN, BASE = "ultrabert-380m-v8p3-d123", "m1s3b-n500"
+# plan r4 V2: V1c's readings against the fixed reference label file
+# (``m1v1c-n500``: v7.1, E1b, D1, D12, d123, V1b (s3) and V1c judged by both)
+VERS = {"ver1": ("", "s3", "m1s3b-n500"), "ver1c": ("-v1c", "v1c", "m1v1c-n500")}
+
+
+def _ver():
+    import os
+    return os.environ.get("KNIV_VERIFIER", f"{RUN}-ver1").rsplit("-", 1)[-1]
+
+
+def _lab(cfg):
+    return CFGS[cfg][1] if _ver() == "ver1" else VERS[_ver()][1]
+
+
+def _base():
+    return VERS[_ver()][2]
 
 
 def _cache(cfg):
-    return OUT / f"s3cost-cache-{cfg}.pkl"
+    return OUT / f"s3cost-cache-{cfg}{VERS[_ver()][0]}.pkl"
 
 
 def _extractor(cfg):
@@ -48,7 +64,7 @@ def _extractor(cfg):
 
 
 def _items():
-    return pickle.loads((OUT / f"preds-{BASE}.pkl").read_bytes())["items"]
+    return pickle.loads((OUT / f"preds-{_base()}.pkl").read_bytes())["items"]
 
 
 def fill(cfg):
@@ -79,10 +95,11 @@ def fill(cfg):
     return 0
 
 
-def sweep(cfg, floor, ver_top):
+def sweep(cfg, floor, ver_top, cap=0, rank="near"):
     C = pickle.loads(_cache(cfg).read_bytes())
     ex = _extractor(cfg)
     ex.ver_floor, ex.ver_top = float(floor), int(ver_top) or None
+    ex.ver_cap, ex.ver_rank = (int(cap) or None), rank
     cur, n_read = {}, []
     ex._entities = lambda w, types: C["ents"][cur["id"]]
 
@@ -99,8 +116,9 @@ def sweep(cfg, floor, ver_top):
         r = hz.predict(ex, [it], "e2e")[0]
         preds.append(sorted({c["key"] for c in r["cand"] if c["m"] > 0}, key=str))
         margins.append({c["key"]: max(c["m"], -1e9) for c in r["cand"] if c["m"] > 0})
-    name = f"f{floor:g}k{ver_top}"
-    p = OUT / f"s3cost-{cfg}-{name}.pkl"
+    import os
+    name = f"f{floor:g}k{ver_top}" + (f"c{cap}{rank}" if cap else "") + ("r" if os.environ.get("KNIV_UNSEEN_FROM") else "")
+    p = OUT / f"s3cost-{cfg}{VERS[_ver()][0]}-{name}.pkl"
     p.write_bytes(pickle.dumps({"preds": preds, "margins": margins, "n_read": n_read}))
     print(f"{cfg} {name}: {sum(map(len, preds))} facts, {sum(n_read) / len(n_read):.1f} candidates verified per text")
     return 0
@@ -110,10 +128,10 @@ def read(cfg, drop_unjudged=False):
     """``drop_unjudged``: leave out swept facts no judged fact matches (span
     variants the merge kept once a sibling was dropped) instead of counting
     them false: the reading if they are as precise as the judged ones."""
-    lab = CFGS[cfg][1]
-    P = pickle.loads((OUT / f"preds-{BASE}.pkl").read_bytes())
-    sw = sorted(OUT.glob(f"s3cost-{cfg}-f*.pkl"))
-    run = f"m1s3c-{cfg}" + ("-judged" if drop_unjudged else "")
+    lab, base, tag = _lab(cfg), _base(), VERS[_ver()][0]
+    P = pickle.loads((OUT / f"preds-{base}.pkl").read_bytes())
+    sw = sorted(OUT.glob(f"s3cost-{cfg}{tag}-f*.pkl"))
+    run = f"m1s3c-{cfg}{tag}" + ("-judged" if drop_unjudged else "")
     names = ["v7.1", "e1b", "d1", "d12", "d123", lab]
     Q = {"run": run, "items": P["items"], "preds": {}, "margins": {}}
     for c in names:
@@ -124,7 +142,7 @@ def read(cfg, drop_unjudged=False):
         c = f.stem.split("-")[-1]
         Q["preds"][c], Q["margins"][c] = S["preds"], S["margins"]
         if drop_unjudged:
-            L0 = json.loads(labels_path(BASE, "astra", "c3").read_text())["texts"]
+            L0 = json.loads(labels_path(base, "astra", "c3").read_text())["texts"]
             keep = [{k: m for k, m in ms.items() if any(_same(k, (set(f["key"][0]), f["key"][1], set(f["key"][2])))
                                                          for f in t["facts"])} for t, ms in zip(L0, S["margins"])]
             Q["margins"][c] = keep
@@ -133,7 +151,7 @@ def read(cfg, drop_unjudged=False):
     (OUT / f"preds-{run}.pkl").write_bytes(pickle.dumps(Q))
     cfgs = names + [c for c in Q["preds"] if c not in names]
     for judge in ("astra", "deepseek", "both"):
-        L = json.loads(labels_path(BASE, judge, "c3").read_text())
+        L = json.loads(labels_path(base, judge, "c3").read_text())
         un = 0
         for i, t in enumerate(L["texts"]):
             for c in cfgs[len(names):]:
@@ -158,12 +176,14 @@ def main() -> int:
     ap.add_argument("--cfg", default="nest", choices=list(CFGS))
     ap.add_argument("--floor", type=float, default=3.0)
     ap.add_argument("--ver-top", type=int, default=4)
+    ap.add_argument("--cap", type=int, default=0, help="sweep: at most CAP candidates verified per window")
+    ap.add_argument("--rank", default="near", choices=["near", "top"])
     ap.add_argument("--drop-unjudged", action="store_true", help="read: leave unjudged swept facts out")
     a = ap.parse_args()
     if a.cmd == "fill":
         return fill(a.cfg)
     if a.cmd == "sweep":
-        return sweep(a.cfg, a.floor, a.ver_top)
+        return sweep(a.cfg, a.floor, a.ver_top, a.cap, a.rank)
     return read(a.cfg, a.drop_unjudged)
 
 

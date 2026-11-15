@@ -1098,8 +1098,11 @@ POST_JOBS = {
     "ver": "python -m v6.train.verifier train --run {ev} --out-run {ev}-ver1 --upload",
     # plan r4 review step 3: V1c, both judges, hedge kinds, long windows (data/v6-corpus/verifier_v1c.json)
     "ver1c": "python -m v6.train.verifier train --run {ev} --out-run {ev}-ver1c --data verifier_v1c.json --upload",
+    # plan r4 V2: the shared-pass verifier on V1c's data; the probe runs the longest batches first and stops
+    "ver2probe": "python -m v6.train.verifier2 train --run {ev} --out-run {ev}-ver2probe --probe 40",
+    "ver2": "python -m v6.train.verifier2 train --run {ev} --out-run {ev}-ver2 --upload",
 }
-POST_LINES = r"^eval \d|done: best|training examples|margins above|ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
+POST_LINES = r"^eval \d|done: best|probe done|training passes|best \(step|training examples|margins above|ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
 
 POST_START = r'''
 import json, os, subprocess, sys
