@@ -291,7 +291,7 @@ def _mention_entities(tokens: list[str]):
     return ent, ents, names
 
 
-def build_k(seed: int = 13) -> int:
+def build_k(seed: int = 13, news: bool = False, out: str = DATA_K) -> int:
     """V1b's set rebuilt for V1c: hedge kinds (from the payload's modality
     for generated rows, from DeepSeek where it judged), the agreement filter
     wherever both judges labelled a text (D1's sample, D1e, the stage-4
@@ -303,7 +303,7 @@ def build_k(seed: int = 13) -> int:
     rng = random.Random(seed)
     c = Counter()
     recs = []
-    sec = {k: _second(k) for k in ("d1", "d1e", "s4")}
+    sec = {k: _second(k) for k in ("d1", "d1e", "s4", "news-train")}
     short = json.loads((_corpus() / "kg_short.json").read_text())
     labels = {r["id"]: r for r in json.loads(
         (RUNS_DIR / "kg-judge" / "labels-d1-full-ultrabert-380m-v7b8ev.json").read_text())}
@@ -371,6 +371,30 @@ def build_k(seed: int = 13) -> int:
                              "participants": it.get("participants") or [],
                              "entities": [[list(m) for m in ms] for ms in ents], "names": names, "cands": cands})
                 c["d1e texts"] += 1
+    # plan r4 readiness C: the judged news training texts (the held-out news set stays out), as D1e
+    for run in (["ultrabert-380m-v8p3-d123-news-train"] if news else []):
+        L = json.loads(labels_path(run, "astra", "c3").read_text())
+        P = pickle.loads((M1 / f"preds-{run}.pkl").read_bytes())
+        for it, t in zip(P["items"], L["texts"]):
+            if not t["judged"] or not t["facts"]:
+                continue
+            two = sec["news-train"].get(it["id"])
+            ent, ents, names = _mention_entities(it["tokens"])
+            cands = []
+            for j, f in enumerate(t["facts"]):
+                if "teacher" in f["src"] and len(f["src"]) == 1:
+                    continue
+                y = _k_label(f["verdict"], two[j] if two else None, c)
+                h, tl = ent(f["key"][0]), ent(f["key"][2])
+                if y is None or h is None or tl is None or h == tl:
+                    continue
+                cands.append({"h": h, "t": tl, "rel": f["key"][1], "y": y, "src": "news"})
+            if cands:
+                recs.append({"id": it["id"], "split": "train", "tokens": it["tokens"],
+                             "sentence_spans": it["sentence_spans"], "speakers": it.get("speakers"),
+                             "participants": it.get("participants") or [],
+                             "entities": [[list(m) for m in ms] for ms in ents], "names": names, "cands": cands})
+                c["news texts"] += 1
     S = RUNS_DIR / "s4-pilot"
     items = {it["id"]: it for it in json.loads((S / "items.json").read_text())}
     for t in json.loads((S / "labels-astra-c3.json").read_text()):
@@ -396,10 +420,10 @@ def build_k(seed: int = 13) -> int:
     for r in recs:
         for x in r["cands"]:
             c[f"cand {r['split']} {x['src']} {'hedged?' if x['y'] == HEDGED_ANY else VERDICTS_K[x['y']]}"] += 1
-    (_corpus() / DATA_K).write_text(json.dumps({"records": recs, "verdicts": VERDICTS_K}))
+    (_corpus() / out).write_text(json.dumps({"records": recs, "verdicts": VERDICTS_K}))
     for k in sorted(c):
         print(f"  {k}: {c[k]:,}")
-    print("wrote", _corpus() / DATA_K)
+    print("wrote", _corpus() / out)
     return 0
 
 
@@ -960,6 +984,8 @@ def score_m2(args) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--news", action="store_true", help="build-k: add the judged news training texts")
+    ap.add_argument("--out-data", default=DATA_K, help="build-k: the data file written")
     ap.add_argument("cmd", choices=["build", "build-k", "train", "score-m1", "score-m3", "score-m2"])
     ap.add_argument("--run", default="ultrabert-380m-v8e-w1half")
     ap.add_argument("--out-run", default="ultrabert-380m-v8v1")
@@ -995,7 +1021,7 @@ def main() -> int:
     if a.cmd == "build":
         return build(a.seed, a.d1e)
     if a.cmd == "build-k":
-        return build_k(a.seed)
+        return build_k(a.seed, a.news, a.out_data)
     if a.cmd == "train":
         return train(a)
     if a.cmd == "score-m3":
