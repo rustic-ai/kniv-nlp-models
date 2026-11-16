@@ -1114,6 +1114,16 @@ POST_JOBS = {
     # plan r4 readiness C: the full V3 run, V1c's data plus the judged news training texts, the pilot's lists
     "ver3f": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3f --data verifier_v3full.json"
              " --lists-run {ev}-ver3 --candidates 760000 --upload",
+    # plan r4 decision 17: the DeBERTa teacher's V3-form verifier, V3f's data and settings, its own lists and V1c-form soft targets
+    "ver3dprep": "python -m v6.train.verifier3 prep --run {ev} --data verifier_v3full.json --limit 1 > /content/prep-warm.log 2>&1;"
+                 " for k in 0 1 2 3; do python -m v6.train.verifier3 prep --run {ev} --data verifier_v3full.json --shard $k --shards 4"
+                 " > /content/prep-$k.log 2>&1 & done; wait; tail -n 2 /content/prep-*.log;"
+                 " python -m v6.train.verifier3 prep --run {ev} --data verifier_v3full.json --out-run {ev}-ver3f --shards 4 --merge --upload",
+    "ver3dprobe": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3f --data verifier_v3full.json --probe 40",
+    "ver3fd": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3f --data verifier_v3full.json"
+              " --candidates 760000 --upload",
+    "ver3fd16": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3f --data verifier_v3full.json"
+                " --candidates 760000 --batch 16 --upload",
 }
 POST_LINES = r"^eval \d|^prep|order check|done: best|probe done|training passes|best \(step|training examples|margins above|ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
 

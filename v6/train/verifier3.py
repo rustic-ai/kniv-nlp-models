@@ -61,6 +61,16 @@ from .verifier2 import v1c_held_keys
 
 RUN, V1C = "ultrabert-380m-v8p3-d123", "ultrabert-380m-v8p3-d123-ver1c"
 LISTS = "verifier_v3_lists.json"
+
+
+def lists_name(args) -> str:
+    """The list file of ``args.run`` (UltraBERT d123's keeps its first name)."""
+    return LISTS if getattr(args, "run", RUN) == RUN else f"verifier_v3_lists-{args.run}.json"
+
+
+def v1c_of(args) -> str:
+    """The V1c-form verifier trained on ``args.run`` (soft targets, warm start)."""
+    return f"{getattr(args, 'run', RUN)}-ver1c"
 SOFT = -2           # label of a candidate trained on V1c's probabilities
 MAX_PASS = 1024
 
@@ -101,15 +111,15 @@ def prep(args) -> int:
         return merge_parts(args)
     # held-out records: only those V1c's held-out examples read
     from .gold_eval import load_run
-    _, tok0, *_ = load_run(RUN, args.repo, torch.device("cpu"))
+    _, tok0, *_ = load_run(args.run, args.repo, torch.device("cpu"))
     need = {recs[i]["id"] for sp in ("held", "held_long") for i in v1c_held_keys(recs, tok0, bank, sp, args.dev_limit)}
     recs = [r for r in recs if r["split"] == "train" or r["id"] in need]
     if args.limit:
         recs = recs[:args.limit]
     recs = [r for k, r in enumerate(recs) if k % args.shards == args.shard]
     schemas = _schemas()
-    ex = Extractor(RUN, device=str(device))
-    ex.use_verifier(V1C, threshold=0.6)
+    ex = Extractor(args.run, device=str(device))
+    ex.use_verifier(v1c_of(args), threshold=0.6)
     ex.margin_shift = 0.0
     cap = {}
     orig = ex._verify
@@ -191,10 +201,10 @@ def prep(args) -> int:
     if queue:
         n_extra += flush(queue)
     ex._verify = orig
-    path = _corpus() / LISTS
+    path = _corpus() / lists_name(args)
     if args.shards > 1:
         path = path.with_suffix(f".part{args.shard}.json")
-    path.write_text(json.dumps({"run": RUN, "verifier": V1C, "max_extra": args.max_extra, "extra": out}))
+    path.write_text(json.dumps({"run": args.run, "verifier": v1c_of(args), "max_extra": args.max_extra, "extra": out}))
     print(f"prep done: {len(recs):,} records, {n_all:,} extractor candidates, {n_extra:,} unlabelled kept "
           f"-> {path}", flush=True)
     if args.shards > 1:
@@ -203,7 +213,7 @@ def prep(args) -> int:
 
 
 def merge_parts(args) -> int:
-    path = _corpus() / LISTS
+    path = _corpus() / lists_name(args)
     out = {}
     for k in range(args.shards):
         d = json.loads(path.with_suffix(f".part{k}.json").read_text())
@@ -227,10 +237,10 @@ def _upload(args, path) -> int:
 
 
 def load_lists(args) -> dict:
-    path = _corpus() / LISTS
+    path = _corpus() / lists_name(args)
     if not path.exists():
         from huggingface_hub import hf_hub_download
-        gz = Path(hf_hub_download(args.repo, f"{getattr(args, 'lists_run', None) or args.out_run}/{LISTS.replace('.json', '.json.gz')}",
+        gz = Path(hf_hub_download(args.repo, f"{getattr(args, 'lists_run', None) or args.out_run}/{lists_name(args).replace('.json', '.json.gz')}",
                                   local_dir=str(_corpus().parent / "v6-eval" / "checkpoints")))
         path.write_bytes(gzip.decompress(gz.read_bytes()))
     return json.loads(path.read_text())["extra"]
@@ -575,9 +585,9 @@ def _setup(args, device):
 def _v1c_ck(args):
     from .gold_eval import CKPT_DIR, HF_REPO
     from huggingface_hub import hf_hub_download
-    p = CKPT_DIR / V1C / "verifier.pt"
+    p = CKPT_DIR / v1c_of(args) / "verifier.pt"
     if not p.exists():
-        p = Path(hf_hub_download(args.repo or HF_REPO, f"{V1C}/verifier.pt", local_dir=str(CKPT_DIR)))
+        p = Path(hf_hub_download(args.repo or HF_REPO, f"{v1c_of(args)}/verifier.pt", local_dir=str(CKPT_DIR)))
     return torch.load(p, map_location="cpu", weights_only=False)
 
 
