@@ -1120,6 +1120,17 @@ POST_JOBS = {
                  " > /content/prep-$k.log 2>&1 & done; wait; tail -n 2 /content/prep-*.log;"
                  " python -m v6.train.verifier3 prep --run {ev} --data verifier_v3full.json --out-run {ev}-ver3f --shards 4 --merge --upload",
     "ver3dprobe": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3f --data verifier_v3full.json --probe 40",
+    # DeBERTa: four prep processes do not fit on 40 GB (each held ~20 GiB); two with a smaller queue,
+    # any shard that still fails rerun alone, then the probe and the full run at batch 16
+    "ver3dprep2": "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True;"
+                  " python -m v6.train.verifier3 prep --run {ev} --data verifier_v3full.json --limit 1 > /content/prep-warm.log 2>&1;"
+                  " for k in 0 1; do python -m v6.train.verifier3 prep --run {ev} --data verifier_v3full.json --shard $k --shards 2"
+                  " --queue 1024 > /content/prep-$k.log 2>&1 & done; wait;"
+                  " for k in 0 1; do [ -f data/v6-corpus/verifier_v3_lists-{ev}.part$k.json ] || python -m v6.train.verifier3 prep"
+                  " --run {ev} --data verifier_v3full.json --shard $k --shards 2 --queue 1024 > /content/prep-$k-retry.log 2>&1; done;"
+                  " tail -n 2 /content/prep-*.log;"
+                  " python -m v6.train.verifier3 prep --run {ev} --data verifier_v3full.json --out-run {ev}-ver3f --shards 2 --merge --upload",
+    "ver3dprobe16": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3f --data verifier_v3full.json --probe 40 --batch 16",
     "ver3fd": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3f --data verifier_v3full.json"
               " --candidates 760000 --upload",
     "ver3fd16": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3f --data verifier_v3full.json"
