@@ -1155,6 +1155,9 @@ POST_JOBS = {
                " python -m v6.train.teacher_labels dump --run $R --set news --shard 0/34 --name tl-probe 2>&1 | grep -E '^  [0-9]|Error' | tail -1;"
                " for k in 1 2; do python -m v6.train.teacher_labels dump --run $R --set student --shard $k/390 --name tl-probe"
                " > /content/tl-$k.log 2>&1 & done; wait; tail -n 2 /content/tl-1.log /content/tl-2.log | grep -E '^  [0-9]|Error'; done",
+    # the full teacher labels (probe 2026-11-17): UltraBERT three processes, DeBERTa two on half the memory each
+    "tlu": "PYTHON=python bash v6/train/teacher_labels.sh {ev} 3 24 0.32",
+    "tld": "PYTHON=python bash v6/train/teacher_labels.sh {ev} 2 24 0.48",
     # the probe at batch 16 with at most 7,000 padded subwords per batch, then the full run only if its peak is under 34 GiB
     "ver3fd16t": "python -c \"import json,sys; d=json.load(open('data/v6-corpus/verifier_v3_lists-{ev}.json'));"
                  " n=len(d['extra']); print('lists', n, 'records'); sys.exit(0 if n > 30000 else 1)\" &&"

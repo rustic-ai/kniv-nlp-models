@@ -126,7 +126,7 @@ class Dumper:
                              m[i, j].astype(np.float16))
                 if self.vectors:            # span words at the kept spans' first and last words, at most 32
                     ki = np.nonzero(m.max(1) > 0)[0]
-                    rows = sorted({int(c[q, 0]) for q in ki} | {int(c[q, 1]) for q in ki})[:32]
+                    rows = sorted({int(c[q, 0]) for q in ki} | {int(c[q, 1]) - 1 for q in ki})[:32]
                     if rows:
                         t["span_vec"] = (np.asarray(rows, dtype=np.int16),
                                          o["span_words"][0][rows].astype(np.float16))

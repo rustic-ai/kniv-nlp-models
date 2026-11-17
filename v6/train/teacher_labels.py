@@ -211,12 +211,20 @@ def extra(a) -> int:
 def dump(a) -> int:
     import torch
     dev = a.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    i, n = (int(x) for x in a.shard.split("/"))
+    path = OUT.parent / a.name / a.run / f"{a.set}-shard-{i}-of-{n}.pkl"
+    if a.upload and a.skip_done:                # a shard already on the hub (an earlier VM) is not dumped again
+        from huggingface_hub import HfApi
+        from .gold_eval import HF_REPO
+        if HfApi().file_exists(HF_REPO, f"{a.run}/{a.name}/{path.name}"):
+            print(f"{path.name}: on the hub, skipped", flush=True)
+            return 0
+    if dev == "cuda" and a.mem_fraction:
+        torch.cuda.set_per_process_memory_fraction(a.mem_fraction)
     lab = Labeller(a.run, a.ver or f"{a.run}-ver3f", ROUTE.get(a.run) if a.route == "auto" else (a.route or None), dev,
                    a.release, a.local)
     ws = windows(a.set)
-    i, n = (int(x) for x in a.shard.split("/"))
     ws = ws[i::n][:a.limit] if a.limit else ws[i::n]
-    path = OUT.parent / a.name / a.run / f"{a.set}-shard-{i}-of-{n}.pkl"
     path.parent.mkdir(parents=True, exist_ok=True)
     prog = path.with_suffix(".progress.pkl")
     out, start = {}, 0
@@ -225,11 +233,28 @@ def dump(a) -> int:
         start = len(out)
         print(f"resuming at {start:,} from {prog.name}", flush=True)
     t0, peak = time.time(), 0.0
-    stats = {"ver": 0, "kept": 0, "open": 0, "open_keep": 0, "route": 0}
+    stats = {"ver": 0, "kept": 0, "open": 0, "open_keep": 0, "route": 0, "oom_retried": 0, "skipped": 0}
+    skipped = []
     for c, w in enumerate(ws):
         if c < start:
             continue
-        t = lab.window(w)
+        t = None
+        for attempt in (0, 1):              # out of memory: free the cache and try the window once more, then skip it
+            failed = False
+            try:
+                t = lab.window(w)
+            except torch.OutOfMemoryError:
+                failed = True
+            if not failed:
+                break
+            t = None
+            if dev == "cuda":
+                torch.cuda.empty_cache()
+            stats["oom_retried" if attempt == 0 else "skipped"] += 1
+        if t is None:
+            skipped.append(w["id"])
+            print(f"  {w['id']}: skipped, out of memory twice ({len(w['tokens'])} words)", flush=True)
+            continue
         out[w["id"]] = t
         stats["ver"] += len(t["ver"]); stats["kept"] += len(t["kept"]); stats["open"] += len(t["open"])
         stats["open_keep"] += sum(f["keep"] for f in t["open"]); stats["route"] += len(t.get("rel_route", [[]])[0])
@@ -240,6 +265,8 @@ def dump(a) -> int:
                   f"{(time.time() - t0) / max(c + 1 - start, 1):.2f} s per window]", flush=True)
         if a.save_every and (c + 1) % a.save_every == 0 and c < len(ws) - 1:
             prog.write_bytes(pickle.dumps(out, protocol=5))
+    if skipped:
+        out["_skipped"] = skipped
     path.write_bytes(pickle.dumps(out, protocol=5))
     prog.unlink(missing_ok=True)
     print(f"wrote {path}: {len(out):,} windows, {path.stat().st_size >> 20} MB [{time.time() - t0:.0f}s]", flush=True)
@@ -268,6 +295,8 @@ def main() -> int:
     d.add_argument("--local", type=Path)
     d.add_argument("--name", default="teacher-labels-v8")
     d.add_argument("--upload", action="store_true")
+    d.add_argument("--skip-done", action="store_true", help="with --upload: skip a shard already on the hub")
+    d.add_argument("--mem-fraction", type=float, default=0.0, help="this process's share of GPU memory")
     sub.add_parser("extra", help="write the s4 and news windows into the corpus (the VM reads them there)")
     a = ap.parse_args()
     return extra(a) if a.cmd == "extra" else dump(a)
