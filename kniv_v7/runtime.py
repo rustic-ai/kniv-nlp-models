@@ -336,6 +336,12 @@ def link_clusters(antecedent: dict[int, int]) -> list[list[int]]:
     return sorted(sorted(g) for g in groups.values() if len(g) > 1)
 
 
+def _predicate_text(f: dict) -> str:
+    """An open fact's predicate as the label encoder reads it: its words, or
+    for a copula or an apposition its phrase ("is the chief executive of")."""
+    return (f["predicate"].get("phrase") or f["predicate"]["text"]).lower()
+
+
 def label_text(rel: dict) -> str:
     return f"relation: {rel['name']}. {rel['description']}" if rel.get("description") \
         else f"relation: {rel['name']}"
@@ -419,12 +425,47 @@ class Kniv:
 
     # ── public ──────────────────────────────────────────────────────
     def analyse(self, text: str | None = None, turns=None, relations=(), entity_types=None,
-                linguistic: bool = True, top: int | None = None) -> list[dict]:
+                linguistic: bool = True, top: int | None = None, open_facts: bool = False) -> list[dict]:
         """``text`` (paragraphs separated by blank lines) or ``turns``
         (``(speaker, text)`` pairs); ``relations`` and ``entity_types`` as
-        ``{"name", "description"?}``. One result per window."""
-        return [self.window(w, list(relations), entity_types, linguistic, top or self.top)
-                for w in windows(text, turns)]
+        ``{"name", "description"?}``. One result per window. ``open_facts``:
+        also schema-free facts decoded from the linguistic layer
+        (``kniv_v7.open_facts``), each with its nearest known relation."""
+        out = []
+        for w in windows(text, turns):
+            r = self.window(w, list(relations), entity_types, linguistic or open_facts, top or self.top)
+            if open_facts:
+                from .open_facts import decode
+                r["open_facts"] = self.nearest_relations(decode(r), list(relations))
+                if not linguistic:
+                    for k in ("words", "ner", "srl", "sentence_layers", "coref"):
+                        r.pop(k, None)
+            out.append(r)
+        return out
+
+    def nearest_relations(self, facts: list[dict], relations=()) -> list[dict]:
+        """Each open fact's nearest relation by the label encoder: among
+        ``relations`` if given, else the label bank's; ``{"name", "similarity"}``
+        (cosine of "relation: <predicate lemma>" and the relation's text)."""
+        if not facts:
+            return facts
+        rels = list(relations) or getattr(self, "_bank_relations", None)
+        if not rels:
+            bank = self.path / "label_bank.json"
+            rels = self._bank_relations = ([{"name": r["name"], "description": r.get("description")}
+                                            for r in json.loads(bank.read_text())["relations"]
+                                            if "DEPRECATED" not in r["name"]]
+                                           if bank.exists() else [])
+        if not rels:
+            return facts
+        R = self._relation_matrix(rels)
+        P = self.label_emb([f"relation: {_predicate_text(f)}" for f in facts]).astype(np.float32)
+        P = P / np.maximum(np.linalg.norm(P, axis=-1, keepdims=True), 1e-6)
+        S = P @ R.T
+        for f, row in zip(facts, S):
+            j = int(row.argmax())
+            f["nearest_relation"] = {"name": rels[j]["name"], "similarity": round(float(row[j]), 4)}
+        return facts
 
     def extract(self, text=None, turns=None, relations=(), entity_types=None, top=None):
         """Entities and facts only (no linguistic layer in the output)."""
@@ -535,6 +576,32 @@ class Kniv:
         en = np.where(pos < h, -1e9, lg[..., 1]).argmax(1)
         span = {w: (int(pos[i, st[i]]), int(pos[i, en[i]])) for i, w in enumerate(heads)}
         return [[span[w] for w in c] for c in clusters]
+
+    def _relation_matrix(self, rels: list[dict]) -> np.ndarray:
+        """Unit label vectors of ``rels``, 64 at a time; cached in memory, and
+        on disk (``~/.cache/kniv``) for the label bank's (about a minute on CPU)."""
+        import hashlib
+        texts = [label_text(r) for r in rels]
+        key = hashlib.sha1(("\n".join(texts) + str(self.path.resolve())).encode()).hexdigest()[:16]
+        mem = self.__dict__.setdefault("_rel_mats", {})
+        if key in mem:
+            return mem[key]
+        disk = Path.home() / ".cache" / "kniv" / f"relations-{key}.npy"
+        if len(texts) > 64 and disk.exists():
+            R = np.load(disk)
+        else:
+            R = np.concatenate([self.run("label", **dict(zip(("label_ids", "label_mask"),
+                                                              self.tok.labels(texts[i:i + 64]))))[0]
+                                for i in range(0, len(texts), 64)]).astype(np.float32)
+            R = R / np.maximum(np.linalg.norm(R, axis=-1, keepdims=True), 1e-6)
+            if len(texts) > 64:
+                try:
+                    disk.parent.mkdir(parents=True, exist_ok=True)
+                    np.save(disk, R)
+                except OSError:
+                    pass
+        mem[key] = R
+        return R
 
     def label_emb(self, texts: list[str]) -> np.ndarray:
         key = tuple(texts)

@@ -253,6 +253,36 @@ class Extractor:
             torch.mps.empty_cache()
         return out
 
+    def verify_open(self, w: dict, facts: list[dict], threshold: float | None = None) -> list[dict]:
+        """Schema-free facts (``kniv_v7.open_facts.decode`` on this window's
+        linguistic layer) through the attached verifier, each as the candidate
+        ``subject | predicate | object`` (no description; arguments are every
+        occurrence of their names). Sets ``verifier`` (probability expressed;
+        None where the window does not fit) and, from the verdicts, polarity
+        and hedging; returns the facts at or above ``threshold`` (all if None)."""
+        from .train.verifier import _mention_entities
+        ent, ents, names = _mention_entities(w["tokens"])
+        cands, idx = [], []
+        for j, f in enumerate(facts):
+            h = ent(f["subject"]["names"] or [f["subject"]["text"]])
+            t = ent(f["object"]["names"] or [f["object"]["text"]])
+            f["verifier"] = None
+            if h is not None and t is not None and h != t:
+                cands.append((h, t, f["predicate"]["text"]))
+                idx.append(j)
+        if cands:
+            nodes = [{"text": n} for n in names]
+            got = self._verify(w, nodes, ents, [], cands)
+            for k, (j, p) in enumerate(zip(idx, got)):
+                facts[j]["verifier"] = p
+                v = self._last_verdicts.get(k)
+                if p is not None and v is not None:       # supported, not, negated, hedged
+                    facts[j]["polarity"] = "negative" if v[2] > v[0] and v[2] >= v[3] else facts[j]["polarity"]
+                    facts[j]["hedged"] = bool(v[3] > v[0] and v[3] > v[2])
+        if threshold is None:
+            return facts
+        return [f for f in facts if f["verifier"] is not None and f["verifier"] >= threshold]
+
     # ── text to windows ──────────────────────────────────────────────
     @staticmethod
     def windows(text: str | None = None, turns=None) -> list[dict]:
