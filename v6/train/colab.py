@@ -1135,6 +1135,26 @@ POST_JOBS = {
               " --candidates 760000 --upload",
     "ver3fd16": "python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3f --data verifier_v3full.json"
                 " --candidates 760000 --batch 16 --upload",
+    # DeBERTa lists, third form: two shards on half the memory each (a record that does not fit splits its
+    # schema), resume points every 2,000 records, a sequential retry that resumes any shard that stopped
+    "ver3dprep3": "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True;"
+                  " python -m v6.train.verifier3 prep --run {ev} --data verifier_v3full.json --limit 1 > /content/prep-warm.log 2>&1;"
+                  " for k in 0 1; do python -m v6.train.verifier3 prep --run {ev} --data verifier_v3full.json --shard $k --shards 2"
+                  " --queue 1024 --mem-fraction 0.48 > /content/prep-$k.log 2>&1 & done; wait;"
+                  " for t in 1 2; do for k in 0 1; do [ -f data/v6-corpus/verifier_v3_lists-{ev}.part$k.json ] || python -m"
+                  " v6.train.verifier3 prep --run {ev} --data verifier_v3full.json --shard $k --shards 2 --queue 1024"
+                  " > /content/prep-$k-retry$t.log 2>&1; done; done;"
+                  " grep -hE 'prep done|skipped|Error' /content/prep-*.log | cut -c1-400;"
+                  " python -m v6.train.verifier3 prep --run {ev} --data verifier_v3full.json --out-run {ev}-ver3f --shards 2 --merge --upload",
+    # the probe at batch 16 with at most 7,000 padded subwords per batch, then the full run only if its peak is under 34 GiB
+    "ver3fd16t": "python -c \"import json,sys; d=json.load(open('data/v6-corpus/verifier_v3_lists-{ev}.json'));"
+                 " n=len(d['extra']); print('lists', n, 'records'); sys.exit(0 if n > 30000 else 1)\" &&"
+                 " python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3f --data verifier_v3full.json --probe 60"
+                 " --batch 16 --max-tokens 7000 2>&1 | tee /content/probe.log | grep -v '^step [0-9]* seen' &&"
+                 " python -c \"import re,sys; m=re.search(r'probe done: .*peak ([0-9.]+) GiB', open('/content/probe.log').read());"
+                 " print('probe peak', m and m.group(1)); sys.exit(0 if m and float(m.group(1)) <= 34 else 1)\" &&"
+                 " python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3f --data verifier_v3full.json"
+                 " --candidates 760000 --batch 16 --max-tokens 7000 --upload",
 }
 POST_LINES = r"^eval \d|^prep|order check|done: best|probe done|training passes|best \(step|training examples|margins above|ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
 

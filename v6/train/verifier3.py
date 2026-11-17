@@ -118,6 +118,8 @@ def prep(args) -> int:
         recs = recs[:args.limit]
     recs = [r for k, r in enumerate(recs) if k % args.shards == args.shard]
     schemas = _schemas()
+    if device.type == "cuda" and args.mem_fraction:     # parallel shards: each fails on its own share, not the other's
+        torch.cuda.set_per_process_memory_fraction(args.mem_fraction)
     ex = Extractor(args.run, device=str(device))
     ex.use_verifier(v1c_of(args), threshold=0.6)
     ex.margin_shift = 0.0
@@ -134,22 +136,75 @@ def prep(args) -> int:
     t_rel = t_ver = 0.0
     from .verifier import collate as vcollate
 
+    oom = {"scale": 1.0, "split": 0, "flush": 0, "skipped": []}
+
     def flush(q):
-        """V1c over queued candidates, sorted by length, batches within a token budget."""
+        """V1c over queued candidates, sorted by length, batches within a token
+        budget; on running out of memory the budget halves and the batch reruns."""
         q = sorted(q, key=lambda x: len(x[2]["ids"]))
         i = 0
         while i < len(q):
             L = len(q[i][2]["ids"])
-            k = max(1, min(256, (256 * 128 * 128) // max(L * L, 1)))
+            k = max(1, min(256, int(oom["scale"] * (256 * 128 * 128)) // max(L * L, 1)))
             chunk = q[i:i + k]
             k = len(chunk)
-            with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
-                lg = ex.verifier(vcollate([c[2] for c in chunk], ex.tok.pad_token_id, device))
+            lg = None
+            try:
+                with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
+                    lg = ex.verifier(vcollate([c[2] for c in chunk], ex.tok.pad_token_id, device))
+            except torch.OutOfMemoryError:
+                pass
+            if lg is None:
+                torch.cuda.empty_cache()
+                if k == 1:
+                    raise RuntimeError(f"V1c out of memory on one candidate of {L} subwords")
+                oom["scale"] /= 2
+                oom["flush"] += 1
+                continue
             for (rid, (a, b, r), _), pr in zip(chunk, torch.softmax(lg.float(), -1).cpu().tolist()):
                 out.setdefault(rid, []).append({"h": a, "t": b, "rel": r, "soft": [round(x, 5) for x in pr]})
             i += k
         return len(q)
+    def rel_step(w, ents, rels):
+        """The relation step's candidates; on running out of memory the schema
+        is split in halves and the halves' candidates joined ("oom" when one
+        relation alone does not fit)."""
+        cap.clear()
+        failed = False
+        try:
+            with torch.no_grad():
+                ex._relations(w, ents, rels, ex.top)
+        except torch.OutOfMemoryError:
+            failed = True
+        if not failed:
+            return dict(cap) if cap else None
+        cap.clear()
+        torch.cuda.empty_cache()
+        if len(rels) == 1:
+            return "oom"
+        oom["split"] += 1
+        h = len(rels) // 2
+        a, b = rel_step(w, ents, rels[:h]), rel_step(w, ents, rels[h:])
+        if a == "oom" or b == "oom":
+            return "oom"
+        if not a or not b:
+            return a or b
+        return {"nodes": a["nodes"], "cands": list(dict.fromkeys(list(a["cands"]) + list(b["cands"])))}
+
+    path = _corpus() / lists_name(args)
+    if args.shards > 1:
+        path = path.with_suffix(f".part{args.shard}.json")
+    prog = path.with_suffix(".progress.json")
+    start = 0
+    if prog.exists():                               # resume a shard that stopped: its saved records are kept
+        d = json.loads(prog.read_text())
+        if d.get("n_recs") == len(recs):
+            start, out, n_all, n_extra = d["next"], d["extra"], d["n_all"], d["n_extra"]
+            oom["skipped"] = d.get("skipped", [])
+            print(f"prep: resuming at {start:,}/{len(recs):,} from {prog.name}", flush=True)
     for n, rec in enumerate(recs):
+        if n < start:
+            continue
         parts = rec.get("participants") or []
         P = len(parts)
         w = {"tokens": rec["tokens"], "sentence_spans": rec["sentence_spans"]}
@@ -157,13 +212,17 @@ def prep(args) -> int:
             w["sentence_speakers"] = rec["speakers"]
         ents = [{"type": "entity", "mentions": [tuple(m) for m in ms]} for ms in rec["entities"][P:]]
         rels = [{"name": x, "description": bank.get(x, {}).get("description", "")} for x in schema_of(rec, schemas)]
-        cap.clear()
         t1 = time.time()
-        with torch.no_grad():
-            ex._relations(w, ents, rels, ex.top)
+        got = rel_step(w, ents, rels)
         t_rel += time.time() - t1
-        if not cap:
+        if got == "oom":
+            oom["skipped"].append(rec["id"])
+            print(f"prep: {rec['id']} skipped, out of memory on one relation ({len(rec['tokens'])} words, "
+                  f"{len(ents)} entities)", flush=True)
             continue
+        if not got:
+            continue
+        cap.update(got)
         # node index -> record entity index (speakers by name, entities by spans)
         span_ix = {tuple(sorted(tuple(m) for m in ms)): P + k for k, ms in enumerate(rec["entities"][P:])}
         node_ix = []
@@ -197,16 +256,26 @@ def prep(args) -> int:
             queue = []
         if n % 2000 == 0:
             print(f"prep {n}/{len(recs)}: {n_all:,} extractor candidates, {n_extra:,} unlabelled with V1c's "
-                  f"probabilities [{time.time() - t0:.0f}s: relation step {t_rel:.0f}s, V1c {t_ver:.0f}s]", flush=True)
+                  f"probabilities [{time.time() - t0:.0f}s: relation step {t_rel:.0f}s, V1c {t_ver:.0f}s; "
+                  f"out of memory: {oom['split']} schema splits, {oom['flush']} V1c halvings, "
+                  f"{len(oom['skipped'])} skipped]", flush=True)
+        if args.save_every and n % args.save_every == args.save_every - 1 and n < len(recs) - 1:
+            if queue:
+                t1 = time.time()
+                n_extra += flush(queue)
+                t_ver += time.time() - t1
+                queue = []
+            prog.write_text(json.dumps({"n_recs": len(recs), "next": n + 1, "extra": out, "n_all": n_all,
+                                        "n_extra": n_extra, "skipped": oom["skipped"]}))
     if queue:
         n_extra += flush(queue)
     ex._verify = orig
-    path = _corpus() / lists_name(args)
-    if args.shards > 1:
-        path = path.with_suffix(f".part{args.shard}.json")
-    path.write_text(json.dumps({"run": args.run, "verifier": v1c_of(args), "max_extra": args.max_extra, "extra": out}))
+    path.write_text(json.dumps({"run": args.run, "verifier": v1c_of(args), "max_extra": args.max_extra, "extra": out,
+                                "skipped": oom["skipped"]}))
+    prog.unlink(missing_ok=True)
     print(f"prep done: {len(recs):,} records, {n_all:,} extractor candidates, {n_extra:,} unlabelled kept "
-          f"-> {path}", flush=True)
+          f"-> {path}; out of memory: {oom['split']} schema splits, {oom['flush']} V1c halvings, "
+          f"{len(oom['skipped'])} records skipped {oom['skipped'][:10]}", flush=True)
     if args.shards > 1:
         return 0
     return _upload(args, path)
@@ -214,12 +283,13 @@ def prep(args) -> int:
 
 def merge_parts(args) -> int:
     path = _corpus() / lists_name(args)
-    out = {}
+    out, skipped = {}, []
     for k in range(args.shards):
         d = json.loads(path.with_suffix(f".part{k}.json").read_text())
         out.update(d["extra"])
+        skipped += d.get("skipped", [])
         meta = d
-    path.write_text(json.dumps({**meta, "extra": out}))
+    path.write_text(json.dumps({**meta, "extra": out, "skipped": skipped}))
     print(f"prep merged: {len(out):,} records with unlabelled candidates, "
           f"{sum(len(v) for v in out.values()):,} candidates -> {path}", flush=True)
     return _upload(args, path)
@@ -668,7 +738,8 @@ def train(args) -> int:
         bt, n2 = [], 0
         while buf and len(bt) < args.batch * 4:
             L = len(buf[-1]["ids"])
-            if bt and (len(bt) + 1) * max(L, *(len(p["ids"]) for p in bt)) ** 2 > budget2:
+            T = max(L, *(len(p["ids"]) for p in bt)) if bt else L
+            if bt and ((len(bt) + 1) * T ** 2 > budget2 or (args.max_tokens and (len(bt) + 1) * T > args.max_tokens)):
                 break
             bt.append(buf.pop())
         b = collate(bt, tok.pad_token_id, device)
@@ -835,6 +906,10 @@ def main() -> int:
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--shards", type=int, default=1)
     ap.add_argument("--merge", action="store_true", help="prep: merge the shards' parts (and upload)")
+    ap.add_argument("--mem-fraction", type=float, default=0.0, help="prep: this process's share of GPU memory")
+    ap.add_argument("--save-every", type=int, default=2000, help="prep: records between resume points")
+    ap.add_argument("--max-tokens", type=int, default=0,
+                    help="train: padded subwords per batch (0: the length-squared budget alone)")
     ap.add_argument("--rank", type=int, default=64)
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--head-lr", type=float, default=2e-4)
