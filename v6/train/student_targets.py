@@ -42,6 +42,8 @@ WINDOWS = DATA_DIR / "v6-corpus" / "student_windows.jsonl"
 TYPE_WINDOWS = DATA_DIR / "v6-corpus" / "student_windows_types.jsonl"
 OUT = DATA_DIR / "v6-eval" / "student-targets"
 FLOOR = -6.0
+# heads frozen since v7 (identical to v7's targets, checked 2026-11-17); entity and coreference heads changed in v8
+LINGUISTIC = ("pos", "morph", "lemma", "ner", "arc", "tree_head", "deprel", "srl_pred", "srl", "cls", "sentiment")
 TOPK = {"pos": 3, "morph": 5, "lemma": 5, "ner": 5, "ent": 5, "arc": 8, "deprel": 5}
 
 
@@ -58,8 +60,14 @@ def topk(p: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
 
 
 class Dumper:
-    def __init__(self, k):
+    def __init__(self, k, vectors: bool = False):
         self.k = k                       # a kniv_v7.Kniv over the teacher's graphs
+        # v8 teacher labels (teacher_labels.py): also the pair vectors of the
+        # pairs in ``vec_pairs`` and of facts with margin > -1, and the span
+        # words at kept spans' boundaries; the plain pass is kept in ``last``
+        self.vectors = vectors
+        self.vec_pairs: set = set()
+        self.last: dict = {}
 
     def window(self, w: dict) -> dict:
         from kniv_v7.runtime import (align, decode_trees, label_text, marker_input, span_candidates,
@@ -78,6 +86,7 @@ class Dumper:
              "word_mask": wm[None], "sent_of_word": sent[None],
              "sent_ids": np.arange(len(sp), dtype=np.int64)}
         o = dict(zip(k.meta["graphs"]["plain"]["outputs"], k.run("plain", **x)))
+        self.last = {"o": o, "sent": sent, "wm": wm, "W": W, "tokens": tokens, "sp": sp}
         t = {"W": W}
         for h in ("pos", "morph", "lemma", "ner", "ent"):
             t[h] = topk(softmax(o[h][0]), TOPK[h])
@@ -100,10 +109,13 @@ class Dumper:
         idx = np.argsort(-p, 1)[:, :8]
         t["coref"] = (np.take_along_axis(cand, idx, 1).astype(np.int16),
                       np.take_along_axis(p, idx, 1).astype(np.float16))
+        if self.vectors:            # v8 labels: the frozen linguistic heads are v7's targets, not dumped again
+            for h in LINGUISTIC:
+                t.pop(h, None)
         if w.get("types"):
             cands = span_candidates(sent, wm)
             if cands:
-                temb = k.label_emb([type_text({"name": n}) for n in w["types"]])
+                temb = k.label_emb([type_text(n if isinstance(n, dict) else {"name": n}) for n in w["types"]])
                 lg = k.run("span", span_words=o["span_words"],
                            start=np.asarray([s for s, _ in cands], dtype=np.int64),
                            end=np.asarray([e for _, e in cands], dtype=np.int64), type_emb=temb)[0]
@@ -112,6 +124,12 @@ class Dumper:
                 c = np.asarray(cands, dtype=np.int32)
                 t["span"] = (c[i, 0].astype(np.int16), c[i, 1].astype(np.int16), j.astype(np.int16),
                              m[i, j].astype(np.float16))
+                if self.vectors:            # span words at the kept spans' first and last words, at most 32
+                    ki = np.nonzero(m.max(1) > 0)[0]
+                    rows = sorted({int(c[q, 0]) for q in ki} | {int(c[q, 1]) for q in ki})[:32]
+                    if rows:
+                        t["span_vec"] = (np.asarray(rows, dtype=np.int16),
+                                         o["span_words"][0][rows].astype(np.float16))
         if w.get("entities") and w.get("relations"):
             t.update(self.relations(w, tokens, sp, first, W))
         return t
@@ -164,7 +182,7 @@ class Dumper:
                                     participants=parts[:n_part])
         E = len(spans)
         pairs = [(h, t) for h in range(E) for t in range(E) if h != t]
-        temb = k.label_emb([label_text({"name": n}) for n in w["relations"]])
+        temb = k.label_emb([label_text(n if isinstance(n, dict) else {"name": n}) for n in w["relations"]])
         logits, pair, labels, entv = k.run(
             "marker", rm_input_ids=np.asarray([rid], dtype=np.int64),
             rm_attention_mask=np.ones((1, len(rid)), dtype=np.int64),
@@ -179,6 +197,15 @@ class Dumper:
         tp = np.asarray([ids_[pairs[q][1]] for q in pi], dtype=np.int32)
         out = {"rel": (hp, tp, r.astype(np.int16), m[pi, r].astype(np.float16)),
                "rel_ents": np.asarray(ids_, dtype=np.int32)}
+        if self.vectors:                # pair vectors: the asked pairs and pairs with a fact above -1, the 48 best
+            want = {q for q, (h, t_) in enumerate(pairs) if (ids_[h], ids_[t_]) in self.vec_pairs}
+            want |= {int(q) for q in np.nonzero((m > -1.0).any(1))[0]}
+            want = sorted(want, key=lambda q: -float(m[q].max()))[:48]
+            if want:
+                want.sort()
+                out["pair_vec"] = (np.asarray([ids_[pairs[q][0]] for q in want], dtype=np.int32),
+                                   np.asarray([ids_[pairs[q][1]] for q in want], dtype=np.int32),
+                                   np.asarray(pair[want], dtype=np.float16))
         a_i, a_r = np.nonzero(m > -1.0)
         if len(a_i):
             pol, mod, hold, tim = k.run("attr", pair=pair[a_i], labels=labels[a_r], ent=entv)

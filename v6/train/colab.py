@@ -252,7 +252,8 @@ def build_bundles() -> tuple[Path, Path, str]:
                          corpus / "synth_her_case.json", corpus / "kg_short_d1.json",
                          corpus / "kg_d2_concepts.json", corpus / "kg_d3_forms.json",
                          corpus / "label_para.json", corpus / "verifier_v1.json",
-                         corpus / "verifier_v1c.json", corpus / "verifier_v3full.json")
+                         corpus / "verifier_v1c.json", corpus / "verifier_v3full.json",
+                         corpus / "teacher_label_extra.json")
              if p.exists()]
     # Keyed by every bundled side file's size and mtime: a name that ignores
     # one ships a stale copy of it (the Re-DocRED evidence was lost that way).
@@ -1146,6 +1147,14 @@ POST_JOBS = {
                   " > /content/prep-$k-retry$t.log 2>&1; done; done;"
                   " grep -hE 'prep done|skipped|Error' /content/prep-*.log | cut -c1-400;"
                   " python -m v6.train.verifier3 prep --run {ev} --data verifier_v3full.json --out-run {ev}-ver3f --shards 2 --merge --upload",
+    # plan r4 stage 6: v8 teacher labels, probe on both teachers: one process on a spread of each set, then two
+    # processes side by side (throughput and memory decide the processes per VM and the VMs)
+    "tlprobe": "for R in ultrabert-380m-v8p3-d123 deberta-v3-large-v8p3-d123; do"
+               " python -m v6.train.teacher_labels dump --run $R --set student --shard 0/390 --name tl-probe 2>&1 | grep -E '^  [0-9]|wrote|Error' | tail -3;"
+               " python -m v6.train.teacher_labels dump --run $R --set s4 --shard 0/75 --name tl-probe 2>&1 | grep -E '^  [0-9]|Error' | tail -1;"
+               " python -m v6.train.teacher_labels dump --run $R --set news --shard 0/34 --name tl-probe 2>&1 | grep -E '^  [0-9]|Error' | tail -1;"
+               " for k in 1 2; do python -m v6.train.teacher_labels dump --run $R --set student --shard $k/390 --name tl-probe"
+               " > /content/tl-$k.log 2>&1 & done; wait; tail -n 2 /content/tl-1.log /content/tl-2.log | grep -E '^  [0-9]|Error'; done",
     # the probe at batch 16 with at most 7,000 padded subwords per batch, then the full run only if its peak is under 34 GiB
     "ver3fd16t": "python -c \"import json,sys; d=json.load(open('data/v6-corpus/verifier_v3_lists-{ev}.json'));"
                  " n=len(d['extra']); print('lists', n, 'records'); sys.exit(0 if n > 30000 else 1)\" &&"
@@ -1156,7 +1165,7 @@ POST_JOBS = {
                  " python -m v6.train.verifier3 train --run {ev} --out-run {ev}-ver3f --data verifier_v3full.json"
                  " --candidates 760000 --batch 16 --max-tokens 7000 --upload",
 }
-POST_LINES = r"^eval \d|^prep|order check|done: best|probe done|training passes|best \(step|training examples|margins above|ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
+POST_LINES = r"^  [0-9][0-9,]*/|^eval \d|^prep|order check|done: best|probe done|training passes|best \(step|training examples|margins above|ERR |gum_coref|rel_offsets|wrote|uploaded|items in|macro F1|Few-NERD|held-out|dev before|\* best|Error|Traceback"
 
 POST_START = r'''
 import json, os, subprocess, sys

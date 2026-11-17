@@ -276,6 +276,8 @@ class Extractor:
             for k, (j, p) in enumerate(zip(idx, got)):
                 facts[j]["verifier"] = p
                 v = self._last_verdicts.get(k)
+                if v is not None:
+                    facts[j]["verdicts"] = [round(float(x), 4) for x in v]
                 if p is not None and v is not None:       # supported, not, negated, hedged
                     facts[j]["polarity"] = "negative" if v[2] > v[0] and v[2] >= v[3] else facts[j]["polarity"]
                     facts[j]["hedged"] = bool(v[3] > v[0] and v[3] > v[2])
